@@ -66,7 +66,15 @@ bun run reindex         # rebuild markdown from SQLite (recovery)
 bun run register-nia    # one-shot: create Nia local_folder source, store UUID in Doppler
 bun run rotate          # archive markdown older than RETENTION_MONTHS (no-op if blank)
 bun run typecheck       # tsc --noEmit
+bun test                # run the test suite in /tests
+bun run test:watch      # re-run tests on file change
 ```
+
+## Tests
+
+The suite in `tests/` covers the storage layer (messages, links, queue, crawl-state, sync-state), the markdown renderer, config validation, the classifier prompt builder, and the ingest hard-filter / classification routing logic. Each test file uses a fresh temp SQLite DB so suites do not pollute each other.
+
+GitHub Actions runs `bunx tsc --noEmit` and `bun test` on every push and pull request — see `.github/workflows/ci.yml`. The CI gate prevents regressions from landing on `main`.
 
 ## Verification (smoke test)
 
