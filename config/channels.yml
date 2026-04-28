@@ -1,0 +1,23 @@
+# Allowlist of Discord channels the bot is permitted to crawl.
+# Belt-and-suspenders: bot ignores any channel not listed here, even if it has View Channel permission in Discord.
+# Reload without restart: send SIGHUP to the running process.
+
+guild_id: "REPLACE_WITH_GUILD_ID"
+
+channels:
+  # Example entry — replace with real channel IDs from the club's server
+  - id: "111111111111111111"
+    name: "eboard-general"
+    classify: true                  # send through NVIDIA NIM classifier
+  - id: "222222222222222222"
+    name: "logistics"
+    classify: true
+    confidence_threshold: 0.6       # per-channel override
+  - id: "333333333333333333"
+    name: "announcements"
+    classify: false                 # skip classifier; treat all messages as operational
+
+defaults:
+  confidence_threshold: 0.5         # min confidence for operational/discussion to be written to markdown
+  reconcile_lookback: 200           # how many recent messages to refetch on each reconcile pass
+  reconcile_interval_hours: 6

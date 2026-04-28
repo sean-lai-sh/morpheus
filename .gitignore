@@ -1,0 +1,26 @@
+node_modules/
+bun.lockb
+bun.lock
+
+# Runtime data — local dev volume; production hosts use a persistent volume
+data/
+!data/.gitkeep
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets — never commit. Doppler injects at runtime.
+.env
+.env.local
+.env.*.local
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build output (we don't compile, but just in case)
+dist/
+build/
