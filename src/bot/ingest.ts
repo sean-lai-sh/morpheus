@@ -20,7 +20,7 @@ import type { Message, PartialMessage } from "discord.js";
 import { getChannel, isChannelAllowed, loadChannels } from "../config.ts";
 import { logger } from "../logger.ts";
 import { setOldestSeen, setNewestSeen } from "../storage/crawl-state.ts";
-import { extractLinks, persistLinks } from "../storage/links.ts";
+import { extractLinks, persistLinks, removeLinksNotIn } from "../storage/links.ts";
 import { appendBlock } from "../storage/markdown.ts";
 import {
   getMessage,
@@ -94,8 +94,8 @@ export async function ingestMessage(message: Message): Promise<IngestResult> {
   setOldestSeen(input.channelId, input.id);
   setNewestSeen(input.channelId, input.id);
 
-  // Link extraction is idempotent (UNIQUE constraint).
   const links = extractLinks(input.content);
+  if (edited) removeLinksNotIn(input.id, links.map((l) => l.url));
   persistLinks(input.id, input.channelId, links, input.createdAt);
 
   if (!inserted && !edited) return { action: "skipped", reason: "no-change" };
@@ -118,6 +118,32 @@ export async function ingestMessage(message: Message): Promise<IngestResult> {
   // Classifier-on path: enqueue and let the worker render later.
   enqueue(input.id);
   return { action: inserted ? "inserted" : "edited" };
+}
+
+/**
+ * Mark a message deleted by ID only (used by reconcile, which has no live Message object).
+ * Mirrors ingestDelete logic but looks up channel_id from SQLite.
+ */
+export async function ingestDeleteById(messageId: string): Promise<IngestResult> {
+  const stored = getMessage(messageId);
+  if (!stored) return { action: "skipped", reason: "not-in-db" };
+
+  if (!isChannelAllowed(stored.channel_id)) {
+    return { action: "skipped", reason: "channel-not-allowlisted" };
+  }
+
+  const wasNew = markDeleted(messageId);
+  if (!wasNew) return { action: "skipped", reason: "already-deleted-or-unknown" };
+
+  const eligible =
+    stored.classification === "operational" || stored.classification === "discussion";
+  if (!eligible) return { action: "skipped", reason: "not-markdown-eligible" };
+
+  const channel = getChannel(stored.channel_id);
+  if (!channel) return { action: "skipped", reason: "channel-config-missing" };
+  appendBlock(channel, loadChannels().guild_id, stored, "delete");
+  logger.info({ message_id: stored.id, channel_id: stored.channel_id }, "tombstone written");
+  return { action: "edited" };
 }
 
 /**

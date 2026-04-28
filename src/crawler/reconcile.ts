@@ -1,8 +1,9 @@
 import { ChannelType, type Client, type TextChannel } from "discord.js";
 import { loadChannels } from "../config.ts";
 import { logger } from "../logger.ts";
-import { ingestMessage } from "../bot/ingest.ts";
+import { ingestDeleteById, ingestMessage } from "../bot/ingest.ts";
 import { markReconciled } from "../storage/crawl-state.ts";
+import { nonDeletedMessageIds } from "../storage/messages.ts";
 
 /**
  * Refetch the last N messages of each allowlisted channel and re-ingest them.
@@ -28,6 +29,7 @@ async function reconcileChannel(ch: TextChannel, lookback: number): Promise<void
   let remaining = lookback;
   let cursor: string | undefined;
   let touched = 0;
+  const fetchedIds = new Set<string>();
   while (remaining > 0) {
     const limit = Math.min(100, remaining);
     const batch = await ch.messages.fetch({
@@ -36,6 +38,7 @@ async function reconcileChannel(ch: TextChannel, lookback: number): Promise<void
     });
     if (batch.size === 0) break;
     for (const m of batch.values()) {
+      fetchedIds.add(m.id);
       const r = await ingestMessage(m);
       if (r.action !== "skipped" && r.action !== "dropped") touched++;
       if (!cursor || BigInt(m.id) < BigInt(cursor)) cursor = m.id;
@@ -43,5 +46,24 @@ async function reconcileChannel(ch: TextChannel, lookback: number): Promise<void
     remaining -= batch.size;
     if (batch.size < limit) break;
   }
+
+  // Detect deletes: any non-deleted SQLite message within the fetched ID window
+  // that wasn't returned by the API was deleted during a gateway gap.
+  if (fetchedIds.size > 0) {
+    const ids = [...fetchedIds];
+    const minId = ids.reduce((a, b) => (BigInt(a) < BigInt(b) ? a : b));
+    const maxId = ids.reduce((a, b) => (BigInt(a) > BigInt(b) ? a : b));
+    const storedIds = nonDeletedMessageIds(ch.id);
+    let deleted = 0;
+    for (const storedId of storedIds) {
+      const n = BigInt(storedId);
+      if (n >= BigInt(minId) && n <= BigInt(maxId) && !fetchedIds.has(storedId)) {
+        await ingestDeleteById(storedId);
+        deleted++;
+      }
+    }
+    if (deleted > 0) logger.info({ channel_id: ch.id, deleted }, "reconcile: tombstoned deletes");
+  }
+
   logger.info({ channel_id: ch.id, touched, lookback }, "reconciled");
 }

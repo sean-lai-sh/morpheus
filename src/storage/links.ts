@@ -86,6 +86,19 @@ export function persistLinks(
   tx(links);
 }
 
+export function removeLinksNotIn(messageId: string, currentUrls: string[]): void {
+  const db = getDb();
+  if (currentUrls.length === 0) {
+    db.query(`DELETE FROM links WHERE message_id = ?`).run(messageId);
+    return;
+  }
+  const placeholders = currentUrls.map(() => "?").join(", ");
+  db.query(`DELETE FROM links WHERE message_id = ? AND url NOT IN (${placeholders})`).run(
+    messageId,
+    ...currentUrls,
+  );
+}
+
 export function linksForMessage(messageId: string): LinkRow[] {
   return getDb()
     .query<LinkRow, [string]>(

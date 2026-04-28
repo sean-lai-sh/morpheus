@@ -138,7 +138,13 @@ async function applyResults(
 
     const fresh = getMessage(msg.id);
     if (!fresh) continue;
-    appendBlock(channel, cfg.guild_id, fresh, "create");
+    if (fresh.deleted_at) {
+      // Deleted while awaiting classification; write tombstone now since ingestDelete
+      // skipped it when classification was still null.
+      appendBlock(channel, cfg.guild_id, fresh, "delete");
+      continue;
+    }
+    appendBlock(channel, cfg.guild_id, fresh, fresh.edited_at ? "edit" : "create");
   }
 }
 

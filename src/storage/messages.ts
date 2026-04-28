@@ -120,6 +120,15 @@ export function countMessages(): number {
   );
 }
 
+export function nonDeletedMessageIds(channelId: string): string[] {
+  return getDb()
+    .query<{ id: string }, [string]>(
+      `SELECT id FROM messages WHERE channel_id = ? AND deleted_at IS NULL`,
+    )
+    .all(channelId)
+    .map((r) => r.id);
+}
+
 export function lastMessageAt(): number | null {
   return (
     getDb()
