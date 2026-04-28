@@ -1,6 +1,6 @@
 # Morpheus
 
-Discord intelligence bot for the club's eboard. Part 1: authenticated crawler that ingests allowed channels into a Nia `local_folder` source for retrieval. Part 2 (separate work) layers an agentic interface on top.
+Discord intelligence bot for the club's eboard.
 
 See `/Users/sean_lai/.claude/plans/serialized-tickling-scott.md` for the full design.
 
