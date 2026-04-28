@@ -1,4 +1,4 @@
-import { Events, type Client, type Message, type PartialMessage } from "discord.js";
+import { ChannelType, Events, type Client, type Message, type PartialMessage } from "discord.js";
 import { logger } from "../logger.ts";
 import { ingestDelete, ingestMessage } from "./ingest.ts";
 
@@ -16,12 +16,25 @@ async function fetchIfPartial(
   return message;
 }
 
+/** Returns the parent text channel id if the message is in a thread, else null. */
+function threadParentId(message: Message): string | null {
+  const t = message.channel.type;
+  if (
+    t === ChannelType.PublicThread ||
+    t === ChannelType.PrivateThread ||
+    t === ChannelType.AnnouncementThread
+  ) {
+    return (message.channel as { parentId?: string | null }).parentId ?? null;
+  }
+  return null;
+}
+
 export function registerLiveHandlers(client: Client): void {
   client.on(Events.MessageCreate, async (m) => {
     try {
       const full = await fetchIfPartial(m);
       if (!full) return;
-      const r = await ingestMessage(full);
+      const r = await ingestMessage(full, threadParentId(full));
       if (r.action === "inserted" || r.action === "edited") {
         logger.debug(
           { message_id: full.id, channel_id: full.channelId, op: "live", action: r.action },
@@ -37,7 +50,7 @@ export function registerLiveHandlers(client: Client): void {
     try {
       const full = await fetchIfPartial(m as Message | PartialMessage);
       if (!full) return;
-      const r = await ingestMessage(full);
+      const r = await ingestMessage(full, threadParentId(full));
       logger.debug(
         { message_id: full.id, channel_id: full.channelId, op: "live", action: r.action },
         "edit ingested",

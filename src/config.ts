@@ -24,6 +24,7 @@ const channelSchema = z.object({
   name: z.string().min(1),
   classify: z.boolean().default(true),
   confidence_threshold: z.number().min(0).max(1).optional(),
+  include_threads: z.boolean().default(false),
 });
 
 const channelsConfigSchema = z.object({
@@ -47,7 +48,10 @@ export type ChannelsConfig = z.infer<typeof channelsConfigSchema>;
 
 let _env: Env | undefined;
 let _channels: ChannelsConfig | undefined;
-const channelsPath = resolve(process.cwd(), "config/channels.yml");
+// Resolved lazily so tests that chdir before calling loadChannels() get the right file.
+function channelsPath(): string {
+  return resolve(process.cwd(), "config/channels.yml");
+}
 
 export function loadEnv(): Env {
   if (_env) return _env;
@@ -65,7 +69,7 @@ export function loadEnv(): Env {
 
 export function loadChannels(): ChannelsConfig {
   if (_channels) return _channels;
-  const raw = readFileSync(channelsPath, "utf8");
+  const raw = readFileSync(channelsPath(), "utf8");
   const parsed = channelsConfigSchema.safeParse(parseYaml(raw));
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `  ${i.path.join(".")}: ${i.message}`).join("\n");
@@ -78,6 +82,11 @@ export function loadChannels(): ChannelsConfig {
 export function reloadChannels(): ChannelsConfig {
   _channels = undefined;
   return loadChannels();
+}
+
+/** Test-only: clear the channels cache so the next loadChannels() re-reads from disk. */
+export function resetChannelsForTest(): void {
+  _channels = undefined;
 }
 
 export function isChannelAllowed(channelId: string): boolean {

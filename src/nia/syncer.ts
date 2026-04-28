@@ -1,11 +1,9 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { logger } from "../logger.ts";
-import {
-  getSyncState,
-  markSyncFailure,
-  markSyncSuccess,
-} from "../storage/sync-state.ts";
+import { getSyncState, markSyncFailure, markSyncSuccess } from "../storage/sync-state.ts";
 import { DISCORD_DIR } from "../storage/markdown.ts";
-import { NiaApiError, syncSource } from "./client.ts";
+import { NiaApiError, pushFile } from "./client.ts";
 
 const POLL_INTERVAL_MS = 60_000;
 const ALERT_AFTER_FAILURES = 10;
@@ -26,7 +24,7 @@ async function flushIfDirty(): Promise<void> {
       );
       return;
     }
-    await syncSource(sourceId);
+    await pushAll(sourceId);
     markSyncSuccess(DISCORD_DIR);
     logger.info({ source_id: sourceId }, "nia sync succeeded");
   } catch (err) {
@@ -45,6 +43,22 @@ async function flushIfDirty(): Promise<void> {
   } finally {
     inFlight = false;
   }
+}
+
+/** Push every .md file in data/discord/ to the Nia filesystem namespace. */
+async function pushAll(sourceId: string): Promise<void> {
+  let files: string[];
+  try {
+    files = readdirSync(DISCORD_DIR).filter((f) => f.endsWith(".md"));
+  } catch {
+    logger.warn({ dir: DISCORD_DIR }, "nia sync: data/discord/ not readable; skipping");
+    return;
+  }
+  for (const file of files) {
+    const content = readFileSync(resolve(DISCORD_DIR, file), "utf8");
+    await pushFile(sourceId, file, content);
+  }
+  logger.info({ source_id: sourceId, files: files.length }, "nia: pushed all markdown files");
 }
 
 /**

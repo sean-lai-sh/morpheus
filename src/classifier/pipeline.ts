@@ -2,6 +2,7 @@ import { getChannel, loadChannels, type ChannelsConfig } from "../config.ts";
 import { logger } from "../logger.ts";
 import { appendBlock } from "../storage/markdown.ts";
 import {
+  effectiveChannelId,
   getMessage,
   setClassification,
   type Classification,
@@ -59,7 +60,7 @@ async function drainOnce(): Promise<boolean> {
       removeFromQueue([row.message_id]);
       continue;
     }
-    const channel = getChannel(msg.channel_id);
+    const channel = getChannel(effectiveChannelId(msg));
     const channelName = channel?.name ?? msg.channel_id;
     items.push({
       index: i,
@@ -131,7 +132,7 @@ async function applyResults(
 
     if (c.label === "noise") continue; // SQLite-only, no markdown
 
-    const channel = getChannel(msg.channel_id);
+    const channel = getChannel(effectiveChannelId(msg));
     if (!channel) continue;
     const threshold = channel.confidence_threshold ?? cfg.defaults.confidence_threshold;
     if (c.confidence < threshold) continue;

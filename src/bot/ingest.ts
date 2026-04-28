@@ -11,10 +11,10 @@
  *   5. Classifier worker (separate path) updates classification later and
  *      then triggers an append/rerender.
  *
- * For Part 1 step 4 (Discord client wiring), classifier is bypassed —
- * everything markdown-eligible is treated as operational so we can verify
- * the end-to-end pipeline before NIM is in place. The bypass is gated by
- * BYPASS_CLASSIFIER (set in src/index.ts based on the run subcommand).
+ * Thread messages: pass parentChannelId when the message is in a thread of an
+ * allowed channel that has include_threads:true. The message is stored under its
+ * own thread channel_id in SQLite but uses the parent's config for classify
+ * settings and markdown output.
  */
 import type { Message, PartialMessage } from "discord.js";
 import { getChannel, isChannelAllowed, loadChannels } from "../config.ts";
@@ -23,6 +23,7 @@ import { setOldestSeen, setNewestSeen } from "../storage/crawl-state.ts";
 import { extractLinks, persistLinks, removeLinksNotIn } from "../storage/links.ts";
 import { appendBlock } from "../storage/markdown.ts";
 import {
+  effectiveChannelId,
   getMessage,
   markDeleted,
   setClassification,
@@ -47,7 +48,6 @@ function hardFilterReason(message: Message | PartialMessage): string | null {
 }
 
 function authorName(message: Message | PartialMessage): string {
-  // Prefer guild nickname, fall back to global username, fall back to id.
   const member = message.member;
   if (member?.displayName) return member.displayName;
   if (message.author?.username) return message.author.username;
@@ -55,9 +55,13 @@ function authorName(message: Message | PartialMessage): string {
   return message.author?.id ?? "unknown";
 }
 
-function fetchedToInput(message: Message): {
+function fetchedToInput(
+  message: Message,
+  parentChannelId?: string | null,
+): {
   id: string;
   channelId: string;
+  parentChannelId: string | null;
   authorId: string;
   authorName: string;
   content: string;
@@ -67,6 +71,7 @@ function fetchedToInput(message: Message): {
   return {
     id: message.id,
     channelId: message.channelId,
+    parentChannelId: parentChannelId ?? null,
     authorId: message.author?.id ?? "unknown",
     authorName: authorName(message),
     content: message.content ?? "",
@@ -80,19 +85,35 @@ export interface IngestResult {
   reason?: string;
 }
 
-export async function ingestMessage(message: Message): Promise<IngestResult> {
-  if (!isChannelAllowed(message.channelId)) {
+/**
+ * Ingest a message. For thread messages, pass parentChannelId (the parent text
+ * channel's id) — the parent must be allowlisted with include_threads:true.
+ */
+export async function ingestMessage(
+  message: Message,
+  parentChannelId?: string | null,
+): Promise<IngestResult> {
+  const configChannelId = parentChannelId ?? message.channelId;
+
+  if (parentChannelId) {
+    // Thread: parent must be allowlisted AND have include_threads:true
+    const parent = getChannel(parentChannelId);
+    if (!parent?.include_threads) {
+      return { action: "skipped", reason: "channel-not-allowlisted" };
+    }
+  } else if (!isChannelAllowed(message.channelId)) {
     return { action: "skipped", reason: "channel-not-allowlisted" };
   }
+
   const dropReason = hardFilterReason(message);
   if (dropReason) return { action: "dropped", reason: dropReason };
 
-  const input = fetchedToInput(message);
+  const input = fetchedToInput(message, parentChannelId);
   const { inserted, edited } = upsertMessage(input);
 
-  // Always update crawl cursors (even on edits — newest_seen tracks any seen id).
-  setOldestSeen(input.channelId, input.id);
-  setNewestSeen(input.channelId, input.id);
+  // Crawl cursors track under the effective (config) channel id.
+  setOldestSeen(configChannelId, input.id);
+  setNewestSeen(configChannelId, input.id);
 
   const links = extractLinks(input.content);
   if (edited) removeLinksNotIn(input.id, links.map((l) => l.url));
@@ -100,12 +121,10 @@ export async function ingestMessage(message: Message): Promise<IngestResult> {
 
   if (!inserted && !edited) return { action: "skipped", reason: "no-change" };
 
-  const channel = getChannel(input.channelId);
+  const channel = getChannel(configChannelId);
   if (!channel) return { action: "skipped", reason: "channel-config-missing" };
 
-  // Classifier routing
   if (!channel.classify || bypassClassifier) {
-    // Mark as operational deterministically; render markdown immediately.
     setClassification(input.id, "operational", 1.0);
     const guildId = loadChannels().guild_id;
     const fresh = getMessage(input.id);
@@ -115,20 +134,19 @@ export async function ingestMessage(message: Message): Promise<IngestResult> {
     return { action: inserted ? "inserted" : "edited" };
   }
 
-  // Classifier-on path: enqueue and let the worker render later.
   enqueue(input.id);
   return { action: inserted ? "inserted" : "edited" };
 }
 
 /**
  * Mark a message deleted by ID only (used by reconcile, which has no live Message object).
- * Mirrors ingestDelete logic but looks up channel_id from SQLite.
  */
 export async function ingestDeleteById(messageId: string): Promise<IngestResult> {
   const stored = getMessage(messageId);
   if (!stored) return { action: "skipped", reason: "not-in-db" };
 
-  if (!isChannelAllowed(stored.channel_id)) {
+  const effId = effectiveChannelId(stored);
+  if (!isChannelAllowed(effId)) {
     return { action: "skipped", reason: "channel-not-allowlisted" };
   }
 
@@ -139,7 +157,7 @@ export async function ingestDeleteById(messageId: string): Promise<IngestResult>
     stored.classification === "operational" || stored.classification === "discussion";
   if (!eligible) return { action: "skipped", reason: "not-markdown-eligible" };
 
-  const channel = getChannel(stored.channel_id);
+  const channel = getChannel(effId);
   if (!channel) return { action: "skipped", reason: "channel-config-missing" };
   appendBlock(channel, loadChannels().guild_id, stored, "delete");
   logger.info({ message_id: stored.id, channel_id: stored.channel_id }, "tombstone written");
@@ -147,27 +165,30 @@ export async function ingestDeleteById(messageId: string): Promise<IngestResult>
 }
 
 /**
- * Handle a delete/partial-delete event. Mark in SQLite + append tombstone if
- * the message had previously been written to markdown.
+ * Handle a delete/partial-delete event from the gateway.
  */
 export async function ingestDelete(message: Message | PartialMessage): Promise<IngestResult> {
   if (!message.id) return { action: "skipped", reason: "no-id" };
-  if (!isChannelAllowed(message.channelId ?? "")) {
+
+  // For the allowlist check we need the effective channel; look it up from the DB
+  // (the stored row has parent_channel_id set for thread messages).
+  const stored = getMessage(message.id);
+  const effId = stored ? effectiveChannelId(stored) : (message.channelId ?? "");
+
+  if (!isChannelAllowed(effId)) {
     return { action: "skipped", reason: "channel-not-allowlisted" };
   }
 
   const wasNew = markDeleted(message.id);
   if (!wasNew) return { action: "skipped", reason: "already-deleted-or-unknown" };
 
-  const stored = getMessage(message.id);
   if (!stored) return { action: "skipped", reason: "not-in-db" };
 
-  // Only emit a tombstone if the message was eligible for markdown
   const eligible =
     stored.classification === "operational" || stored.classification === "discussion";
   if (!eligible) return { action: "skipped", reason: "not-markdown-eligible" };
 
-  const channel = getChannel(stored.channel_id);
+  const channel = getChannel(effId);
   if (!channel) return { action: "skipped", reason: "channel-config-missing" };
   appendBlock(channel, loadChannels().guild_id, stored, "delete");
   logger.info({ message_id: stored.id, channel_id: stored.channel_id }, "tombstone written");

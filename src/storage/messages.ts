@@ -5,6 +5,8 @@ export type Classification = "operational" | "discussion" | "noise";
 export interface MessageRow {
   id: string;
   channel_id: string;
+  /** Set when the message is from a thread; the parent text channel's id. */
+  parent_channel_id: string | null;
   author_id: string;
   author_name: string;
   content: string;
@@ -19,11 +21,18 @@ export interface MessageRow {
 export interface MessageInput {
   id: string;
   channelId: string;
+  /** Set for thread messages; the parent text channel's id. */
+  parentChannelId?: string | null;
   authorId: string;
   authorName: string;
   content: string;
   createdAt: number;
   editedAt?: number | null;
+}
+
+/** Returns the channel id to use for config/markdown lookups (parent for threads). */
+export function effectiveChannelId(row: MessageRow): string {
+  return row.parent_channel_id ?? row.channel_id;
 }
 
 export function upsertMessage(input: MessageInput): { inserted: boolean; edited: boolean } {
@@ -36,11 +45,12 @@ export function upsertMessage(input: MessageInput): { inserted: boolean; edited:
 
   if (!existing) {
     db.query(
-      `INSERT INTO messages (id, channel_id, author_id, author_name, content, created_at, edited_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (id, channel_id, parent_channel_id, author_id, author_name, content, created_at, edited_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.id,
       input.channelId,
+      input.parentChannelId ?? null,
       input.authorId,
       input.authorName,
       input.content,
@@ -106,10 +116,12 @@ export function recentMessages(channelId: string, limit: number): MessageRow[] {
 
 export function messagesForChannelAsc(channelId: string): MessageRow[] {
   return getDb()
-    .query<MessageRow, [string]>(
-      `SELECT * FROM messages WHERE channel_id = ? ORDER BY created_at ASC, id ASC`,
+    .query<MessageRow, [string, string]>(
+      `SELECT * FROM messages
+       WHERE channel_id = ? OR parent_channel_id = ?
+       ORDER BY created_at ASC, id ASC`,
     )
-    .all(channelId);
+    .all(channelId, channelId);
 }
 
 export function countMessages(): number {
@@ -122,10 +134,11 @@ export function countMessages(): number {
 
 export function nonDeletedMessageIds(channelId: string): string[] {
   return getDb()
-    .query<{ id: string }, [string]>(
-      `SELECT id FROM messages WHERE channel_id = ? AND deleted_at IS NULL`,
+    .query<{ id: string }, [string, string]>(
+      `SELECT id FROM messages
+       WHERE (channel_id = ? OR parent_channel_id = ?) AND deleted_at IS NULL`,
     )
-    .all(channelId)
+    .all(channelId, channelId)
     .map((r) => r.id);
 }
 

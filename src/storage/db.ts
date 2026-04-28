@@ -18,6 +18,7 @@ export function getDb(): Database {
   db.exec("PRAGMA foreign_keys = ON");
   db.exec("PRAGMA busy_timeout = 5000");
   migrate(db);
+  migrateAlter(db);
   _db = db;
   return db;
 }
@@ -38,6 +39,7 @@ function migrate(db: Database): void {
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT PRIMARY KEY,
       channel_id TEXT NOT NULL,
+      parent_channel_id TEXT,
       author_id TEXT NOT NULL,
       author_name TEXT NOT NULL,
       content TEXT NOT NULL,
@@ -50,6 +52,8 @@ function migrate(db: Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_messages_channel_created
       ON messages(channel_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_messages_parent_channel
+      ON messages(parent_channel_id);
     CREATE INDEX IF NOT EXISTS idx_messages_classification
       ON messages(classification);
 
@@ -89,6 +93,12 @@ function migrate(db: Database): void {
       consecutive_failures INTEGER NOT NULL DEFAULT 0
     );
   `);
+}
+
+function migrateAlter(db: Database): void {
+  // Add parent_channel_id for thread support on existing databases.
+  try { db.exec(`ALTER TABLE messages ADD COLUMN parent_channel_id TEXT`); } catch { /* already exists */ }
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_parent_channel ON messages(parent_channel_id)`); } catch { /* already exists */ }
 }
 
 export function vacuum(): void {

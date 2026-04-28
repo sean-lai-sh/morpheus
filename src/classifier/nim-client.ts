@@ -1,9 +1,10 @@
+import OpenAI, { APIError, RateLimitError } from "openai";
 import { logger } from "../logger.ts";
 import { batchResponseSchema, buildPrompt, type BatchItem, type BatchResponse } from "./prompt.ts";
 import { nimLimiter } from "./ratelimit.ts";
 
-const NIM_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
-const MODEL = process.env.NIM_MODEL ?? "nvidia/llama-3.1-nemotron-ultra-253b-v1";
+const BASE_URL = "https://integrate.api.nvidia.com/v1";
+const MODEL = process.env.NIM_MODEL ?? "z-ai/glm4.7";
 
 export class NimRateLimitError extends Error {
   constructor(public retryAfterMs: number) {
@@ -17,18 +18,13 @@ export class NimTransientError extends Error {
   }
 }
 
-interface NimChoiceMessage {
-  role: string;
-  content: string;
-}
-interface NimChatResponse {
-  choices: Array<{ message: NimChoiceMessage }>;
-}
-
-function getApiKey(): string {
-  const key = process.env.NVIDIA_API_KEY;
-  if (!key) throw new Error("NVIDIA_API_KEY not set in environment");
-  return key;
+let _client: OpenAI | null = null;
+function getClient(): OpenAI {
+  if (_client) return _client;
+  const apiKey = process.env.NVIDIA_API_KEY;
+  if (!apiKey) throw new Error("NVIDIA_API_KEY not set in environment");
+  _client = new OpenAI({ apiKey, baseURL: BASE_URL });
+  return _client;
 }
 
 /**
@@ -39,16 +35,10 @@ export async function classifyBatch(items: BatchItem[]): Promise<BatchResponse> 
   if (items.length === 0) return { classifications: [] };
   const { system, user } = buildPrompt(items);
 
-  const result = await nimLimiter.schedule(async () => {
+  const content = await nimLimiter.schedule(async () => {
     const t0 = Date.now();
-    const res = await fetch(NIM_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${getApiKey()}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
+    try {
+      const completion = await getClient().chat.completions.create({
         model: MODEL,
         temperature: 0,
         max_tokens: 1024,
@@ -57,28 +47,24 @@ export async function classifyBatch(items: BatchItem[]): Promise<BatchResponse> 
           { role: "system", content: system },
           { role: "user", content: user },
         ],
-      }),
-    });
-    const latency = Date.now() - t0;
-
-    if (res.status === 429) {
-      const retryAfter = Number(res.headers.get("retry-after") ?? "5") * 1000;
-      logger.warn({ status: 429, latency_ms: latency }, "NIM 429");
-      throw new NimRateLimitError(retryAfter);
+      });
+      logger.debug({ model: MODEL, latency_ms: Date.now() - t0 }, "NIM response received");
+      return completion.choices[0]?.message?.content ?? "";
+    } catch (err) {
+      const latency = Date.now() - t0;
+      if (err instanceof RateLimitError) {
+        const retryAfter = Number(err.headers.get("retry-after") ?? "5") * 1000;
+        logger.warn({ status: 429, latency_ms: latency }, "NIM 429");
+        throw new NimRateLimitError(retryAfter);
+      }
+      if (err instanceof APIError && (err.status ?? 0) >= 500) {
+        logger.warn({ status: err.status, latency_ms: latency }, "NIM 5xx");
+        throw new NimTransientError(`NIM ${err.status}`, err.status ?? 500);
+      }
+      throw err;
     }
-    if (res.status >= 500) {
-      const body = await res.text();
-      logger.warn({ status: res.status, latency_ms: latency, body: body.slice(0, 300) }, "NIM 5xx");
-      throw new NimTransientError(`NIM ${res.status}`, res.status);
-    }
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`NIM ${res.status}: ${body.slice(0, 500)}`);
-    }
-    return (await res.json()) as NimChatResponse;
   });
 
-  const content = result.choices[0]?.message?.content ?? "";
   const parsed = parseStrictJson(content);
   const validated = batchResponseSchema.safeParse(parsed);
   if (!validated.success) {
@@ -96,7 +82,7 @@ function parseStrictJson(content: string): unknown {
   try {
     return JSON.parse(raw);
   } catch {
-    // Try to recover the first {...} block.
+    // Try to recover the first {...} block (handles leading chain-of-thought text).
     const m = raw.match(/\{[\s\S]*\}/);
     if (!m) throw new Error(`could not parse JSON from NIM response: ${raw.slice(0, 200)}`);
     return JSON.parse(m[0]);

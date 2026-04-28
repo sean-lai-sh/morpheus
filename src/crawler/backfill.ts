@@ -1,4 +1,4 @@
-import { ChannelType, type Client, type TextChannel } from "discord.js";
+import { ChannelType, type AnyThreadChannel, type Client, type TextChannel } from "discord.js";
 import { loadChannels, type Channel } from "../config.ts";
 import { logger } from "../logger.ts";
 import { ingestMessage } from "../bot/ingest.ts";
@@ -75,7 +75,84 @@ export async function backfillChannel(
     if (batch.size < PAGE_SIZE) {
       log.info({ pages, ingested }, "tail page reached; backfill complete");
       markBackfillComplete(channel.id);
-      return { channelId: channel.id, ingested, pages, complete: true };
+      break;
+    }
+  }
+
+  // Thread backfill: active + archived, if the channel opts in.
+  if (channel.include_threads) {
+    let threadIngested = 0;
+    try {
+      const active = await ch.threads.fetchActive();
+      for (const [, t] of active.threads) {
+        const r = await backfillThread(t, channel);
+        threadIngested += r.ingested;
+      }
+      // Paginate archived threads
+      let hasMore = true;
+      let before: string | undefined;
+      while (hasMore) {
+        const archived = await ch.threads.fetchArchived({ fetchAll: false, limit: 100, before });
+        for (const [, t] of archived.threads) {
+          const r = await backfillThread(t, channel);
+          threadIngested += r.ingested;
+        }
+        hasMore = archived.hasMore;
+        const ids = [...archived.threads.keys()];
+        before = ids[ids.length - 1];
+      }
+    } catch (err) {
+      logger.warn({ err, channel_id: channel.id }, "thread backfill failed");
+    }
+    if (threadIngested > 0) {
+      log.info({ thread_ingested: threadIngested }, "thread messages backfilled");
+    }
+  }
+
+  return { channelId: channel.id, ingested, pages, complete: true };
+}
+
+/** Backfill all messages in a single thread, using the parent channel's config. */
+async function backfillThread(
+  thread: AnyThreadChannel,
+  parentChannel: Channel,
+): Promise<{ ingested: number; pages: number }> {
+  const startState = getState(thread.id);
+  if (startState?.last_backfill_complete) {
+    logger.info({ thread_id: thread.id, thread_name: thread.name }, "thread backfill already complete; skipping");
+    return { ingested: 0, pages: 0 };
+  }
+
+  let cursor: string | undefined = startState?.oldest_seen_id ?? undefined;
+  let ingested = 0;
+  let pages = 0;
+  const log = logger.child({ thread_id: thread.id, thread_name: thread.name, op: "backfill-thread" });
+
+  while (true) {
+    const batch = await thread.messages.fetch({
+      limit: PAGE_SIZE,
+      ...(cursor ? { before: cursor } : {}),
+    });
+    pages++;
+    if (batch.size === 0) {
+      log.info({ pages, ingested }, "thread backfill complete");
+      markBackfillComplete(thread.id);
+      return { ingested, pages };
+    }
+    let oldestInBatch: string | undefined;
+    for (const m of batch.values()) {
+      const r = await ingestMessage(m, parentChannel.id);
+      if (r.action === "inserted" || r.action === "edited") ingested++;
+      if (!oldestInBatch || BigInt(m.id) < BigInt(oldestInBatch)) oldestInBatch = m.id;
+    }
+    if (oldestInBatch) {
+      setOldestSeen(thread.id, oldestInBatch);
+      cursor = oldestInBatch;
+    }
+    if (batch.size < PAGE_SIZE) {
+      log.info({ pages, ingested }, "thread tail reached; backfill complete");
+      markBackfillComplete(thread.id);
+      return { ingested, pages };
     }
   }
 }

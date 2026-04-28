@@ -1,27 +1,17 @@
 import { logger } from "../logger.ts";
 
 /**
- * Minimal client for Nia's REST API. Endpoints used:
- *   POST {NIA_BASE_URL}/v1/sources              — create a local_folder source
- *   POST {NIA_BASE_URL}/v1/sources/{id}/sync    — trigger re-index
+ * Minimal client for Nia's REST API (base: https://apigcp.trynia.ai/v2).
  *
- * Auth: Bearer NIA_API_KEY.
- *
- * Note: Nia's exact wire format may evolve; if a request fails with 4xx, log
- * the response body for diagnosis rather than swallowing it. The syncer treats
- * 5xx and network errors as transient (debounce retry); 4xx surfaces to the
- * operator.
+ * Endpoints used:
+ *   POST {base}/fs                          — create filesystem namespace
+ *   PUT  {base}/fs/{id}/files               — push a file into the namespace
+ *   GET  {base}/fs                          — list owned namespaces
  */
 
-export interface CreateLocalFolderRequest {
-  name: string;
-  path: string;
-}
-
-export interface CreatedSource {
+export interface CreatedFilesystem {
   id: string;
   name: string;
-  path: string;
 }
 
 export class NiaApiError extends Error {
@@ -35,7 +25,7 @@ export class NiaApiError extends Error {
 }
 
 function baseUrl(): string {
-  return process.env.NIA_BASE_URL ?? "https://api.trynia.ai";
+  return (process.env.NIA_BASE_URL ?? "https://apigcp.trynia.ai/v2").replace(/\/$/, "");
 }
 
 function apiKey(): string {
@@ -61,24 +51,35 @@ async function request(method: string, path: string, body?: unknown): Promise<Re
   return res;
 }
 
-export async function createLocalFolderSource(
-  req: CreateLocalFolderRequest,
-): Promise<CreatedSource> {
-  // Per Nia docs: POST /v1/sources with { resource_type: "local_folder", path, name }
-  const res = await request("POST", "/v1/sources", {
-    resource_type: "local_folder",
-    name: req.name,
-    path: req.path,
-  });
-  const data = (await res.json()) as { id?: string; uuid?: string; name?: string; path?: string };
-  const id = data.id ?? data.uuid;
+/** Create a bare filesystem namespace. Returns the source id. */
+export async function createFilesystem(
+  name: string,
+  description?: string,
+): Promise<CreatedFilesystem> {
+  const res = await request("POST", "/fs", { name, description });
+  const data = (await res.json()) as { id?: string; source_id?: string; name?: string };
+  const id = data.id ?? data.source_id;
   if (!id) {
-    throw new Error(`Nia did not return a source id; response: ${JSON.stringify(data).slice(0, 300)}`);
+    throw new Error(
+      `Nia did not return a filesystem id; response: ${JSON.stringify(data).slice(0, 300)}`,
+    );
   }
-  return { id, name: data.name ?? req.name, path: data.path ?? req.path };
+  return { id, name: data.name ?? name };
 }
 
-export async function syncSource(sourceId: string): Promise<void> {
-  await request("POST", `/v1/sources/${encodeURIComponent(sourceId)}/sync`);
-  logger.debug({ source_id: sourceId }, "nia sync triggered");
+/**
+ * Push a single file into a filesystem namespace.
+ * Nia overwrites existing content at the same path — safe to call repeatedly.
+ */
+export async function pushFile(
+  sourceId: string,
+  filePath: string,
+  content: string,
+): Promise<void> {
+  await request("PUT", `/fs/${encodeURIComponent(sourceId)}/files`, {
+    path: filePath,
+    body: content,
+    encoding: "utf8",
+  });
+  logger.debug({ source_id: sourceId, path: filePath }, "nia file pushed");
 }
