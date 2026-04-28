@@ -19,7 +19,6 @@ function setupFixture(yamlBody: string): string {
 describe("config/channels.yml validation", () => {
   test("parses a valid file", async () => {
     const dir = setupFixture(`
-guild_id: "987654321098765432"
 channels:
   - id: "111111111111111111"
     name: "eboard"
@@ -35,7 +34,6 @@ defaults:
       // Force a fresh module instance so the cached _channels is empty.
       const mod = await import(`../src/config.ts?cb=${Math.random()}`);
       const cfg = mod.loadChannels();
-      expect(cfg.guild_id).toBe("987654321098765432");
       expect(cfg.channels.length).toBe(1);
       expect(cfg.channels[0].classify).toBe(true);
     } finally {
@@ -43,26 +41,8 @@ defaults:
     }
   });
 
-  test("rejects non-numeric guild_id", async () => {
-    const dir = setupFixture(`
-guild_id: "not-a-number"
-channels:
-  - id: "111111111111111111"
-    name: "eboard"
-`);
-    const original = process.cwd();
-    process.chdir(dir);
-    try {
-      const mod = await import(`../src/config.ts?cb=${Math.random()}`);
-      expect(() => mod.loadChannels()).toThrow(/guild_id/);
-    } finally {
-      process.chdir(original);
-    }
-  });
-
   test("rejects empty channels list", async () => {
     const dir = setupFixture(`
-guild_id: "987654321098765432"
 channels: []
 `);
     const original = process.cwd();

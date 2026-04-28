@@ -88,6 +88,11 @@ export function resetChannelsForTest(): void {
   _channels = undefined;
 }
 
+/** Test-only: clear the env cache so the next loadEnv() re-reads from process.env. */
+export function resetEnvForTest(): void {
+  _env = undefined;
+}
+
 export function isChannelAllowed(channelId: string): boolean {
   return loadChannels().channels.some((c) => c.id === channelId);
 }
