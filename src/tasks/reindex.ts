@@ -1,4 +1,4 @@
-import { loadChannels } from "../config.ts";
+import { loadChannels, loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 import { rerenderChannel } from "../storage/markdown.ts";
 
@@ -7,7 +7,7 @@ export function reindexAll(): void {
   const cfg = loadChannels();
   let total = 0;
   for (const channel of cfg.channels) {
-    const written = rerenderChannel(channel, cfg.guild_id);
+    const written = rerenderChannel(channel, loadEnv().DISCORD_GUILD_ID);
     total += written;
     logger.info({ channel_id: channel.id, written }, "channel re-rendered");
   }

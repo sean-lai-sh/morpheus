@@ -17,7 +17,7 @@
  * settings and markdown output.
  */
 import type { Message, PartialMessage } from "discord.js";
-import { getChannel, isChannelAllowed, loadChannels } from "../config.ts";
+import { getChannel, isChannelAllowed, loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 import { setOldestSeen, setNewestSeen } from "../storage/crawl-state.ts";
 import { extractLinks, persistLinks, removeLinksNotIn } from "../storage/links.ts";
@@ -126,7 +126,7 @@ export async function ingestMessage(
 
   if (!channel.classify || bypassClassifier) {
     setClassification(input.id, "operational", 1.0);
-    const guildId = loadChannels().guild_id;
+    const guildId = loadEnv().DISCORD_GUILD_ID;
     const fresh = getMessage(input.id);
     if (fresh) {
       appendBlock(channel, guildId, fresh, inserted ? "create" : "edit");
@@ -159,7 +159,7 @@ export async function ingestDeleteById(messageId: string): Promise<IngestResult>
 
   const channel = getChannel(effId);
   if (!channel) return { action: "skipped", reason: "channel-config-missing" };
-  appendBlock(channel, loadChannels().guild_id, stored, "delete");
+  appendBlock(channel, loadEnv().DISCORD_GUILD_ID, stored, "delete");
   logger.info({ message_id: stored.id, channel_id: stored.channel_id }, "tombstone written");
   return { action: "edited" };
 }
@@ -190,7 +190,7 @@ export async function ingestDelete(message: Message | PartialMessage): Promise<I
 
   const channel = getChannel(effId);
   if (!channel) return { action: "skipped", reason: "channel-config-missing" };
-  appendBlock(channel, loadChannels().guild_id, stored, "delete");
+  appendBlock(channel, loadEnv().DISCORD_GUILD_ID, stored, "delete");
   logger.info({ message_id: stored.id, channel_id: stored.channel_id }, "tombstone written");
   return { action: "edited" };
 }

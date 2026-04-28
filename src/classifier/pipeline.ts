@@ -1,4 +1,4 @@
-import { getChannel, loadChannels, type ChannelsConfig } from "../config.ts";
+import { getChannel, loadChannels, loadEnv, type ChannelsConfig } from "../config.ts";
 import { logger } from "../logger.ts";
 import { appendBlock } from "../storage/markdown.ts";
 import {
@@ -142,10 +142,10 @@ async function applyResults(
     if (fresh.deleted_at) {
       // Deleted while awaiting classification; write tombstone now since ingestDelete
       // skipped it when classification was still null.
-      appendBlock(channel, cfg.guild_id, fresh, "delete");
+      appendBlock(channel, loadEnv().DISCORD_GUILD_ID, fresh, "delete");
       continue;
     }
-    appendBlock(channel, cfg.guild_id, fresh, fresh.edited_at ? "edit" : "create");
+    appendBlock(channel, loadEnv().DISCORD_GUILD_ID, fresh, fresh.edited_at ? "edit" : "create");
   }
 }
 

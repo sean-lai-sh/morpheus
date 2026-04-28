@@ -28,7 +28,6 @@ const channelSchema = z.object({
 });
 
 const channelsConfigSchema = z.object({
-  guild_id: z.string().regex(/^\d+$/),
   channels: z.array(channelSchema).min(1),
   defaults: z
     .object({

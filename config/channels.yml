@@ -2,8 +2,6 @@
 # Belt-and-suspenders: bot ignores any channel not listed here, even if it has View Channel permission in Discord.
 # Reload without restart: send SIGHUP to the running process.
 
-guild_id: "REPLACE_WITH_GUILD_ID"
-
 channels:
   # Example entry — replace with real channel IDs from the club's server
   - id: "111111111111111111"
