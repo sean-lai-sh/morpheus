@@ -44,7 +44,7 @@ doppler secrets set LOG_LEVEL=info HEALTH_PORT=8080 --config dev
 
 ### 3. Discord bot
 
-1. https://discord.com/developers/applications → new app → Bot tab
+1. Go to <https://discord.com/developers/applications> → new app → Bot tab
 2. Enable privileged intents: `Message Content`, `Server Members`
 3. Reset token, copy to Doppler as `DISCORD_TOKEN`
 4. OAuth2 URL Generator → scopes `bot` + `applications.commands`, perms `View Channels` + `Read Message History`

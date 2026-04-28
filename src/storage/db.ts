@@ -2,14 +2,17 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-const DB_PATH = resolve(process.cwd(), "data/morpheus.db");
+function dbPath(): string {
+  return process.env.MORPHEUS_DB_PATH ?? resolve(process.cwd(), "data/morpheus.db");
+}
 
 let _db: Database | undefined;
 
 export function getDb(): Database {
   if (_db) return _db;
-  mkdirSync(dirname(DB_PATH), { recursive: true });
-  const db = new Database(DB_PATH, { create: true });
+  const path = dbPath();
+  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  const db = new Database(path, { create: true });
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA synchronous = NORMAL");
   db.exec("PRAGMA foreign_keys = ON");
@@ -20,6 +23,12 @@ export function getDb(): Database {
 }
 
 export function closeDb(): void {
+  _db?.close();
+  _db = undefined;
+}
+
+/** Test-only: close the current handle so the next getDb() call opens a fresh DB. */
+export function resetDbForTest(): void {
   _db?.close();
   _db = undefined;
 }
