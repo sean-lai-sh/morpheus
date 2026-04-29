@@ -3,19 +3,86 @@
 # Reload without restart: send SIGHUP to the running process.
 
 channels:
-  # Example entry — replace with real channel IDs from the club's server
-  - id: "111111111111111111"
-    name: "eboard-general"
-    classify: true                  # send through NVIDIA NIM classifier
-  - id: "222222222222222222"
-    name: "logistics"
+  # ── Eboard ────────────────────────────────────────────────────────────────────
+  - id: "1203562091982622814"
+    name: "eboard-chat"
     classify: true
-    confidence_threshold: 0.6       # per-channel override
-  - id: "333333333333333333"
-    name: "announcements"
-    classify: false                 # skip classifier; treat all messages as operational
+    include_threads: true
+  - id: "1203562091982622816"
+    name: "server-notifications"
+    classify: true
+  - id: "1203562091982622818"
+    name: "sponsorships"
+    classify: true
+  - id: "1203564141277741116"
+    name: "newsletter-threads"
+    classify: true
+  - id: "1465123883337121886"
+    name: "random-links"
+    classify: true
+
+  # ── Eboard Teams ──────────────────────────────────────────────────────────────
+  - id: "1203562092213305365"
+    name: "leadership-team"
+    classify: true
+    include_threads: true
+  - id: "1203562092213305366"
+    name: "marketing-and-content-team"
+    classify: true
+    include_threads: true
+  - id: "1203562092213305367"
+    name: "mentorship-program-team"
+    classify: true
+    include_threads: true
+  - id: "1203562092213305368"
+    name: "tech-treks-team"
+    classify: true
+    include_threads: true
+  - id: "1203562092213305369"
+    name: "startup-week-team"
+    classify: true
+    include_threads: true
+  - id: "1203562092213305370"
+    name: "events-team"
+    classify: true
+    include_threads: true
+  - id: "1203562092574277674"
+    name: "dev-team"
+    classify: true
+    include_threads: true
+  - id: "1251980067475558451"
+    name: "website"
+    classify: true
+  - id: "1342643518795026482"
+    name: "reimbursements-receipts"
+    classify: true
+  - id: "1374088390445764749"
+    name: "treasurer-things"
+    classify: true
+  - id: "1427762204798615552"
+    name: "retreat"
+    classify: true
+  - id: "1462441453543227413"
+    name: "outreach"
+    classify: true
+    include_threads: true
+  - id: "1468671187893620934"
+    name: "merch"
+    classify: true
+  - id: "1488621346328936528"
+    name: "eng-team"
+    classify: true
+    include_threads: true
+  - id: "1496612453684089004"
+    name: "buildathon-team"
+    classify: true
+    include_threads: true
+  - id: "1496925237546192957"
+    name: "zo-computer-collab"
+    classify: true
+    include_threads: true
 
 defaults:
-  confidence_threshold: 0.5         # min confidence for operational/discussion to be written to markdown
-  reconcile_lookback: 200           # how many recent messages to refetch on each reconcile pass
+  confidence_threshold: 0.5
+  reconcile_lookback: 200
   reconcile_interval_hours: 6

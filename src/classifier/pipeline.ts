@@ -106,6 +106,8 @@ async function drainOnce(): Promise<boolean> {
     }
     logger.error({ err }, "classifier batch failed; bumping attempts");
     bumpAttempts([...messageById.values()].map((m) => m.id));
+    const maxAttempts = Math.max(...rows.map((r) => r.attempts + 1));
+    const backoff = BACKOFF_MS[Math.min(maxAttempts - 1, BACKOFF_MS.length - 1)] ?? 30_000;
     for (const r of rows) {
       if (r.attempts + 1 >= MAX_ATTEMPTS) {
         logger.error(
@@ -115,7 +117,7 @@ async function drainOnce(): Promise<boolean> {
         removeFromQueue([r.message_id]);
       }
     }
-    await sleep(BACKOFF_MS[0] ?? 2_000);
+    await sleep(backoff);
     return true;
   }
 }

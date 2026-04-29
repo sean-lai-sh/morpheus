@@ -37,6 +37,14 @@ export function setClassifierBypass(value: boolean): void {
 }
 
 /** Hard filters that don't need an LLM. Returns reason if dropped. */
+// Matches a string that is nothing but a bare media URL (gif, image, video).
+// If there's any surrounding text, the message goes to NIM instead.
+const PURE_MEDIA_URL =
+  /^https?:\/\/\S+\.(?:gif|png|jpg|jpeg|webp|mp4|mov|tenor\.com\/\S+|giphy\.com\/\S+)$/i;
+
+// Matches a string that is nothing but Unicode emoji and/or Discord custom emoji — no words.
+const PURE_EMOJI = /^(?:\p{Emoji_Presentation}|\p{Extended_Pictographic}|<a?:[a-zA-Z0-9_]+:\d+>|\s)+$/u;
+
 function hardFilterReason(message: Message | PartialMessage): string | null {
   if (message.author?.bot) return "bot-author";
   const content = (message.content ?? "").trim();
@@ -44,6 +52,9 @@ function hardFilterReason(message: Message | PartialMessage): string | null {
   const stripped = content.replace(/<@!?\d+>|<@&\d+>|<#\d+>|<a?:[a-zA-Z0-9_]+:\d+>/g, "").trim();
   const hasGdrive = /\b(drive|docs|sheets|slides|forms)\.google\.com\//i.test(content);
   if (!hasGdrive && stripped.length < 6) return "too-short";
+  // Pure media posts and pure emoji have no text signal — skip NIM entirely.
+  if (PURE_MEDIA_URL.test(content)) return "pure-media";
+  if (PURE_EMOJI.test(content)) return "pure-emoji";
   return null;
 }
 

@@ -167,10 +167,14 @@ export async function backfillAll(
 ): Promise<void> {
   const cfg = loadChannels();
   const channels = filter ? cfg.channels.filter(filter) : cfg.channels;
+  const total = channels.length;
   const concurrency = 2;
   const queue = [...channels];
   let active = 0;
+  let done = 0;
   const errors: unknown[] = [];
+
+  process.stderr.write(`\nBackfilling ${total} channels (concurrency ${concurrency})\n\n`);
 
   await new Promise<void>((resolve) => {
     const tick = () => {
@@ -179,14 +183,19 @@ export async function backfillAll(
         const c = queue.shift()!;
         active++;
         backfillChannel(client, c)
-          .then((r) =>
-            logger.info(
-              { channel_id: r.channelId, ingested: r.ingested, pages: r.pages },
-              "backfill done",
-            ),
-          )
+          .then((r) => {
+            done++;
+            const tag = r.ingested === 0 ? "·" : "✓";
+            const label = `#${c.name}`.padEnd(32);
+            const msgs = `${r.ingested} msgs`.padStart(8);
+            const pages = `${r.pages}p`.padStart(4);
+            process.stderr.write(`  [${String(done).padStart(2)}/${total}] ${tag} ${label} ${msgs}  ${pages}\n`);
+            logger.info({ channel_id: r.channelId, ingested: r.ingested, pages: r.pages }, "backfill done");
+          })
           .catch((err) => {
+            done++;
             errors.push(err);
+            process.stderr.write(`  [${String(done).padStart(2)}/${total}] ✗ #${c.name}\n`);
             logger.error({ err, channel_id: c.id }, "backfill failed");
           })
           .finally(() => {
@@ -198,6 +207,7 @@ export async function backfillAll(
     tick();
   });
 
+  process.stderr.write(`\n  ${done - errors.length}/${total} done, ${errors.length} failed\n\n`);
   if (errors.length > 0) {
     logger.warn({ count: errors.length }, "some channels failed to backfill");
   }

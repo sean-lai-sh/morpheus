@@ -48,8 +48,16 @@ export async function classifyBatch(items: BatchItem[]): Promise<BatchResponse> 
           { role: "user", content: user },
         ],
       });
-      logger.debug({ model: MODEL, latency_ms: Date.now() - t0 }, "NIM response received");
-      return completion.choices[0]?.message?.content ?? "";
+      const finishReason = completion.choices[0]?.finish_reason;
+      const content = completion.choices[0]?.message?.content ?? "";
+      logger.debug({ model: MODEL, latency_ms: Date.now() - t0, finish_reason: finishReason }, "NIM response received");
+      if (!content.trim()) {
+        throw new NimTransientError(
+          `NIM returned empty content (finish_reason=${finishReason})`,
+          500,
+        );
+      }
+      return content;
     } catch (err) {
       const latency = Date.now() - t0;
       if (err instanceof RateLimitError) {

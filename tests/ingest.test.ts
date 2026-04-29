@@ -93,10 +93,37 @@ describe("bot/ingest hard filters", () => {
     expect(r.action).toBe("inserted");
   });
 
+  test("drops bare gif URL", async () => {
+    const { ingestMessage } = await import("../src/bot/ingest.ts");
+    const r = await ingestMessage(
+      buildMessage({ id: "i4a", channelId: "111", content: "https://example.com/reaction.gif" }),
+    );
+    expect(r.action).toBe("dropped");
+    expect(r.reason).toBe("pure-media");
+  });
+
+  test("drops pure emoji message", async () => {
+    const { ingestMessage } = await import("../src/bot/ingest.ts");
+    const r = await ingestMessage(
+      buildMessage({ id: "i4b", channelId: "111", content: "🔥🔥🔥" }),
+    );
+    expect(r.action).toBe("dropped");
+    expect(r.reason).toBe("pure-emoji");
+  });
+
+  test("keeps gif URL that has surrounding text", async () => {
+    const { ingestMessage, setClassifierBypass } = await import("../src/bot/ingest.ts");
+    setClassifierBypass(true);
+    const r = await ingestMessage(
+      buildMessage({ id: "i4c", channelId: "111", content: "us at the retreat https://example.com/funny.gif" }),
+    );
+    expect(r.action).toBe("inserted");
+  });
+
   test("skips messages from non-allowlisted channels", async () => {
     const { ingestMessage } = await import("../src/bot/ingest.ts");
     const r = await ingestMessage(
-      buildMessage({ id: "i4", channelId: "999", content: "long enough message" }),
+      buildMessage({ id: "i4d", channelId: "999", content: "long enough message" }),
     );
     expect(r.action).toBe("skipped");
     expect(r.reason).toBe("channel-not-allowlisted");

@@ -82,6 +82,14 @@ async function main(): Promise<void> {
       const client = await loginClient();
       try {
         await backfillAll(client);
+        if (classifierEnabled) {
+          const { queueDepth } = await import("./storage/queue.ts");
+          process.stderr.write(`\nDraining classifier queue (${queueDepth()} messages)...\n`);
+          startClassifierWorker();
+          while (queueDepth() > 0) await new Promise((r) => setTimeout(r, 2_000));
+          await stopClassifierWorker();
+          process.stderr.write(`Classifier done.\n\n`);
+        }
         await flushNiaNow();
       } finally {
         await shutdownClient();
