@@ -11,7 +11,11 @@ export async function handleReactionChange(
   const full = reaction.partial ? await reaction.fetch() : reaction;
   const message = full.message.partial ? await full.message.fetch() : full.message;
 
-  if (!isChannelAllowed(message.channelId)) return;
+  // For thread messages, message.channelId is the thread id (not in channels.yml).
+  // Look up the stored row first so we can use effectiveChannelId for the allowlist check.
+  const stored = getMessage(message.id);
+  const lookupChannelId = stored ? effectiveChannelId(stored) : message.channelId;
+  if (!isChannelAllowed(lookupChannelId)) return;
 
   const map: Record<string, number> = {};
   for (const [, r] of message.reactions.cache) {
@@ -21,7 +25,6 @@ export async function handleReactionChange(
 
   setReactions(message.id, map);
 
-  const stored = getMessage(message.id);
   if (!stored) return;
   const channel = getChannel(effectiveChannelId(stored));
   if (!channel) return;

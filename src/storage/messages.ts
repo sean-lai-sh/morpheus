@@ -72,13 +72,22 @@ export function upsertMessage(input: MessageInput): { inserted: boolean; edited:
     return { inserted: true, edited: false };
   }
 
-  // Treat as edit only when content actually changed.
+  // Always refresh metadata: author_name and thread fields may have been populated after
+  // the initial insert (e.g. refresh-members backfill, or pre-migration rows lacking thread_id).
+  db.query(
+    `UPDATE messages SET author_name = ?, parent_channel_id = ?, thread_id = ?, thread_name = ? WHERE id = ?`,
+  ).run(
+    input.authorName,
+    input.parentChannelId ?? null,
+    input.threadId ?? null,
+    input.threadName ?? null,
+    input.id,
+  );
+
   const contentChanged = existing.content !== input.content;
   if (contentChanged) {
     db.query(
-      `UPDATE messages
-       SET content = ?, edited_at = ?
-       WHERE id = ?`,
+      `UPDATE messages SET content = ?, edited_at = ? WHERE id = ?`,
     ).run(input.content, input.editedAt ?? Date.now(), input.id);
   }
   return { inserted: false, edited: contentChanged };

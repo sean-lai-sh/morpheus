@@ -83,3 +83,13 @@ export async function pushFile(
   });
   logger.debug({ source_id: sourceId, path: filePath }, "nia file pushed");
 }
+
+/**
+ * Delete a single file from a filesystem namespace.
+ * Used to prune paths that no longer exist locally (e.g. after channel rename or layout migration).
+ * For a full migration (flat → hierarchical), prefer re-registering with a fresh source ID instead.
+ */
+export async function deleteFile(sourceId: string, filePath: string): Promise<void> {
+  await request("DELETE", `/fs/${encodeURIComponent(sourceId)}/files`, { path: filePath });
+  logger.debug({ source_id: sourceId, path: filePath }, "nia file deleted");
+}
