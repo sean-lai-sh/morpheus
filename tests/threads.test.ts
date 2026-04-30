@@ -158,7 +158,7 @@ describe("thread support: spawn node (thread_id)", () => {
       threadName: "Planning Session",
     });
     const starter = getMessage("thread-100b")!;
-    expect(starter.id).toBe(starter.thread_id);
+    expect(starter.thread_id).toBe(starter.id);
   });
 
   test("thread_name is stored and retrievable", async () => {
