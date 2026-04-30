@@ -1,7 +1,6 @@
 import { loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 import { lastMessageAt } from "../storage/messages.ts";
-import { queueDepth } from "../storage/queue.ts";
 import { DISCORD_DIR } from "../storage/markdown.ts";
 import { getSyncState } from "../storage/sync-state.ts";
 
@@ -19,7 +18,7 @@ export function startHealthServer(): void {
         const body = {
           ok: true,
           last_message_at: lastMessageAt(),
-          classifier_queue_depth: queueDepth(),
+
           nia_dirty: Boolean(sync.dirty),
           nia_last_sync_at: sync.last_sync_at,
           nia_consecutive_failures: sync.consecutive_failures,

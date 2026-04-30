@@ -4,19 +4,14 @@
 
 channels:
   # ── Eboard ────────────────────────────────────────────────────────────────────
+  - id: "1415331664284094474"
+    name: "Announcements"
+    classify: true
+    include_threads: true
   - id: "1203562091982622814"
     name: "eboard-chat"
     classify: true
     include_threads: true
-  - id: "1203562091982622816"
-    name: "server-notifications"
-    classify: true
-  - id: "1203562091982622818"
-    name: "sponsorships"
-    classify: true
-  - id: "1203564141277741116"
-    name: "newsletter-threads"
-    classify: true
   - id: "1465123883337121886"
     name: "random-links"
     classify: true

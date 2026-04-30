@@ -1,12 +1,10 @@
 import { reloadChannels } from "./config.ts";
 import { logger } from "./logger.ts";
 import { closeDb, getDb } from "./storage/db.ts";
-import { setClassifierBypass } from "./bot/ingest.ts";
 import { loginClient, shutdownClient } from "./bot/client.ts";
 import { backfillAll } from "./crawler/backfill.ts";
 import { reconcileAll } from "./crawler/reconcile.ts";
 import { startLive, stopLive } from "./crawler/live.ts";
-import { startClassifierWorker, stopClassifierWorker } from "./classifier/pipeline.ts";
 import { flushNow as flushNiaNow, startSyncer, stopSyncer } from "./nia/syncer.ts";
 import { startHealthServer, stopHealthServer } from "./http/health.ts";
 
@@ -53,25 +51,16 @@ async function main(): Promise<void> {
   // Ensure DB is initialized (runs migrations) before any handler touches it.
   getDb();
 
-  // Classifier is bypassed (every eligible message → operational) when
-  // NVIDIA_API_KEY is missing. Lets you run the bot end-to-end in dev before
-  // wiring NIM credentials.
-  const classifierEnabled = Boolean(process.env.NVIDIA_API_KEY);
-  setClassifierBypass(!classifierEnabled);
-  logger.info({ classifier: classifierEnabled ? "enabled" : "bypassed" }, "classifier mode");
-
   switch (cmd) {
     case "live": {
       const client = await loginClient();
       startLive(client);
-      if (classifierEnabled) startClassifierWorker();
       startSyncer();
       startHealthServer();
       installShutdown(async () => {
         stopLive();
         stopSyncer();
         stopHealthServer();
-        await stopClassifierWorker();
         await flushNiaNow();
         await shutdownClient();
       });
@@ -82,14 +71,6 @@ async function main(): Promise<void> {
       const client = await loginClient();
       try {
         await backfillAll(client);
-        if (classifierEnabled) {
-          const { queueDepth } = await import("./storage/queue.ts");
-          process.stderr.write(`\nDraining classifier queue (${queueDepth()} messages)...\n`);
-          startClassifierWorker();
-          while (queueDepth() > 0) await new Promise((r) => setTimeout(r, 2_000));
-          await stopClassifierWorker();
-          process.stderr.write(`Classifier done.\n\n`);
-        }
         await flushNiaNow();
       } finally {
         await shutdownClient();

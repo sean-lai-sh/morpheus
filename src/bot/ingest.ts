@@ -5,16 +5,11 @@
  *   1. Hard pre-filter (drop bots, drop trivially-small messages, etc.)
  *   2. Upsert into SQLite (source of truth)
  *   3. Extract + persist GDrive links
- *   4. Decide markdown eligibility:
- *        - if channel.classify=false → write as operational
- *        - else → enqueue for classifier; do NOT write markdown yet
- *   5. Classifier worker (separate path) updates classification later and
- *      then triggers an append/rerender.
+ *   4. Mark operational and write to markdown (NIA indexes all content at query time)
  *
  * Thread messages: pass parentChannelId when the message is in a thread of an
  * allowed channel that has include_threads:true. The message is stored under its
- * own thread channel_id in SQLite but uses the parent's config for classify
- * settings and markdown output.
+ * own thread channel_id in SQLite but uses the parent's config for markdown output.
  */
 import type { Message, PartialMessage } from "discord.js";
 import { getChannel, isChannelAllowed, loadEnv } from "../config.ts";
@@ -29,21 +24,11 @@ import {
   setClassification,
   upsertMessage,
 } from "../storage/messages.ts";
-import { enqueue } from "../storage/queue.ts";
 
-let bypassClassifier = false;
-export function setClassifierBypass(value: boolean): void {
-  bypassClassifier = value;
-}
-
-/** Hard filters that don't need an LLM. Returns reason if dropped. */
 // Matches a string that is nothing but a bare media URL (gif, image, video).
-// If there's any surrounding text, the message goes to NIM instead.
+// If there's any surrounding text, the message goes through normally.
 const PURE_MEDIA_URL =
   /^https?:\/\/\S+\.(?:gif|png|jpg|jpeg|webp|mp4|mov|tenor\.com\/\S+|giphy\.com\/\S+)$/i;
-
-// Matches a string that is nothing but Unicode emoji and/or Discord custom emoji — no words.
-const PURE_EMOJI = /^(?:\p{Emoji_Presentation}|\p{Extended_Pictographic}|<a?:[a-zA-Z0-9_]+:\d+>|\s)+$/u;
 
 function hardFilterReason(message: Message | PartialMessage): string | null {
   if (message.author?.bot) return "bot-author";
@@ -52,9 +37,7 @@ function hardFilterReason(message: Message | PartialMessage): string | null {
   const stripped = content.replace(/<@!?\d+>|<@&\d+>|<#\d+>|<a?:[a-zA-Z0-9_]+:\d+>/g, "").trim();
   const hasGdrive = /\b(drive|docs|sheets|slides|forms)\.google\.com\//i.test(content);
   if (!hasGdrive && stripped.length < 6) return "too-short";
-  // Pure media posts and pure emoji have no text signal — skip NIM entirely.
   if (PURE_MEDIA_URL.test(content)) return "pure-media";
-  if (PURE_EMOJI.test(content)) return "pure-emoji";
   return null;
 }
 
@@ -135,17 +118,13 @@ export async function ingestMessage(
   const channel = getChannel(configChannelId);
   if (!channel) return { action: "skipped", reason: "channel-config-missing" };
 
-  if (!channel.classify || bypassClassifier) {
-    setClassification(input.id, "operational", 1.0);
-    const guildId = loadEnv().DISCORD_GUILD_ID;
-    const fresh = getMessage(input.id);
-    if (fresh) {
-      appendBlock(channel, guildId, fresh, inserted ? "create" : "edit");
-    }
-    return { action: inserted ? "inserted" : "edited" };
+  // All messages are marked operational; NIA handles noise at query time.
+  setClassification(input.id, "operational", 1.0);
+  const guildId = loadEnv().DISCORD_GUILD_ID;
+  const fresh = getMessage(input.id);
+  if (fresh) {
+    appendBlock(channel, guildId, fresh, inserted ? "create" : "edit");
   }
-
-  enqueue(input.id);
   return { action: inserted ? "inserted" : "edited" };
 }
 
@@ -163,10 +142,6 @@ export async function ingestDeleteById(messageId: string): Promise<IngestResult>
 
   const wasNew = markDeleted(messageId);
   if (!wasNew) return { action: "skipped", reason: "already-deleted-or-unknown" };
-
-  const eligible =
-    stored.classification === "operational" || stored.classification === "discussion";
-  if (!eligible) return { action: "skipped", reason: "not-markdown-eligible" };
 
   const channel = getChannel(effId);
   if (!channel) return { action: "skipped", reason: "channel-config-missing" };
@@ -194,10 +169,6 @@ export async function ingestDelete(message: Message | PartialMessage): Promise<I
   if (!wasNew) return { action: "skipped", reason: "already-deleted-or-unknown" };
 
   if (!stored) return { action: "skipped", reason: "not-in-db" };
-
-  const eligible =
-    stored.classification === "operational" || stored.classification === "discussion";
-  if (!eligible) return { action: "skipped", reason: "not-markdown-eligible" };
 
   const channel = getChannel(effId);
   if (!channel) return { action: "skipped", reason: "channel-config-missing" };

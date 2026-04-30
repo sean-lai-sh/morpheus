@@ -99,6 +99,10 @@ function migrateAlter(db: Database): void {
   // Add parent_channel_id for thread support on existing databases.
   try { db.exec(`ALTER TABLE messages ADD COLUMN parent_channel_id TEXT`); } catch { /* already exists */ }
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_parent_channel ON messages(parent_channel_id)`); } catch { /* already exists */ }
+  // Add reactions column for emoji reaction metadata.
+  try { db.exec(`ALTER TABLE messages ADD COLUMN reactions TEXT`); } catch { /* already exists */ }
+  // NIM classifier removed; clean up queue table on existing DBs.
+  try { db.exec(`DROP TABLE IF EXISTS classification_queue`); } catch { /* ignore */ }
 }
 
 export function vacuum(): void {

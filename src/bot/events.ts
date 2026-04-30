@@ -1,6 +1,7 @@
 import { ChannelType, Events, type Client, type Message, type PartialMessage } from "discord.js";
 import { logger } from "../logger.ts";
 import { ingestDelete, ingestMessage } from "./ingest.ts";
+import { handleReactionChange } from "./reactions.ts";
 
 async function fetchIfPartial(
   message: Message | PartialMessage,
@@ -69,6 +70,22 @@ export function registerLiveHandlers(client: Client): void {
       );
     } catch (err) {
       logger.error({ err, id: m.id }, "MessageDelete handler error");
+    }
+  });
+
+  client.on(Events.MessageReactionAdd, async (reaction, user) => {
+    try {
+      await handleReactionChange(reaction, user);
+    } catch (err) {
+      logger.error({ err, id: reaction.message.id }, "ReactionAdd handler error");
+    }
+  });
+
+  client.on(Events.MessageReactionRemove, async (reaction, user) => {
+    try {
+      await handleReactionChange(reaction, user);
+    } catch (err) {
+      logger.error({ err, id: reaction.message.id }, "ReactionRemove handler error");
     }
   });
 }

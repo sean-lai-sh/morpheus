@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import type { Channel } from "../config.ts";
 import type { LinkRow } from "./links.ts";
 import { linksForMessage } from "./links.ts";
-import type { Classification, MessageRow } from "./messages.ts";
+import type { MessageRow } from "./messages.ts";
 import { messagesForChannelAsc } from "./messages.ts";
 import { markDirty } from "./sync-state.ts";
 
@@ -28,7 +28,7 @@ function fileHeader(channel: Pick<Channel, "id" | "name">, guildId: string): str
     `# #${channel.name}`,
     `- channel_id: ${channel.id}`,
     `- guild_id: ${guildId}`,
-    `- indexing_rules: operational+discussion only; edits append; deletes tombstone`,
+    `- indexing_rules: all messages; edits append; deletes tombstone`,
     ``,
     `---`,
     ``,
@@ -47,18 +47,19 @@ function fmtTimestamp(ms: number): string {
   return new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 }
 
-function classificationLine(
-  classification: Classification | null,
-  confidence: number | null,
-): string | null {
-  if (!classification) return null;
-  const c = confidence != null ? ` (${confidence.toFixed(2)})` : "";
-  return `**Classification**: ${classification}${c}`;
-}
 
 function linksLine(links: LinkRow[]): string | null {
   if (links.length === 0) return null;
   return `**Links**: ${links.map((l) => l.url).join(" ")}`;
+}
+
+function reactionsLine(reactions: string | null): string | null {
+  if (!reactions) return null;
+  const map = JSON.parse(reactions) as Record<string, number>;
+  const parts = Object.entries(map)
+    .filter(([, n]) => n > 0)
+    .map(([e, n]) => `${e}×${n}`);
+  return parts.length ? `**Reactions**: ${parts.join(" ")}` : null;
 }
 
 export interface RenderInput {
@@ -88,8 +89,8 @@ export function renderBlock(input: RenderInput): string {
   ];
   const ll = linksLine(links);
   if (ll) lines.push(ll);
-  const cl = classificationLine(msg.classification, msg.classification_confidence);
-  if (cl) lines.push(cl);
+  const rl = reactionsLine(msg.reactions);
+  if (rl) lines.push(rl);
   lines.push("", "");
   return lines.join("\n");
 }
@@ -129,9 +130,6 @@ export function rerenderChannel(channel: Pick<Channel, "id" | "name">, guildId: 
   const rows = messagesForChannelAsc(channel.id);
   let written = 0;
   for (const msg of rows) {
-    const eligible =
-      msg.classification === "operational" || msg.classification === "discussion";
-    if (!eligible) continue;
     const links = linksForMessage(msg.id);
     body += renderBlock({ msg, links, variant: "create" });
     if (msg.deleted_at) body += renderBlock({ msg, links: [], variant: "delete" });

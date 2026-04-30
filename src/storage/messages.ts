@@ -16,6 +16,8 @@ export interface MessageRow {
   classification: Classification | null;
   classification_confidence: number | null;
   classified_at: number | null;
+  /** JSON map of emoji name → reaction count, e.g. {"👍":3,"✅":1} */
+  reactions: string | null;
 }
 
 export interface MessageInput {
@@ -148,4 +150,10 @@ export function lastMessageAt(): number | null {
       .query<{ ts: number | null }, []>(`SELECT MAX(created_at) AS ts FROM messages`)
       .get()?.ts ?? null
   );
+}
+
+export function setReactions(id: string, reactions: Record<string, number>): void {
+  getDb()
+    .query(`UPDATE messages SET reactions = ? WHERE id = ?`)
+    .run(JSON.stringify(reactions), id);
 }

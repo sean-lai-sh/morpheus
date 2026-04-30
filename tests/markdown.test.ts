@@ -8,7 +8,7 @@ import {
   renderBlock,
   rerenderChannel,
 } from "../src/storage/markdown.ts";
-import { upsertMessage, getMessage, setClassification } from "../src/storage/messages.ts";
+import { upsertMessage, getMessage } from "../src/storage/messages.ts";
 import { extractLinks, persistLinks, linksForMessage } from "../src/storage/links.ts";
 
 const cwd = withTempCwd();
@@ -37,7 +37,7 @@ describe("markdown/channelSlug", () => {
 });
 
 describe("markdown/renderBlock", () => {
-  test("create variant emits classification line when classified", () => {
+  test("create variant contains author and message id", () => {
     upsertMessage({
       id: "r1",
       channelId: channel.id,
@@ -46,11 +46,10 @@ describe("markdown/renderBlock", () => {
       content: "test",
       createdAt: Date.parse("2026-04-28T14:32:00Z"),
     });
-    setClassification("r1", "operational", 0.94);
     const block = renderBlock({ msg: getMessage("r1")!, links: [], variant: "create" });
     expect(block).toContain("@alice");
     expect(block).toContain("(msg:r1)");
-    expect(block).toContain("**Classification**: operational (0.94)");
+    expect(block).not.toContain("Classification");
   });
 
   test("edit variant header includes EDIT marker", () => {
@@ -75,7 +74,6 @@ describe("markdown/renderBlock", () => {
     });
     const links = extractLinks(getMessage("r2")!.content);
     persistLinks("r2", channel.id, links);
-    setClassification("r2", "operational", 0.9);
     const block = renderBlock({ msg: getMessage("r2")!, links: linksForMessage("r2"), variant: "create" });
     expect(block).toContain("**Links**:");
     expect(block).toContain("docs.google.com/document/d/AAAAAAAAAAAAAAAAAAAA");
@@ -103,7 +101,7 @@ describe("markdown/appendBlock", () => {
 });
 
 describe("markdown/rerenderChannel", () => {
-  test("only includes operational + discussion classifications", () => {
+  test("includes all messages regardless of classification", () => {
     upsertMessage({
       id: "r3",
       channelId: channel.id,
@@ -112,12 +110,10 @@ describe("markdown/rerenderChannel", () => {
       content: "lol same",
       createdAt: Date.parse("2026-04-28T14:35:00Z"),
     });
-    setClassification("r3", "noise", 0.95);
     const written = rerenderChannel(channel, guildId);
-    // r1 (operational), r2 (operational) — but r1 had no links, both eligible
-    // r3 noise → excluded
-    expect(written).toBe(2);
+    // r1, r2, r3 — all written
+    expect(written).toBe(3);
     const body = readFileSync(channelFilePath(channel), "utf8");
-    expect(body).not.toContain("lol same");
+    expect(body).toContain("lol same");
   });
 });

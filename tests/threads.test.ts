@@ -58,8 +58,7 @@ function buildMessage(opts: {
 
 describe("thread support: allowlist check", () => {
   test("thread of channel with include_threads:true is allowed", async () => {
-    const { ingestMessage, setClassifierBypass } = await import("../src/bot/ingest.ts");
-    setClassifierBypass(true);
+    const { ingestMessage } = await import("../src/bot/ingest.ts");
     const r = await ingestMessage(
       buildMessage({ id: "t1", channelId: "thread-111", content: "thread reply here" }),
       "100", // parent is channel 100, which has include_threads:true
@@ -90,9 +89,8 @@ describe("thread support: allowlist check", () => {
 
 describe("thread support: storage", () => {
   test("thread message is stored with parent_channel_id set", async () => {
-    const { ingestMessage, setClassifierBypass } = await import("../src/bot/ingest.ts");
+    const { ingestMessage } = await import("../src/bot/ingest.ts");
     const { getMessage, effectiveChannelId } = await import("../src/storage/messages.ts");
-    setClassifierBypass(true);
     await ingestMessage(
       buildMessage({ id: "t4", channelId: "thread-100a", content: "stored with parent" }),
       "100",
@@ -105,9 +103,8 @@ describe("thread support: storage", () => {
   });
 
   test("regular channel message has null parent_channel_id", async () => {
-    const { ingestMessage, setClassifierBypass } = await import("../src/bot/ingest.ts");
+    const { ingestMessage } = await import("../src/bot/ingest.ts");
     const { getMessage, effectiveChannelId } = await import("../src/storage/messages.ts");
-    setClassifierBypass(true);
     await ingestMessage(
       buildMessage({ id: "t5", channelId: "100", content: "regular channel message" }),
     );
