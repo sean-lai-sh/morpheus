@@ -64,8 +64,7 @@ function buildMessage(opts: {
 
 describe("bot/ingest hard filters", () => {
   test("drops messages from bot authors", async () => {
-    const { ingestMessage, setClassifierBypass } = await import("../src/bot/ingest.ts");
-    setClassifierBypass(true);
+    const { ingestMessage } = await import("../src/bot/ingest.ts");
     const r = await ingestMessage(
       buildMessage({ id: "i1", channelId: "111", content: "hello world", authorBot: true }),
     );
@@ -81,8 +80,7 @@ describe("bot/ingest hard filters", () => {
   });
 
   test("keeps short messages that contain a GDrive URL", async () => {
-    const { ingestMessage, setClassifierBypass } = await import("../src/bot/ingest.ts");
-    setClassifierBypass(true);
+    const { ingestMessage } = await import("../src/bot/ingest.ts");
     const r = await ingestMessage(
       buildMessage({
         id: "i3",
@@ -102,18 +100,16 @@ describe("bot/ingest hard filters", () => {
     expect(r.reason).toBe("pure-media");
   });
 
-  test("drops pure emoji message", async () => {
+  test("keeps pure emoji message (no longer filtered)", async () => {
     const { ingestMessage } = await import("../src/bot/ingest.ts");
     const r = await ingestMessage(
       buildMessage({ id: "i4b", channelId: "111", content: "🔥🔥🔥" }),
     );
-    expect(r.action).toBe("dropped");
-    expect(r.reason).toBe("pure-emoji");
+    expect(r.action).toBe("inserted");
   });
 
   test("keeps gif URL that has surrounding text", async () => {
-    const { ingestMessage, setClassifierBypass } = await import("../src/bot/ingest.ts");
-    setClassifierBypass(true);
+    const { ingestMessage } = await import("../src/bot/ingest.ts");
     const r = await ingestMessage(
       buildMessage({ id: "i4c", channelId: "111", content: "us at the retreat https://example.com/funny.gif" }),
     );
@@ -131,10 +127,9 @@ describe("bot/ingest hard filters", () => {
 });
 
 describe("bot/ingest classification routing", () => {
-  test("classify:false channels mark messages operational + write markdown", async () => {
-    const { ingestMessage, setClassifierBypass } = await import("../src/bot/ingest.ts");
+  test("all channels mark messages operational immediately", async () => {
+    const { ingestMessage } = await import("../src/bot/ingest.ts");
     const { getMessage } = await import("../src/storage/messages.ts");
-    setClassifierBypass(false); // even with classifier on, classify:false channel skips it
     const r = await ingestMessage(
       buildMessage({ id: "i5", channelId: "111", content: "deadline is friday" }),
     );
@@ -142,28 +137,13 @@ describe("bot/ingest classification routing", () => {
     expect(getMessage("i5")?.classification).toBe("operational");
   });
 
-  test("classify:true channels enqueue messages for classifier (no markdown yet)", async () => {
-    const { ingestMessage, setClassifierBypass } = await import("../src/bot/ingest.ts");
+  test("classify:true channels also write operational immediately (no queue)", async () => {
+    const { ingestMessage } = await import("../src/bot/ingest.ts");
     const { getMessage } = await import("../src/storage/messages.ts");
-    const { queueDepth } = await import("../src/storage/queue.ts");
-    setClassifierBypass(false);
-    const before = queueDepth();
     const r = await ingestMessage(
       buildMessage({ id: "i6", channelId: "222", content: "shall we move the meeting" }),
     );
     expect(r.action).toBe("inserted");
-    // Classification should be null until worker runs
-    expect(getMessage("i6")?.classification).toBeNull();
-    expect(queueDepth()).toBe(before + 1);
-  });
-
-  test("classifier bypass writes operational on classify:true channels too", async () => {
-    const { ingestMessage, setClassifierBypass } = await import("../src/bot/ingest.ts");
-    const { getMessage } = await import("../src/storage/messages.ts");
-    setClassifierBypass(true);
-    await ingestMessage(
-      buildMessage({ id: "i7", channelId: "222", content: "another long enough message" }),
-    );
-    expect(getMessage("i7")?.classification).toBe("operational");
+    expect(getMessage("i6")?.classification).toBe("operational");
   });
 });

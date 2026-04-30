@@ -1,9 +1,12 @@
 import { loadChannels, loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
-import { rerenderChannel } from "../storage/markdown.ts";
+import { removeLegacyFlatFiles, rerenderChannel } from "../storage/markdown.ts";
 
 /** Rebuild every channel's markdown from SQLite. Used after schema changes or to recover. */
 export function reindexAll(): void {
+  // Remove stale flat .md files left over from the pre-hierarchy layout.
+  removeLegacyFlatFiles();
+
   const cfg = loadChannels();
   let total = 0;
   for (const channel of cfg.channels) {

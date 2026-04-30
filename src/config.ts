@@ -10,6 +10,7 @@ const envSchema = z.object({
   NIA_API_KEY: z.string().min(1).optional(),
   NIA_BASE_URL: z.string().url().default("https://api.trynia.ai"),
   NIA_DISCORD_SOURCE_ID: z.string().optional(),
+  NIA_DISCORD_LEADERSHIP_SOURCE_ID: z.string().optional(),
   LOG_LEVEL: z.string().default("info"),
   HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8080),
   RETENTION_MONTHS: z
@@ -25,6 +26,8 @@ const channelSchema = z.object({
   classify: z.boolean().default(true),
   confidence_threshold: z.number().min(0).max(1).optional(),
   include_threads: z.boolean().default(false),
+  category: z.string().optional(),
+  isolated: z.boolean().default(false),
 });
 
 const channelsConfigSchema = z.object({

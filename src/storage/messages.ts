@@ -16,6 +16,12 @@ export interface MessageRow {
   classification: Classification | null;
   classification_confidence: number | null;
   classified_at: number | null;
+  /** JSON map of emoji name → reaction count, e.g. {"👍":3,"✅":1} */
+  reactions: string | null;
+  /** The Discord thread channel id this message belongs to. Equals the starter message id. */
+  thread_id: string | null;
+  /** Human-readable name of the thread channel. */
+  thread_name: string | null;
 }
 
 export interface MessageInput {
@@ -28,6 +34,10 @@ export interface MessageInput {
   content: string;
   createdAt: number;
   editedAt?: number | null;
+  /** The Discord thread channel id (= thread starter message id). */
+  threadId?: string | null;
+  /** Human-readable name of the thread. */
+  threadName?: string | null;
 }
 
 /** Returns the channel id to use for config/markdown lookups (parent for threads). */
@@ -45,8 +55,8 @@ export function upsertMessage(input: MessageInput): { inserted: boolean; edited:
 
   if (!existing) {
     db.query(
-      `INSERT INTO messages (id, channel_id, parent_channel_id, author_id, author_name, content, created_at, edited_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (id, channel_id, parent_channel_id, author_id, author_name, content, created_at, edited_at, thread_id, thread_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.id,
       input.channelId,
@@ -56,17 +66,28 @@ export function upsertMessage(input: MessageInput): { inserted: boolean; edited:
       input.content,
       input.createdAt,
       input.editedAt ?? null,
+      input.threadId ?? null,
+      input.threadName ?? null,
     );
     return { inserted: true, edited: false };
   }
 
-  // Treat as edit only when content actually changed.
+  // Always refresh metadata: author_name and thread fields may have been populated after
+  // the initial insert (e.g. refresh-members backfill, or pre-migration rows lacking thread_id).
+  db.query(
+    `UPDATE messages SET author_name = ?, parent_channel_id = ?, thread_id = ?, thread_name = ? WHERE id = ?`,
+  ).run(
+    input.authorName,
+    input.parentChannelId ?? null,
+    input.threadId ?? null,
+    input.threadName ?? null,
+    input.id,
+  );
+
   const contentChanged = existing.content !== input.content;
   if (contentChanged) {
     db.query(
-      `UPDATE messages
-       SET content = ?, edited_at = ?
-       WHERE id = ?`,
+      `UPDATE messages SET content = ?, edited_at = ? WHERE id = ?`,
     ).run(input.content, input.editedAt ?? Date.now(), input.id);
   }
   return { inserted: false, edited: contentChanged };
@@ -148,4 +169,10 @@ export function lastMessageAt(): number | null {
       .query<{ ts: number | null }, []>(`SELECT MAX(created_at) AS ts FROM messages`)
       .get()?.ts ?? null
   );
+}
+
+export function setReactions(id: string, reactions: Record<string, number>): void {
+  getDb()
+    .query(`UPDATE messages SET reactions = ? WHERE id = ?`)
+    .run(JSON.stringify(reactions), id);
 }

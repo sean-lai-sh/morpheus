@@ -12,9 +12,10 @@ export function getClient(): Client {
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.GuildMembers,
+      GatewayIntentBits.GuildMessageReactions,
     ],
-    // Enable partials so MessageDelete events fire for uncached messages
-    partials: [Partials.Message, Partials.Channel, Partials.GuildMember],
+    // Enable partials so delete/reaction events fire for uncached messages
+    partials: [Partials.Message, Partials.Channel, Partials.GuildMember, Partials.Reaction],
   });
 
   client.on("error", (err) => logger.error({ err }, "discord client error"));
