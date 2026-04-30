@@ -1,22 +1,40 @@
 /**
- * One-shot: create a Nia filesystem namespace for data/discord/ and persist
- * the returned UUID into Doppler.
+ * One-shot: create Nia filesystem namespaces for the general and leadership
+ * Discord indexes, then persist the returned UUIDs into Doppler.
  *
  * Run with:
  *    bun run register-nia
  *
- * Re-runs are safe: if NIA_DISCORD_SOURCE_ID is already set in the current
- * Doppler config, the script just verifies and exits. Pass --force to create
- * a new namespace anyway.
+ * Re-runs are safe: existing source IDs are skipped unless --force is passed.
+ * Pass --force to create fresh namespaces (abandons old ones in Nia).
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync } from "node:fs";
 import { logger } from "../src/logger.ts";
+import { GENERAL_DIR, LEADERSHIP_DIR } from "../src/storage/markdown.ts";
 import { createFilesystem } from "../src/nia/client.ts";
 
-const FOLDER = resolve(process.cwd(), "data/discord");
-const SOURCE_NAME = "morpheus-discord";
+interface SourceDef {
+  envVar: string;
+  name: string;
+  description: string;
+  dir: string;
+}
+
+const SOURCES: SourceDef[] = [
+  {
+    envVar: "NIA_DISCORD_SOURCE_ID",
+    name: "morpheus-discord-general",
+    description: "Discord channel markdown for Morpheus bot (all channels except leadership)",
+    dir: GENERAL_DIR,
+  },
+  {
+    envVar: "NIA_DISCORD_LEADERSHIP_SOURCE_ID",
+    name: "morpheus-discord-leadership",
+    description: "Discord leadership-team markdown for Morpheus bot (isolated index)",
+    dir: LEADERSHIP_DIR,
+  },
+];
 
 function dopplerSetSecret(key: string, value: string): void {
   const result = spawnSync("doppler", ["secrets", "set", `${key}=${value}`], {
@@ -33,30 +51,27 @@ function dopplerSetSecret(key: string, value: string): void {
 
 async function main(): Promise<void> {
   const force = process.argv.includes("--force");
-  const existing = process.env.NIA_DISCORD_SOURCE_ID;
-  if (existing && !force) {
-    logger.info(
-      { source_id: existing },
-      "NIA_DISCORD_SOURCE_ID already set in this Doppler config; pass --force to recreate",
-    );
-    return;
+
+  for (const src of SOURCES) {
+    const existing = process.env[src.envVar];
+    if (existing && !force) {
+      logger.info(
+        { source_id: existing, env: src.envVar },
+        "already set in Doppler; pass --force to recreate",
+      );
+      continue;
+    }
+
+    mkdirSync(src.dir, { recursive: true });
+
+    logger.info({ name: src.name }, "creating Nia filesystem namespace");
+    const created = await createFilesystem(src.name, src.description);
+    logger.info({ source_id: created.id, name: created.name }, "Nia filesystem created");
+
+    dopplerSetSecret(src.envVar, created.id);
+    logger.info({ env: src.envVar }, `written to Doppler. Mirror to prod when ready:`);
+    console.log(`\n  doppler secrets set ${src.envVar}=${created.id} --config prod\n`);
   }
-
-  if (!existsSync(FOLDER)) {
-    mkdirSync(FOLDER, { recursive: true });
-    logger.info({ folder: FOLDER }, "created data/discord/ (it was missing)");
-  }
-
-  logger.info({ name: SOURCE_NAME }, "creating Nia filesystem namespace");
-  const created = await createFilesystem(
-    SOURCE_NAME,
-    "Discord channel markdown for Morpheus bot",
-  );
-  logger.info({ source_id: created.id, name: created.name }, "Nia filesystem created");
-
-  dopplerSetSecret("NIA_DISCORD_SOURCE_ID", created.id);
-  logger.info("NIA_DISCORD_SOURCE_ID written to Doppler. Mirror to prod when ready:");
-  console.log(`\n  doppler secrets set NIA_DISCORD_SOURCE_ID=${created.id} --config prod\n`);
 }
 
 main().catch((err) => {

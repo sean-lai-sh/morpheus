@@ -18,6 +18,10 @@ export interface MessageRow {
   classified_at: number | null;
   /** JSON map of emoji name → reaction count, e.g. {"👍":3,"✅":1} */
   reactions: string | null;
+  /** The Discord thread channel id this message belongs to. Equals the starter message id. */
+  thread_id: string | null;
+  /** Human-readable name of the thread channel. */
+  thread_name: string | null;
 }
 
 export interface MessageInput {
@@ -30,6 +34,10 @@ export interface MessageInput {
   content: string;
   createdAt: number;
   editedAt?: number | null;
+  /** The Discord thread channel id (= thread starter message id). */
+  threadId?: string | null;
+  /** Human-readable name of the thread. */
+  threadName?: string | null;
 }
 
 /** Returns the channel id to use for config/markdown lookups (parent for threads). */
@@ -47,8 +55,8 @@ export function upsertMessage(input: MessageInput): { inserted: boolean; edited:
 
   if (!existing) {
     db.query(
-      `INSERT INTO messages (id, channel_id, parent_channel_id, author_id, author_name, content, created_at, edited_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (id, channel_id, parent_channel_id, author_id, author_name, content, created_at, edited_at, thread_id, thread_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.id,
       input.channelId,
@@ -58,6 +66,8 @@ export function upsertMessage(input: MessageInput): { inserted: boolean; edited:
       input.content,
       input.createdAt,
       input.editedAt ?? null,
+      input.threadId ?? null,
+      input.threadName ?? null,
     );
     return { inserted: true, edited: false };
   }

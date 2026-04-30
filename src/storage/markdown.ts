@@ -1,6 +1,5 @@
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-import type { Channel } from "../config.ts";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import type { LinkRow } from "./links.ts";
 import { linksForMessage } from "./links.ts";
 import type { MessageRow } from "./messages.ts";
@@ -8,22 +7,61 @@ import { messagesForChannelAsc } from "./messages.ts";
 import { markDirty } from "./sync-state.ts";
 
 export const DISCORD_DIR = resolve(process.cwd(), "data/discord");
+export const GENERAL_DIR = resolve(DISCORD_DIR, "general");
+export const LEADERSHIP_DIR = resolve(DISCORD_DIR, "leadership");
 
-/** Slugify channel name for filename, suffixed with last-4 of channel id (rename-safe). */
-export function channelSlug(name: string, channelId: string): string {
+/** Minimal channel shape needed for path resolution. */
+export interface ChannelKey {
+  id: string;
+  name: string;
+  category?: string | undefined;
+  isolated?: boolean | undefined;
+}
+
+/** Slugify channel or thread name for use in filesystem paths. */
+export function channelSlug(name: string, id: string): string {
   const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "channel";
-  return `${base}-${channelId.slice(-4)}`;
+  return `${base}-${id.slice(-4)}`;
 }
 
-export function channelFilePath(channel: Pick<Channel, "id" | "name">): string {
-  return resolve(DISCORD_DIR, `${channelSlug(channel.name, channel.id)}.md`);
+function rootDir(channel: ChannelKey): string {
+  return channel.isolated ? LEADERSHIP_DIR : GENERAL_DIR;
 }
 
-function ensureDir(): void {
-  mkdirSync(DISCORD_DIR, { recursive: true });
+function channelDirPath(channel: ChannelKey): string {
+  const root = rootDir(channel);
+  const slug = channelSlug(channel.name, channel.id);
+  return channel.category ? resolve(root, channel.category, slug) : resolve(root, slug);
 }
 
-function fileHeader(channel: Pick<Channel, "id" | "name">, guildId: string): string {
+export function channelFilePath(channel: ChannelKey): string {
+  return resolve(channelDirPath(channel), "main.md");
+}
+
+function threadFilePath(channel: ChannelKey, threadId: string, threadName: string): string {
+  return resolve(channelDirPath(channel), "threads", `${channelSlug(threadName, threadId)}.md`);
+}
+
+function ensureFile(channel: ChannelKey, guildId: string): string {
+  const path = channelFilePath(channel);
+  mkdirSync(dirname(path), { recursive: true });
+  if (!existsSync(path)) writeFileSync(path, fileHeader(channel, guildId), "utf8");
+  return path;
+}
+
+function ensureThreadFile(
+  channel: ChannelKey,
+  guildId: string,
+  threadId: string,
+  threadName: string,
+): string {
+  const path = threadFilePath(channel, threadId, threadName);
+  mkdirSync(dirname(path), { recursive: true });
+  if (!existsSync(path)) writeFileSync(path, threadFileHeader(channel, guildId, threadId, threadName), "utf8");
+  return path;
+}
+
+function fileHeader(channel: ChannelKey, guildId: string): string {
   return [
     `# #${channel.name}`,
     `- channel_id: ${channel.id}`,
@@ -35,18 +73,29 @@ function fileHeader(channel: Pick<Channel, "id" | "name">, guildId: string): str
   ].join("\n");
 }
 
-function ensureFile(channel: Pick<Channel, "id" | "name">, guildId: string): string {
-  ensureDir();
-  const path = channelFilePath(channel);
-  if (!existsSync(path)) writeFileSync(path, fileHeader(channel, guildId), "utf8");
-  return path;
+function threadFileHeader(
+  channel: ChannelKey,
+  guildId: string,
+  threadId: string,
+  threadName: string,
+): string {
+  return [
+    `# Thread: ${threadName}`,
+    `- thread_id: ${threadId}`,
+    `- starter_message_id: ${threadId}`,
+    `- parent_channel_id: ${channel.id}`,
+    `- parent_channel_name: ${channel.name}`,
+    `- guild_id: ${guildId}`,
+    `- indexing_rules: all messages; edits append; deletes tombstone`,
+    ``,
+    `---`,
+    ``,
+  ].join("\n");
 }
 
 function fmtTimestamp(ms: number): string {
-  // YYYY-MM-DD HH:MM UTC — stable, locale-free, easy to grep
   return new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 }
-
 
 function linksLine(links: LinkRow[]): string | null {
   if (links.length === 0) return null;
@@ -96,46 +145,89 @@ export function renderBlock(input: RenderInput): string {
 }
 
 /**
- * Append a block for the given message to its channel file.
- * Caller is responsible for deciding if the message is markdown-eligible
- * (operational or discussion only). This function does NOT filter.
+ * Append a block for the given message to its channel or thread file.
+ * Routes to the thread file when msg.thread_id is set.
  */
 export function appendBlock(
-  channel: Pick<Channel, "id" | "name">,
+  channel: ChannelKey,
   guildId: string,
   msg: MessageRow,
   variant: "create" | "edit" | "delete",
 ): void {
-  const path = ensureFile(channel, guildId);
+  let path: string;
+  if (msg.thread_id && msg.thread_name) {
+    path = ensureThreadFile(channel, guildId, msg.thread_id, msg.thread_name);
+  } else {
+    path = ensureFile(channel, guildId);
+  }
   const links = variant === "delete" ? [] : linksForMessage(msg.id);
   const block = renderBlock({ msg, links, variant });
   appendFileSync(path, block, "utf8");
-  markDirty(DISCORD_DIR);
+  markDirty(rootDir(channel));
 }
 
 /**
  * Re-render a channel's markdown from SQLite (recovery path).
  *
- * Limitation: SQLite stores only the latest content per message id, so we
- * cannot reproduce the original-then-EDIT history that the append-only writer
- * produces in real-time. Rerender therefore writes a single block per message
- * with the latest content (annotated `(edited <ts>)` if it was edited) plus
- * a tombstone block when deleted_at is set. Use this only when the live
- * markdown file is corrupted or lost.
+ * Writes main.md for non-thread messages and one file per thread under threads/.
+ * Limitation: SQLite stores only the latest content per message id, so the
+ * original-then-EDIT history produced by the live writer cannot be reproduced.
  */
-export function rerenderChannel(channel: Pick<Channel, "id" | "name">, guildId: string): number {
-  ensureDir();
-  const path = channelFilePath(channel);
-  let body = fileHeader(channel, guildId);
-  const rows = messagesForChannelAsc(channel.id);
+export function rerenderChannel(channel: ChannelKey, guildId: string): number {
+  const allRows = messagesForChannelAsc(channel.id);
+
+  // Write main.md (non-thread messages only).
+  const mainPath = channelFilePath(channel);
+  mkdirSync(dirname(mainPath), { recursive: true });
+  let mainBody = fileHeader(channel, guildId);
   let written = 0;
-  for (const msg of rows) {
+  for (const msg of allRows) {
+    if (msg.thread_id) continue;
     const links = linksForMessage(msg.id);
-    body += renderBlock({ msg, links, variant: "create" });
-    if (msg.deleted_at) body += renderBlock({ msg, links: [], variant: "delete" });
+    mainBody += renderBlock({ msg, links, variant: "create" });
+    if (msg.deleted_at) mainBody += renderBlock({ msg, links: [], variant: "delete" });
     written++;
   }
-  writeFileSync(path, body, "utf8");
-  markDirty(DISCORD_DIR);
+  writeFileSync(mainPath, mainBody, "utf8");
+
+  // Group thread messages by thread_id.
+  const threadGroups = new Map<string, MessageRow[]>();
+  for (const msg of allRows) {
+    if (!msg.thread_id || !msg.thread_name) continue;
+    const existing = threadGroups.get(msg.thread_id);
+    if (existing) existing.push(msg);
+    else threadGroups.set(msg.thread_id, [msg]);
+  }
+
+  // Write one file per thread.
+  for (const [threadId, msgs] of threadGroups) {
+    const threadName = msgs[0]?.thread_name ?? threadId;
+    const tPath = threadFilePath(channel, threadId, threadName);
+    mkdirSync(dirname(tPath), { recursive: true });
+    let tBody = threadFileHeader(channel, guildId, threadId, threadName);
+    for (const msg of msgs) {
+      const links = linksForMessage(msg.id);
+      tBody += renderBlock({ msg, links, variant: "create" });
+      if (msg.deleted_at) tBody += renderBlock({ msg, links: [], variant: "delete" });
+      written++;
+    }
+    writeFileSync(tPath, tBody, "utf8");
+  }
+
+  markDirty(rootDir(channel));
   return written;
+}
+
+/** Remove legacy flat .md files at the root of data/discord/ (left over from pre-hierarchy runs). */
+export function removeLegacyFlatFiles(): void {
+  try {
+    const entries = readdirSync(DISCORD_DIR, { withFileTypes: true });
+    for (const e of entries) {
+      if (e.isFile() && e.name.endsWith(".md")) {
+        rmSync(resolve(DISCORD_DIR, e.name));
+      }
+    }
+  } catch {
+    // directory may not exist yet; nothing to clean
+  }
 }

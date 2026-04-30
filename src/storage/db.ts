@@ -103,6 +103,21 @@ function migrateAlter(db: Database): void {
   try { db.exec(`ALTER TABLE messages ADD COLUMN reactions TEXT`); } catch { /* already exists */ }
   // NIM classifier removed; clean up queue table on existing DBs.
   try { db.exec(`DROP TABLE IF EXISTS classification_queue`); } catch { /* ignore */ }
+  // Add thread_id / thread_name to identify which thread a message belongs to.
+  // thread_id equals the Discord thread channel id, which is always the starter message id.
+  try { db.exec(`ALTER TABLE messages ADD COLUMN thread_id TEXT`); } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE messages ADD COLUMN thread_name TEXT`); } catch { /* already exists */ }
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id)`); } catch { /* already exists */ }
+  // User display-name cache for resolving raw usernames to server nicknames.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      user_id TEXT PRIMARY KEY,
+      username TEXT,
+      display_name TEXT,
+      global_name TEXT,
+      updated_at INTEGER NOT NULL
+    )
+  `);
 }
 
 export function vacuum(): void {

@@ -10,6 +10,7 @@
  * Thread messages: pass parentChannelId when the message is in a thread of an
  * allowed channel that has include_threads:true. The message is stored under its
  * own thread channel_id in SQLite but uses the parent's config for markdown output.
+ * threadName is the human-readable thread channel name.
  */
 import type { Message, PartialMessage } from "discord.js";
 import { getChannel, isChannelAllowed, loadEnv } from "../config.ts";
@@ -24,6 +25,7 @@ import {
   setClassification,
   upsertMessage,
 } from "../storage/messages.ts";
+import { getDisplayName, upsertUser } from "../storage/users.ts";
 
 // Matches a string that is nothing but a bare media URL (gif, image, video).
 // If there's any surrounding text, the message goes through normally.
@@ -41,17 +43,23 @@ function hardFilterReason(message: Message | PartialMessage): string | null {
   return null;
 }
 
-function authorName(message: Message | PartialMessage): string {
+function authorName(message: Message | PartialMessage, userId?: string): string {
   const member = message.member;
   if (member?.displayName) return member.displayName;
-  if (message.author?.username) return message.author.username;
+  // Fall back to users table for display name when member cache is cold (e.g. backfill).
+  if (userId) {
+    const cached = getDisplayName(userId);
+    if (cached) return cached;
+  }
   if (message.author?.globalName) return message.author.globalName;
+  if (message.author?.username) return message.author.username;
   return message.author?.id ?? "unknown";
 }
 
 function fetchedToInput(
   message: Message,
   parentChannelId?: string | null,
+  threadName?: string | null,
 ): {
   id: string;
   channelId: string;
@@ -61,16 +69,22 @@ function fetchedToInput(
   content: string;
   createdAt: number;
   editedAt: number | null;
+  threadId: string | null;
+  threadName: string | null;
 } {
+  const userId = message.author?.id;
+  const threadId = parentChannelId ? message.channelId : null;
   return {
     id: message.id,
     channelId: message.channelId,
     parentChannelId: parentChannelId ?? null,
-    authorId: message.author?.id ?? "unknown",
-    authorName: authorName(message),
+    authorId: userId ?? "unknown",
+    authorName: authorName(message, userId),
     content: message.content ?? "",
     createdAt: message.createdTimestamp,
     editedAt: message.editedTimestamp ?? null,
+    threadId,
+    threadName: threadId ? (threadName ?? null) : null,
   };
 }
 
@@ -81,11 +95,12 @@ export interface IngestResult {
 
 /**
  * Ingest a message. For thread messages, pass parentChannelId (the parent text
- * channel's id) — the parent must be allowlisted with include_threads:true.
+ * channel's id) and threadName (the thread channel's display name).
  */
 export async function ingestMessage(
   message: Message,
   parentChannelId?: string | null,
+  threadName?: string | null,
 ): Promise<IngestResult> {
   const configChannelId = parentChannelId ?? message.channelId;
 
@@ -102,8 +117,18 @@ export async function ingestMessage(
   const dropReason = hardFilterReason(message);
   if (dropReason) return { action: "dropped", reason: dropReason };
 
-  const input = fetchedToInput(message, parentChannelId);
+  const input = fetchedToInput(message, parentChannelId, threadName);
   const { inserted, edited } = upsertMessage(input);
+
+  // Cache user display name whenever the guild member is available.
+  if (message.author?.id && message.member) {
+    upsertUser(
+      message.author.id,
+      message.author.username ?? null,
+      message.member.nickname ?? null,
+      message.author.globalName ?? null,
+    );
+  }
 
   // Crawl cursors track under the effective (config) channel id.
   setOldestSeen(configChannelId, input.id);

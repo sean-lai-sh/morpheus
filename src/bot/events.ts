@@ -30,12 +30,25 @@ function threadParentId(message: Message): string | null {
   return null;
 }
 
+/** Returns the thread channel name if the message is in a thread, else null. */
+function threadChannelName(message: Message): string | null {
+  const t = message.channel.type;
+  if (
+    t === ChannelType.PublicThread ||
+    t === ChannelType.PrivateThread ||
+    t === ChannelType.AnnouncementThread
+  ) {
+    return (message.channel as { name?: string }).name ?? null;
+  }
+  return null;
+}
+
 export function registerLiveHandlers(client: Client): void {
   client.on(Events.MessageCreate, async (m) => {
     try {
       const full = await fetchIfPartial(m);
       if (!full) return;
-      const r = await ingestMessage(full, threadParentId(full));
+      const r = await ingestMessage(full, threadParentId(full), threadChannelName(full));
       if (r.action === "inserted" || r.action === "edited") {
         logger.debug(
           { message_id: full.id, channel_id: full.channelId, op: "live", action: r.action },
@@ -51,7 +64,7 @@ export function registerLiveHandlers(client: Client): void {
     try {
       const full = await fetchIfPartial(m as Message | PartialMessage);
       if (!full) return;
-      const r = await ingestMessage(full, threadParentId(full));
+      const r = await ingestMessage(full, threadParentId(full), threadChannelName(full));
       logger.debug(
         { message_id: full.id, channel_id: full.channelId, op: "live", action: r.action },
         "edit ingested",

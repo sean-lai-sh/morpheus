@@ -121,3 +121,49 @@ describe("thread support: storage", () => {
     expect(ids).toContain("t5"); // regular channel message
   });
 });
+
+describe("thread support: spawn node (thread_id)", () => {
+  test("thread message stores thread_id equal to message channelId", async () => {
+    const { ingestMessage } = await import("../src/bot/ingest.ts");
+    const { getMessage } = await import("../src/storage/messages.ts");
+    await ingestMessage(
+      buildMessage({ id: "t6", channelId: "thread-100b", content: "thread reply" }),
+      "100",
+      "Planning Session",
+    );
+    const row = getMessage("t6");
+    // thread_id = message.channelId when in a thread (Discord guarantee: thread.id === starter msg id)
+    expect(row!.thread_id).toBe("thread-100b");
+    expect(row!.thread_name).toBe("Planning Session");
+  });
+
+  test("main channel message has null thread_id and thread_name", async () => {
+    const { getMessage } = await import("../src/storage/messages.ts");
+    const row = getMessage("t5");
+    expect(row!.thread_id).toBeNull();
+    expect(row!.thread_name).toBeNull();
+  });
+
+  test("spawn node is identified by msg.id === msg.thread_id", async () => {
+    const { upsertMessage, getMessage } = await import("../src/storage/messages.ts");
+    // Simulate the starter message: its id equals the thread channel id
+    upsertMessage({
+      id: "thread-100b",          // starter message id == thread channel id
+      channelId: "100",           // originally posted in main channel
+      authorId: "u1",
+      authorName: "alice",
+      content: "started a thread here",
+      createdAt: 500,
+      threadId: "thread-100b",    // set to self to mark as spawn node
+      threadName: "Planning Session",
+    });
+    const starter = getMessage("thread-100b")!;
+    expect(starter.id).toBe(starter.thread_id);
+  });
+
+  test("thread_name is stored and retrievable", async () => {
+    const { getMessage } = await import("../src/storage/messages.ts");
+    const row = getMessage("t6")!;
+    expect(row.thread_name).toBe("Planning Session");
+  });
+});
