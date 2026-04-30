@@ -14,6 +14,9 @@ data/
 .env.local
 .env.*.local
 
+# Real channel config — contains your server's snowflakes. Copy channels.example.yml to get started.
+config/channels.yml
+
 # Editor / OS
 .DS_Store
 .idea/

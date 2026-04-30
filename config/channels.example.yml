@@ -1,0 +1,50 @@
+# Allowlist of Discord channels the bot is permitted to crawl.
+# Belt-and-suspenders: bot ignores any channel not listed here, even if it has View Channel permission in Discord.
+# Reload without restart: send SIGHUP to the running process.
+#
+# category: used to group channels into subdirectories in data/discord/{general|leadership}/{category}/{channel}/
+# isolated: true → channel goes into the leadership Nia index (NIA_DISCORD_LEADERSHIP_SOURCE_ID) instead of general
+#
+# Copy this file to config/channels.yml and replace IDs with your own Discord snowflakes.
+# Right-click any channel in Discord → Copy Channel ID (Developer Mode must be on).
+
+guild_id: "YOUR_GUILD_ID"
+
+channels:
+  # ── Example category ──────────────────────────────────────────────────────────
+  - id: "CHANNEL_SNOWFLAKE_1"
+    name: "announcements"
+    category: "general"
+    classify: true
+    include_threads: true
+
+  - id: "CHANNEL_SNOWFLAKE_2"
+    name: "general-chat"
+    category: "general"
+    classify: true
+    include_threads: true
+
+  # ── Example teams category ────────────────────────────────────────────────────
+  - id: "CHANNEL_SNOWFLAKE_3"
+    name: "leadership-team"
+    category: "teams"
+    classify: true
+    include_threads: true
+    isolated: true          # routes to NIA_DISCORD_LEADERSHIP_SOURCE_ID (separate Nia namespace)
+
+  - id: "CHANNEL_SNOWFLAKE_4"
+    name: "marketing-team"
+    category: "teams"
+    classify: true
+    include_threads: true
+
+  - id: "CHANNEL_SNOWFLAKE_5"
+    name: "dev-team"
+    category: "teams"
+    classify: true
+    include_threads: true
+
+defaults:
+  confidence_threshold: 0.5
+  reconcile_lookback: 200
+  reconcile_interval_hours: 6

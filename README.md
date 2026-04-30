@@ -79,7 +79,11 @@ doppler secrets set LOG_LEVEL=info HEALTH_PORT=8080
 
 ### 4. Configure channels
 
-Edit `config/channels.yml` — set `guild_id` and replace example channel IDs with real snowflakes.
+```bash
+cp config/channels.example.yml config/channels.yml
+```
+
+Edit `config/channels.yml` — set `guild_id` and replace placeholder IDs with real Discord snowflakes (right-click any channel → Copy Channel ID with Developer Mode on).
 
 ### 5. Register Nia namespaces
 
