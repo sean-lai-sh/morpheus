@@ -45,9 +45,10 @@ export interface EventInput {
   isManual?: boolean;
   updatedBy?: string | null;
   /**
-   * Required when updating an existing row. The current row's `version` must
-   * match this value or a `VersionConflictError` is thrown. Pass `0` for new
-   * inserts (caller does not yet know a version).
+   * Required when `id` is set. The current row's `version` must match this
+   * value or a `VersionConflictError` is thrown. Omitting it on an update
+   * throws — silent fall-back would defeat optimistic locking. Ignored on
+   * inserts (no `id`).
    */
   expectedVersion?: number;
 }
@@ -106,6 +107,13 @@ function assertSource(value: string): asserts value is EventSourceType {
  *   stored version is bumped by 1.
  * - Parser-source writes (`source_type=backfill_parser`) are rejected when the
  *   current row has `is_manual=1`.
+ * - On update, optional fields use partial-update semantics: `undefined`
+ *   leaves the existing value unchanged, while explicit `null` clears it.
+ *   This applies to `date`, `channelId`, `sourceMessageId`, `sourceChannelId`,
+ *   `updatedBy`, and `isManual` — so a routine non-parser update can't
+ *   silently clobber the manual bit or other provenance fields.
+ * - The select+update pair is wrapped in an immediate transaction so that
+ *   concurrent writers with the same `expectedVersion` cannot both succeed.
  */
 export function upsertEvent(input: EventInput): EventRow {
   assertStatus(input.status);
@@ -113,51 +121,106 @@ export function upsertEvent(input: EventInput): EventRow {
 
   const db = getDb();
   const now = Date.now();
-  const isManual = input.isManual ? 1 : 0;
 
   if (input.id != null) {
-    const existing = db
-      .query<EventRow, [number]>(`SELECT * FROM events WHERE id = ?`)
-      .get(input.id);
-    if (!existing) {
-      throw new Error(`event ${input.id} not found`);
+    if (input.expectedVersion === undefined) {
+      throw new Error(
+        `upsertEvent: expectedVersion is required when input.id is set (event ${input.id})`,
+      );
     }
-    if (
-      input.sourceType === "backfill_parser" &&
-      existing.is_manual === 1
-    ) {
-      throw new ManualOverrideError(existing.id);
-    }
-    const expected = input.expectedVersion ?? existing.version;
-    if (existing.version !== expected) {
-      throw new VersionConflictError(existing.id, expected, existing.version);
-    }
-    const nextVersion = existing.version + 1;
-    db.query(
-      `UPDATE events
-         SET name = ?, date = ?, status = ?, channel_id = ?,
-             source_type = ?, source_message_id = ?, source_channel_id = ?,
-             is_manual = ?, version = ?, updated_at = ?, updated_by = ?
-       WHERE id = ?`,
-    ).run(
-      input.name,
-      input.date ?? null,
-      input.status,
-      input.channelId ?? null,
-      input.sourceType,
-      input.sourceMessageId ?? null,
-      input.sourceChannelId ?? null,
-      isManual,
-      nextVersion,
-      now,
-      input.updatedBy ?? null,
-      existing.id,
-    );
-    return db
-      .query<EventRow, [number]>(`SELECT * FROM events WHERE id = ?`)
-      .get(existing.id)!;
+    const targetId = input.id;
+    const expected = input.expectedVersion;
+    const tx = db.transaction((): EventRow => {
+      const existing = db
+        .query<EventRow, [number]>(`SELECT * FROM events WHERE id = ?`)
+        .get(targetId);
+      if (!existing) {
+        throw new Error(`event ${targetId} not found`);
+      }
+      if (
+        input.sourceType === "backfill_parser" &&
+        existing.is_manual === 1
+      ) {
+        throw new ManualOverrideError(existing.id);
+      }
+      if (existing.version !== expected) {
+        throw new VersionConflictError(existing.id, expected, existing.version);
+      }
+      // Partial-update semantics: `undefined` preserves the existing value,
+      // explicit `null` clears a nullable column.
+      const nextDate = input.date === undefined ? existing.date : input.date;
+      const nextChannelId =
+        input.channelId === undefined ? existing.channel_id : input.channelId;
+      const nextSourceMessageId =
+        input.sourceMessageId === undefined
+          ? existing.source_message_id
+          : input.sourceMessageId;
+      const nextSourceChannelId =
+        input.sourceChannelId === undefined
+          ? existing.source_channel_id
+          : input.sourceChannelId;
+      const nextUpdatedBy =
+        input.updatedBy === undefined ? existing.updated_by : input.updatedBy;
+      const nextIsManual =
+        input.isManual === undefined
+          ? existing.is_manual
+          : input.isManual ? 1 : 0;
+      const nextVersion = existing.version + 1;
+      const updated = db
+        .query<EventRow, [
+          string,
+          string | null,
+          EventStatus,
+          string | null,
+          EventSourceType,
+          string | null,
+          string | null,
+          number,
+          number,
+          number,
+          string | null,
+          number,
+          number,
+        ]>(
+          `UPDATE events
+              SET name = ?, date = ?, status = ?, channel_id = ?,
+                  source_type = ?, source_message_id = ?, source_channel_id = ?,
+                  is_manual = ?, version = ?, updated_at = ?, updated_by = ?
+            WHERE id = ? AND version = ?
+          RETURNING *`,
+        )
+        .get(
+          input.name,
+          nextDate,
+          input.status,
+          nextChannelId,
+          input.sourceType,
+          nextSourceMessageId,
+          nextSourceChannelId,
+          nextIsManual,
+          nextVersion,
+          now,
+          nextUpdatedBy,
+          existing.id,
+          expected,
+        );
+      if (!updated) {
+        // A concurrent writer slipped in between SELECT and UPDATE.
+        const fresh = db
+          .query<EventRow, [number]>(`SELECT * FROM events WHERE id = ?`)
+          .get(existing.id);
+        throw new VersionConflictError(
+          existing.id,
+          expected,
+          fresh?.version ?? expected,
+        );
+      }
+      return updated;
+    });
+    return tx.immediate();
   }
 
+  const isManual = input.isManual ? 1 : 0;
   const inserted = db
     .query<EventRow, [
       string,

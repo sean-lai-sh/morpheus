@@ -7,16 +7,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     MPLBACKEND=Agg
 
-# Pre-install scientific stack from apt for cached, glibc-friendly layers.
-# bash is in the base image; we install only what's needed and clean up.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      python3-matplotlib \
-      python3-numpy \
-      python3-pandas \
-      python3-scipy \
- && apt-get clean \
- && rm -rf /var/lib/apt/lists/*
+# bash is already in the base image. Install scientific stack into the
+# runtime (/usr/local) interpreter via pip — the Debian python3-* packages
+# install into a different site-packages and would not be visible to
+# `python` / `python3` on PATH in this image.
+RUN pip install --no-cache-dir \
+      numpy \
+      pandas \
+      matplotlib
 
 # Non-root runner. uid 65532 matches distroless "nonroot".
 RUN groupadd --system --gid 65532 runner \

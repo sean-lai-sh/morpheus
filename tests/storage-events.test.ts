@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { withTempDb } from "./helpers.ts";
-import { getDb } from "../src/storage/db.ts";
+import { getDb, resetDbForTest } from "../src/storage/db.ts";
 import {
   EVENT_STATUSES,
   type EventStatus,
@@ -18,26 +18,32 @@ beforeAll(() => {});
 afterAll(() => t.cleanup());
 
 describe("storage/events", () => {
-  test("migration is idempotent (re-running CREATE TABLE does not error)", () => {
+  test("real migration creates the events table and indexes, idempotently", () => {
+    // First open runs the real migration in src/storage/db.ts.
     const db = getDb();
-    expect(() => {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS events (
-          id INTEGER PRIMARY KEY,
-          name TEXT NOT NULL,
-          date TEXT,
-          status TEXT NOT NULL,
-          channel_id TEXT,
-          source_type TEXT NOT NULL,
-          source_message_id TEXT,
-          source_channel_id TEXT,
-          is_manual INTEGER NOT NULL DEFAULT 0,
-          version INTEGER NOT NULL DEFAULT 1,
-          updated_at INTEGER NOT NULL,
-          updated_by TEXT
-        );
-      `);
-    }).not.toThrow();
+    const tableNames = db
+      .query<{ name: string }, []>(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'events'`,
+      )
+      .all()
+      .map((r) => r.name);
+    expect(tableNames).toEqual(["events"]);
+
+    const indexNames = db
+      .query<{ name: string }, []>(
+        `SELECT name FROM sqlite_master
+          WHERE type = 'index' AND tbl_name = 'events'
+          ORDER BY name`,
+      )
+      .all()
+      .map((r) => r.name);
+    expect(indexNames).toContain("events_name_idx");
+    expect(indexNames).toContain("events_date_idx");
+
+    // Re-open the DB to run migrate() a second time over the same file —
+    // proves the real migration is idempotent (not just a fresh CREATE).
+    resetDbForTest();
+    expect(() => getDb()).not.toThrow();
   });
 
   test("upsertEvent inserts a new row at version 1", () => {
@@ -103,6 +109,51 @@ describe("storage/events", () => {
     expect(updated2.version).toBe(3);
   });
 
+  test("simulated concurrent write at same expectedVersion throws on the loser", () => {
+    const created = upsertEvent({
+      name: "race",
+      status: "planned",
+      sourceType: "agent_update",
+    });
+    // First update wins.
+    upsertEvent({
+      id: created.id,
+      name: "race",
+      status: "confirmed",
+      sourceType: "agent_update",
+      expectedVersion: 1,
+    });
+    // A second writer that read the old version (1) and tries to apply must
+    // fail rather than silently bump to a stale version.
+    expect(() =>
+      upsertEvent({
+        id: created.id,
+        name: "race",
+        status: "in_prep",
+        sourceType: "agent_update",
+        expectedVersion: 1,
+      }),
+    ).toThrow(VersionConflictError);
+    // Stored version is 2, not 3.
+    expect(getEventById(created.id)?.version).toBe(2);
+  });
+
+  test("update without expectedVersion throws (no silent fall-back)", () => {
+    const created = upsertEvent({
+      name: "needs-version",
+      status: "planned",
+      sourceType: "agent_update",
+    });
+    expect(() =>
+      upsertEvent({
+        id: created.id,
+        name: "needs-version",
+        status: "confirmed",
+        sourceType: "agent_update",
+      }),
+    ).toThrow(/expectedVersion is required/);
+  });
+
   test("version mismatch throws VersionConflictError", () => {
     const created = upsertEvent({
       name: "gamma",
@@ -157,6 +208,99 @@ describe("storage/events", () => {
     });
     expect(updated.version).toBe(2);
     expect(updated.status).toBe("confirmed");
+  });
+
+  test("update without isManual preserves the existing manual flag", () => {
+    const created = upsertEvent({
+      name: "preserve-manual",
+      status: "planned",
+      sourceType: "slash_command",
+      isManual: true,
+    });
+    expect(created.is_manual).toBe(1);
+    // agent_update is allowed to update a manual row, but if it doesn't pass
+    // isManual the bit must NOT be cleared (otherwise a later parser write
+    // would no longer be blocked).
+    const updated = upsertEvent({
+      id: created.id,
+      name: "preserve-manual",
+      status: "confirmed",
+      sourceType: "agent_update",
+      expectedVersion: 1,
+    });
+    expect(updated.is_manual).toBe(1);
+    // Subsequent parser write must still be rejected.
+    expect(() =>
+      upsertEvent({
+        id: created.id,
+        name: "preserve-manual",
+        status: "in_prep",
+        sourceType: "backfill_parser",
+        expectedVersion: 2,
+      }),
+    ).toThrow(ManualOverrideError);
+  });
+
+  test("update preserves nullable fields when omitted, clears them on explicit null", () => {
+    const created = upsertEvent({
+      name: "partial",
+      date: "2026-08-01",
+      status: "planned",
+      channelId: "chan-1",
+      sourceType: "slash_command",
+      sourceMessageId: "msg-1",
+      sourceChannelId: "schan-1",
+      updatedBy: "alice",
+    });
+    // Omit nullable fields → preserved.
+    const preserved = upsertEvent({
+      id: created.id,
+      name: "partial",
+      status: "confirmed",
+      sourceType: "agent_update",
+      expectedVersion: 1,
+    });
+    expect(preserved.date).toBe("2026-08-01");
+    expect(preserved.channel_id).toBe("chan-1");
+    expect(preserved.source_message_id).toBe("msg-1");
+    expect(preserved.source_channel_id).toBe("schan-1");
+    expect(preserved.updated_by).toBe("alice");
+    // Explicit null → cleared.
+    const cleared = upsertEvent({
+      id: created.id,
+      name: "partial",
+      status: "in_prep",
+      sourceType: "agent_update",
+      expectedVersion: 2,
+      date: null,
+      channelId: null,
+      sourceMessageId: null,
+      sourceChannelId: null,
+      updatedBy: null,
+    });
+    expect(cleared.date).toBeNull();
+    expect(cleared.channel_id).toBeNull();
+    expect(cleared.source_message_id).toBeNull();
+    expect(cleared.source_channel_id).toBeNull();
+    expect(cleared.updated_by).toBeNull();
+  });
+
+  test("isManual: false explicitly clears the manual flag", () => {
+    const created = upsertEvent({
+      name: "explicit-clear",
+      status: "planned",
+      sourceType: "slash_command",
+      isManual: true,
+    });
+    const cleared = upsertEvent({
+      id: created.id,
+      name: "explicit-clear",
+      status: "confirmed",
+      sourceType: "slash_command",
+      isManual: false,
+      expectedVersion: 1,
+    });
+    expect(cleared.is_manual).toBe(0);
   });
 
   test("getEventByName returns the most recent matching row", () => {
