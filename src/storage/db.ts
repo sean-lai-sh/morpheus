@@ -92,6 +92,23 @@ function migrate(db: Database): void {
       dirty INTEGER NOT NULL DEFAULT 0,
       consecutive_failures INTEGER NOT NULL DEFAULT 0
     );
+
+    CREATE TABLE IF NOT EXISTS events (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      date TEXT,
+      status TEXT NOT NULL,
+      channel_id TEXT,
+      source_type TEXT NOT NULL,
+      source_message_id TEXT,
+      source_channel_id TEXT,
+      is_manual INTEGER NOT NULL DEFAULT 0,
+      version INTEGER NOT NULL DEFAULT 1,
+      updated_at INTEGER NOT NULL,
+      updated_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS events_name_idx ON events(name);
+    CREATE INDEX IF NOT EXISTS events_date_idx ON events(date);
   `);
 }
 

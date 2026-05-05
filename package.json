@@ -13,6 +13,7 @@
     "list-channels": "doppler run -- bun scripts/list-channels.ts",
     "register-nia": "doppler run -- bun scripts/register-nia-source.ts",
     "refresh-members": "doppler run -- bun scripts/refresh-members.ts",
+    "build:sandbox": "bash scripts/build-sandbox-image.sh",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:watch": "bun test --watch"
