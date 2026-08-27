@@ -386,3 +386,149 @@ describe("firstPassSnippets", () => {
     expect(ids).toContain("fps-sponsors");
   });
 });
+
+describe("firstPassSnippets FTS relevance pass", () => {
+  const RECENT_COUNT = 20;
+  const OUT_OF_SCOPE_COUNT = 250;
+  // Snippet-only content words, so nothing else in this file's DB matches them.
+  const KEYWORD = "zephyrite";
+  const job = (scope: "channel" | "workspace", content: string, channelIds: string[] = []) => ({
+    namespace: EBOARD,
+    scope,
+    channel_ids: channelIds,
+    discord_channel_id: SPONSORS,
+    discord_thread_id: null,
+    content,
+  });
+
+  // Every row this describe seeds uses an `fts-` id so afterAll can remove exactly
+  // those and leave the shared DB as the earlier describes expect it.
+  const purgeSeeded = () => {
+    getDb().run("DELETE FROM messages WHERE id LIKE 'fts-%'");
+  };
+
+  beforeAll(() => {
+    purgeSeeded();
+    // Old, relevant (sponsors, in eboard).
+    upsertMessage({
+      id: "fts-old-hit",
+      channelId: SPONSORS,
+      authorId: "u2",
+      authorName: "bob",
+      content: `the ${KEYWORD} contract was signed last spring`,
+      createdAt: 10,
+    });
+    // Old, relevant, but in a different eboard channel (outside a sponsors-only job).
+    upsertMessage({
+      id: "fts-old-hit-general",
+      channelId: GENERAL_CHAT,
+      authorId: "u2",
+      authorName: "bob",
+      content: `${KEYWORD} kickoff notes`,
+      createdAt: 11,
+    });
+    // Old, relevant, but outside the eboard subtree entirely.
+    upsertMessage({
+      id: "fts-old-hit-leadership",
+      channelId: LEADERSHIP_TEAM,
+      authorId: "u2",
+      authorName: "bob",
+      content: `${KEYWORD} executive summary`,
+      createdAt: 12,
+    });
+    // Newest message: relevant AND recent (dedup case).
+    upsertMessage({
+      id: "fts-recent-hit",
+      channelId: SPONSORS,
+      authorId: "u2",
+      authorName: "bob",
+      content: `${KEYWORD} renewal is due`,
+      createdAt: 100_000,
+    });
+    // Plenty of newer unrelated noise so recency alone would never surface the old hit.
+    for (let i = 0; i < RECENT_COUNT; i++) {
+      upsertMessage({
+        id: `fts-noise-${i}`,
+        channelId: SPONSORS,
+        authorId: "u2",
+        authorName: "bob",
+        content: `unrelated chatter number ${i}`,
+        createdAt: 50_000 + i,
+      });
+    }
+    // Many better-ranked matches outside the eboard subtree. If the FTS query
+    // ranked the whole table before scoping, these would crowd the single
+    // in-scope hit out of the candidate window.
+    for (let i = 0; i < OUT_OF_SCOPE_COUNT; i++) {
+      upsertMessage({
+        id: `fts-flood-${i}`,
+        channelId: LEADERSHIP_TEAM,
+        authorId: "u2",
+        authorName: "bob",
+        content: `${KEYWORD} ${KEYWORD} ${KEYWORD} ${KEYWORD} flood ${i}`,
+        createdAt: 20_000 + i,
+      });
+    }
+  });
+
+  afterAll(() => {
+    purgeSeeded();
+  });
+
+  test("an old matching message ranks ahead of newer unrelated ones", () => {
+    const snippets = firstPassSnippets(job("channel", `<@111> the ${KEYWORD} contract`, [SPONSORS]));
+    const ids = snippets.map((s) => s.id);
+    expect(ids).toContain("fts-old-hit");
+    const hitIdx = ids.indexOf("fts-old-hit");
+    const noiseIdx = ids.findIndex((id) => id?.startsWith("fts-noise-"));
+    expect(noiseIdx).toBeGreaterThan(hitIdx);
+    expect(snippets[hitIdx]?.source).toBe("fts");
+    expect(snippets.find((s) => s.id?.startsWith("fts-noise-"))?.source).toBe("recent");
+  });
+
+  test("a matching message outside the job's channels is excluded for a channel job", () => {
+    const snippets = firstPassSnippets(job("channel", `${KEYWORD}`, [SPONSORS]));
+    const ids = snippets.map((s) => s.id);
+    expect(ids).toContain("fts-old-hit");
+    expect(ids).not.toContain("fts-old-hit-general");
+    expect(ids).not.toContain("fts-old-hit-leadership");
+  });
+
+  test("scoping happens before the candidate limit, not only after it", () => {
+    // 250 better-ranked out-of-scope rows exceed the FTS candidate window (200);
+    // the lone old in-scope hit must still come back for a sponsors-only job.
+    const snippets = firstPassSnippets(job("channel", `${KEYWORD} contract`, [SPONSORS]));
+    const ids = snippets.map((s) => s.id);
+    expect(ids).toContain("fts-old-hit");
+    expect(snippets.find((s) => s.id === "fts-old-hit")?.source).toBe("fts");
+    expect(ids.some((id) => id?.startsWith("fts-flood-"))).toBe(false);
+  });
+
+  test("a matching message outside the workspace subtree is excluded for a workspace job", () => {
+    const snippets = firstPassSnippets(job("workspace", `${KEYWORD}`));
+    const ids = snippets.map((s) => s.id);
+    expect(ids).toContain("fts-old-hit");
+    expect(ids).toContain("fts-old-hit-general");
+    expect(ids).not.toContain("fts-old-hit-leadership");
+  });
+
+  test("a message that is both an FTS hit and recent appears once", () => {
+    const snippets = firstPassSnippets(job("channel", `${KEYWORD} renewal`, [SPONSORS]));
+    const ids = snippets.map((s) => s.id);
+    expect(ids.filter((id) => id === "fts-recent-hit")).toHaveLength(1);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(snippets.find((s) => s.id === "fts-recent-hit")?.source).toBe("fts");
+  });
+
+  test("punctuation-only content falls back to recency without throwing", () => {
+    const snippets = firstPassSnippets(job("channel", "<@111> ?!?", [SPONSORS]));
+    expect(snippets.length).toBeGreaterThan(0);
+    expect(snippets.every((s) => s.source === "recent")).toBe(true);
+    expect(snippets[0]?.id).toBe("fts-recent-hit");
+  });
+
+  test("cap of 12 still holds with FTS hits", () => {
+    expect(firstPassSnippets(job("channel", `${KEYWORD} chatter`, [SPONSORS]), 50)).toHaveLength(12);
+    expect(firstPassSnippets(job("channel", `${KEYWORD} chatter`, [SPONSORS]))).toHaveLength(12);
+  });
+});

@@ -6,6 +6,7 @@ import {
 } from "../storage/messages.ts";
 import { requireNamespace, rowInScope } from "./namespace.ts";
 import {
+  channelIdsForNamespace,
   channelIdsForScope,
   channelIndexPath,
   indexPathForRow,
@@ -102,15 +103,89 @@ export function ingestFreshness(): { lastMessageAt: number | null; ftsCount: num
   return { lastMessageAt: last, ftsCount: ftsCount() };
 }
 
-export function toFtsQuery(raw: string): string {
-  const tokens = raw
+/** Function words that add nothing to bm25 and would starve an AND query. */
+const STOPWORDS = new Set([
+  "a","an","and","are","as","at","be","been","before","but","by","can","did","do","does","for","from",
+  "had","has","have","how","i","if","in","into","is","it","its","me","my","of","on","or","our","so",
+  "that","the","their","them","then","there","these","they","this","to","us","was","we","were","what",
+  "when","where","which","who","why","will","with","would","you","your","like","just","lol","pls","please",
+]);
+
+const MAX_QUERY_TOKENS = 32;
+
+function bareTokens(raw: string): string[] {
+  return raw
     .replace(/[^\p{L}\p{N}_]+/gu, " ")
     .trim()
     .split(/\s+/)
-    .filter((t) => t.length > 0)
-    .slice(0, 32);
-  if (tokens.length === 0) return "";
-  return tokens.map((t) => `"${t.replace(/"/g, "")}"`).join(" AND ");
+    .filter((t) => t.length > 0);
+}
+
+/**
+ * Split a query into FTS5 phrase terms.
+ * - `"exact phrase"` stays a quoted phrase (no stemming across it).
+ * - Everything else becomes bare stemmed tokens with stopwords removed.
+ * If stopword removal empties the query, the stopwords are kept (so `"what is it"` still matches something).
+ */
+export function ftsTerms(raw: string): string[] {
+  const phrases: string[] = [];
+  const rest = raw.replace(/"([^"]+)"/g, (_m, inner: string) => {
+    const t = bareTokens(inner);
+    if (t.length > 0) phrases.push(`"${t.join(" ")}"`);
+    return " ";
+  });
+  const tokens = bareTokens(rest);
+  let words = tokens.filter((t) => !STOPWORDS.has(t.toLowerCase()));
+  if (words.length === 0 && phrases.length === 0) words = tokens;
+  return [...phrases, ...words.map((w) => `"${w}"`)].slice(0, MAX_QUERY_TOKENS);
+}
+
+/**
+ * Strict (AND) FTS5 expression. Every term must match. Used for the precision pass,
+ * and as the `query required` guard in HTTP.
+ */
+export function toFtsQuery(raw: string): string {
+  return ftsTerms(raw).join(" AND ");
+}
+
+const LOOSE_MIN_TERMS = 3;
+const LOOSE_MAX_TERMS = 8;
+
+/**
+ * Loose FTS5 expression for the recall pass: an OR of AND-pairs over the first
+ * `LOOSE_MAX_TERMS` terms, so a hit must match at least two terms (a plain OR let
+ * `zebra-unique-9` pull in anything containing "unique"). Quoted phrases are single
+ * terms. Returns "" (no loose pass) when there are fewer than `LOOSE_MIN_TERMS`.
+ */
+export function toFtsQueryLoose(raw: string): string {
+  const terms = ftsTerms(raw).slice(0, LOOSE_MAX_TERMS);
+  if (terms.length < LOOSE_MIN_TERMS) return "";
+  const pairs: string[] = [];
+  for (let i = 0; i < terms.length; i++) {
+    for (let j = i + 1; j < terms.length; j++) {
+      pairs.push(`(${terms[i]} AND ${terms[j]})`);
+    }
+  }
+  return pairs.join(" OR ");
+}
+
+/**
+ * Effective channel ids covered by a `pathPrefix`, or null for no restriction (`/`).
+ * Applied in SQL before the LIMIT so a small channel is not starved by a busy sibling.
+ * An unparseable or out-of-scope prefix yields [] (nothing can match it).
+ */
+function channelIdsForPathPrefix(prefix: string, scope: Scope): string[] | null {
+  const parsed = parseIndexPath(prefix);
+  if (!parsed) return [];
+  if (parsed.kind === "root") return null;
+  if (!scope.visible.has(parsed.namespace)) return [];
+  if (parsed.kind === "namespace") return channelIdsForNamespace(parsed.namespace);
+  if (parsed.kind === "category") {
+    return loadChannels()
+      .channels.filter((c) => c.workspace === parsed.namespace && c.category === parsed.category)
+      .map((c) => c.id);
+  }
+  return [parsed.channel.id];
 }
 
 function resolveChannelHint(scope: Scope, hint: string): string | null {
@@ -146,23 +221,13 @@ interface FtsHitRow extends MessageRow {
   rank: number;
 }
 
-function search(q: SearchQuery): SearchHit[] {
-  const ftsQuery = toFtsQuery(q.query);
-  if (!ftsQuery) return [];
-  const limit = Math.min(Math.max(q.limit ?? 10, 1), SEARCH_LIMIT_MAX);
-  const nsIds = channelIdsForScope(q.scope);
-  if (nsIds.length === 0) return [];
+const SNIPPET_TOKENS = 32;
 
-  let channelFilter: string | null = null;
-  if (q.channelHint) {
-    channelFilter = resolveChannelHint(q.scope, q.channelHint);
-    if (!channelFilter) return [];
-  }
-
+function ftsRows(q: SearchQuery, ftsExpr: string, nsIds: string[], channelFilter: string | null, cap: number): FtsHitRow[] {
   const { sql: inSql, params: inParams } = inClause(nsIds);
-  const params: (string | number)[] = [ftsQuery, ...inParams];
+  const params: (string | number)[] = [ftsExpr, ...inParams];
   let sql = `
-    SELECT m.*, snippet(messages_fts, 0, '', '', '…', 12) AS snippet, bm25(messages_fts) AS rank
+    SELECT m.*, snippet(messages_fts, 0, '', '', '…', ${SNIPPET_TOKENS}) AS snippet, bm25(messages_fts) AS rank
     FROM messages_fts
     JOIN messages m ON m.rowid = messages_fts.rowid
     WHERE messages_fts MATCH ?
@@ -188,37 +253,94 @@ function search(q: SearchQuery): SearchHit[] {
     params.push(q.untilMs);
   }
   sql += ` ORDER BY rank ASC, CAST(m.id AS INTEGER) ASC LIMIT ?`;
-  params.push(limit * 4);
+  params.push(cap);
+  return getDb().query<FtsHitRow, (string | number)[]>(sql).all(...params);
+}
 
-  const rows = getDb().query<FtsHitRow, (string | number)[]>(sql).all(...params);
+function linksForHits(ids: string[]): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  if (ids.length === 0) return out;
+  const { sql: inSql, params } = inClause(ids);
+  const rows = getDb()
+    .query<{ message_id: string; url: string }, string[]>(
+      `SELECT message_id, url FROM links WHERE message_id ${inSql} ORDER BY link_id ASC`,
+    )
+    .all(...params);
+  for (const r of rows) {
+    const list = out.get(r.message_id) ?? [];
+    list.push(r.url);
+    out.set(r.message_id, list);
+  }
+  return out;
+}
+
+/**
+ * Two passes: strict (every term) first, then loose (any two terms, bm25-ranked) to
+ * fill up to `limit`. A natural-language question therefore degrades to its rarest
+ * word pairs instead of returning nothing.
+ */
+function search(q: SearchQuery): SearchHit[] {
+  const strict = toFtsQuery(q.query);
+  if (!strict) return [];
+  const limit = Math.min(Math.max(q.limit ?? 10, 1), SEARCH_LIMIT_MAX);
+  let nsIds = channelIdsForScope(q.scope);
+  if (nsIds.length === 0) return [];
+
+  let channelFilter: string | null = null;
+  if (q.channelHint) {
+    channelFilter = resolveChannelHint(q.scope, q.channelHint);
+    if (!channelFilter) return [];
+  }
+
+  const prefix =
+    q.pathPrefix && q.pathPrefix.endsWith("/") && q.pathPrefix.length > 1
+      ? q.pathPrefix.slice(0, -1)
+      : q.pathPrefix;
+  if (prefix) {
+    const prefixIds = channelIdsForPathPrefix(prefix, q.scope);
+    if (prefixIds) {
+      const allowed = new Set(prefixIds);
+      nsIds = nsIds.filter((id) => allowed.has(id));
+      if (nsIds.length === 0) return [];
+    }
+  }
+
   const hits: SearchHit[] = [];
   const seen = new Set<string>();
-  for (const row of rows) {
-    if (seen.has(row.id)) continue;
-    if (!rowInScope(row, q.scope)) continue;
-    const path = indexPathForRow(row);
-    if (!path) continue;
-    if (q.pathPrefix) {
-      const prefix = q.pathPrefix.endsWith("/") && q.pathPrefix.length > 1
-        ? q.pathPrefix.slice(0, -1)
-        : q.pathPrefix;
-      if (!pathPrefixMatches(path, prefix)) continue;
+  const collect = (rows: FtsHitRow[], match: SearchHit["match"]): void => {
+    for (const row of rows) {
+      if (hits.length >= limit) return;
+      if (seen.has(row.id)) continue;
+      if (!rowInScope(row, q.scope)) continue;
+      const path = indexPathForRow(row);
+      if (!path) continue;
+      if (prefix && !pathPrefixMatches(path, prefix)) continue;
+      seen.add(row.id);
+      hits.push({
+        id: row.id,
+        score: row.rank,
+        snippet: row.snippet || row.content.slice(0, 160),
+        path,
+        channelId: row.channel_id,
+        parentChannelId: row.parent_channel_id,
+        threadId: row.thread_id,
+        authorName: row.author_name,
+        createdAt: row.created_at,
+        permalink: permalinkFor(row),
+        links: [],
+        match,
+      });
     }
-    seen.add(row.id);
-    hits.push({
-      id: row.id,
-      score: row.rank,
-      snippet: row.snippet || row.content.slice(0, 160),
-      path,
-      channelId: row.channel_id,
-      parentChannelId: row.parent_channel_id,
-      threadId: row.thread_id,
-      authorName: row.author_name,
-      createdAt: row.created_at,
-      permalink: permalinkFor(row),
-    });
-    if (hits.length >= limit) break;
+  };
+
+  collect(ftsRows(q, strict, nsIds, channelFilter, limit * 4), "strict");
+  const loose = toFtsQueryLoose(q.query);
+  if (hits.length < limit && loose && loose !== strict) {
+    collect(ftsRows(q, loose, nsIds, channelFilter, limit * 4), "loose");
   }
+
+  const links = linksForHits(hits.map((h) => h.id));
+  for (const h of hits) h.links = links.get(h.id) ?? [];
   return hits;
 }
 

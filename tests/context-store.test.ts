@@ -4,9 +4,17 @@ import { resolve } from "node:path";
 import { resetChannelsForTest } from "../src/config.ts";
 import { withTempCwd, withTempDb, writeCanonicalChannels } from "./helpers.ts";
 import { namespaceForRow, requireNamespace, rowInScope, scopeFor } from "../src/context/namespace.ts";
-import { contextStore, documentFromRow, ftsCount, indexFromRow, rebuildFts } from "../src/context/store.ts";
+import {
+  contextStore,
+  documentFromRow,
+  ftsCount,
+  indexFromRow,
+  rebuildFts,
+  toFtsQueryLoose,
+} from "../src/context/store.ts";
 import { isForbiddenOsPath, parseIndexPath, sanitizeIndexPath } from "../src/context/paths.ts";
 import type { Scope } from "../src/context/types.ts";
+import { extractLinks, persistLinks } from "../src/storage/links.ts";
 import { getMessage, markDeleted, setReactions, upsertMessage } from "../src/storage/messages.ts";
 import { reindexAll } from "../src/tasks/reindex.ts";
 
@@ -457,5 +465,151 @@ describe("Nia is not the retrieval engine", () => {
     delete process.env.NIA_DISCORD_LEADERSHIP_SOURCE_ID;
     const hits = contextStore.search({ query: "sponsors budget", scope: eboard });
     expect(hits.map((h) => h.id)).toContain(E_MSG);
+  });
+});
+
+describe("ContextStore search recall (issue #50)", () => {
+  const FALL_MSG = "100000000000000201";
+  const SEATING_MSG = "200000000000000202";
+  const LINK_MSG = "100000000000000203";
+  const DOC_URL = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOp/edit";
+
+  beforeAll(() => {
+    upsertMessage({
+      id: FALL_MSG,
+      channelId: "1001",
+      authorId: "u1",
+      authorName: "alice",
+      content: "Fall '25 Prep: marketing apps + IG, events rooms/Engage, program leads forms/timeline",
+      createdAt: 2_100,
+    });
+    indexFromRow(getMessage(FALL_MSG)!);
+    upsertMessage({
+      id: SEATING_MSG,
+      channelId: "2002",
+      authorId: "u2",
+      authorName: "bob",
+      content: "seating chart draft for the retreat",
+      createdAt: 2_200,
+    });
+    indexFromRow(getMessage(SEATING_MSG)!);
+    upsertMessage({
+      id: LINK_MSG,
+      channelId: "1001",
+      authorId: "u1",
+      authorName: "alice",
+      content: `sponsor-deck-unique draft here ${DOC_URL}`,
+      createdAt: 2_300,
+    });
+    indexFromRow(getMessage(LINK_MSG)!);
+    persistLinks(LINK_MSG, "1001", extractLinks(getMessage(LINK_MSG)!.content), 2_300);
+  });
+
+  test("toFtsQueryLoose is an OR of AND-pairs and needs at least 3 terms", () => {
+    expect(toFtsQueryLoose("zebra")).toBe("");
+    expect(toFtsQueryLoose("zebra unique")).toBe("");
+    expect(toFtsQueryLoose("foo bar baz")).toBe(
+      '("foo" AND "bar") OR ("foo" AND "baz") OR ("bar" AND "baz")',
+    );
+    // A quoted phrase is one term.
+    expect(toFtsQueryLoose('"retreat seating" plan')).toBe("");
+    expect(toFtsQueryLoose('"retreat seating" plan zebra')).toContain('("retreat seating" AND "plan")');
+    // Capped at 8 terms → 28 pairs.
+    const many = toFtsQueryLoose("t1 t2 t3 t4 t5 t6 t7 t8 t9 t10");
+    expect(many.split(" OR ").length).toBe(28);
+    expect(many).not.toContain('"t9"');
+  });
+
+  test("a natural-language question falls back to the loose pass", () => {
+    const strictMiss = contextStore.search({ query: "fall 2026 tasks before school starts", scope: eboard });
+    expect(strictMiss.map((h) => h.id)).not.toContain(FALL_MSG);
+
+    const loose = contextStore.search({ query: "fall 2026 prep tasks before school starts", scope: eboard });
+    const looseHit = loose.find((h) => h.id === FALL_MSG);
+    expect(looseHit).toBeDefined();
+    expect(looseHit!.match).toBe("loose");
+
+    const strict = contextStore.search({ query: "fall prep", scope: eboard });
+    const strictHit = strict.find((h) => h.id === FALL_MSG);
+    expect(strictHit).toBeDefined();
+    expect(strictHit!.match).toBe("strict");
+  });
+
+  test("an all-stopword query does not throw", () => {
+    expect(Array.isArray(contextStore.search({ query: "what is it", scope: eboard }))).toBe(true);
+    expect(Array.isArray(contextStore.search({ query: "the a an", scope: leadership }))).toBe(true);
+  });
+
+  test("a punctuation-only query returns []", () => {
+    expect(contextStore.search({ query: "?!... --- ///", scope: leadership })).toEqual([]);
+    expect(contextStore.search({ query: "   ", scope: leadership })).toEqual([]);
+  });
+
+  test("a quoted phrase matches only the phrase", () => {
+    const unquoted = contextStore.search({ query: "retreat seating", scope: leadership }).map((h) => h.id);
+    expect(unquoted).toContain(L_THREAD_MSG);
+    expect(unquoted).toContain(SEATING_MSG);
+    const quoted = contextStore.search({ query: '"retreat seating"', scope: leadership }).map((h) => h.id);
+    expect(quoted).toEqual([L_THREAD_MSG]);
+  });
+
+  test("pathPrefix is applied before the rank limit (no starvation)", () => {
+    for (let i = 0; i < 48; i++) {
+      const id = `100000000000000${String(300 + i)}`;
+      upsertMessage({
+        id,
+        channelId: "1001",
+        authorId: "u1",
+        authorName: "alice",
+        content: "starvation-token repeated in the busy channel",
+        createdAt: 3_000 + i,
+      });
+      indexFromRow(getMessage(id)!);
+    }
+    const LONE = "100000000000000399";
+    upsertMessage({
+      id: LONE,
+      channelId: "5005",
+      authorId: "u5",
+      authorName: "erin",
+      content: "starvation-token repeated in the busy channel",
+      createdAt: 3_999,
+    });
+    indexFromRow(getMessage(LONE)!);
+
+    const hits = contextStore.search({
+      query: "starvation-token repeated",
+      scope: eboard,
+      pathPrefix: "/eboard/general-chat-5005",
+      limit: 10,
+    });
+    expect(hits.map((h) => h.id)).toEqual([LONE]);
+
+    // A category prefix still covers the busy channel and nothing else.
+    const cat = contextStore.search({
+      query: "starvation-token repeated",
+      scope: eboard,
+      pathPrefix: "/eboard/eboard-teams/",
+      limit: 10,
+    });
+    expect(cat.length).toBe(10);
+    expect(cat.every((h) => h.channelId === "1001")).toBe(true);
+
+    // An out-of-scope or unparseable prefix yields nothing.
+    expect(
+      contextStore.search({ query: "starvation-token repeated", scope: pd, pathPrefix: "/eboard" }),
+    ).toEqual([]);
+    expect(
+      contextStore.search({ query: "starvation-token repeated", scope: eboard, pathPrefix: "/eboard/nope" }),
+    ).toEqual([]);
+  });
+
+  test("hits carry links from the links table", () => {
+    const hits = contextStore.search({ query: "sponsor-deck-unique", scope: eboard });
+    const hit = hits.find((h) => h.id === LINK_MSG);
+    expect(hit).toBeDefined();
+    expect(hit!.links).toEqual([DOC_URL]);
+    const other = hits.find((h) => h.id !== LINK_MSG);
+    if (other) expect(other.links).toEqual([]);
   });
 });
