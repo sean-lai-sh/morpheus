@@ -1,10 +1,16 @@
 import { FEED_WEBHOOK_ENV, type FeedChannelKey } from "./channels.ts";
 import { logger } from "../logger.ts";
 
-/** discord.com/discordapp.com and any subdomain (ptb., canary. serve the same webhook API). */
+/**
+ * discord.com/discordapp.com and any subdomain (ptb., canary. serve the same
+ * webhook API). Compared against the DNS-canonical form: an absolute name with
+ * trailing dot(s) (`discord.com.`) resolves to the same host and must not slip
+ * past the exact/subdomain boundary check.
+ */
 function isDiscordHost(hostname: string): boolean {
+  const canonical = hostname.replace(/\.+$/, "");
   for (const root of ["discord.com", "discordapp.com"]) {
-    if (hostname === root || hostname.endsWith(`.${root}`)) return true;
+    if (canonical === root || canonical.endsWith(`.${root}`)) return true;
   }
   return false;
 }

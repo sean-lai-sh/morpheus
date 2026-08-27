@@ -64,7 +64,17 @@ describe("grokBotWebhookUrl", () => {
 });
 
 describe("GROK_BOT_WEBHOOK_URL refuses Discord incoming webhooks on every Discord host", () => {
-  const HOSTS = ["discord.com", "ptb.discord.com", "canary.discord.com", "discordapp.com", "canary.discordapp.com"];
+  const HOSTS = [
+    "discord.com",
+    "ptb.discord.com",
+    "canary.discord.com",
+    "discordapp.com",
+    "canary.discordapp.com",
+    // Absolute DNS names (trailing dot) resolve to the same hosts.
+    "discord.com.",
+    "ptb.discord.com.",
+    "discordapp.com.",
+  ];
 
   test("parseEnv rejects a Discord webhook URL on any Discord host (first layer)", () => {
     for (const host of HOSTS) {
@@ -73,9 +83,19 @@ describe("GROK_BOT_WEBHOOK_URL refuses Discord incoming webhooks on every Discor
     }
   });
 
+  test("dispatch-time guard nulls every Discord host form, trailing dots included (second layer)", () => {
+    for (const host of HOSTS) {
+      const env: Env = {
+        ...liveEnv(EBOARD),
+        GROK_BOT_WEBHOOK_URL: `https://${host}/api/webhooks/123456789012345678/tok-tok-tok`,
+      };
+      expect(grokBotWebhookUrl(env)).toBeNull();
+    }
+  });
+
   test("dispatch-time guard refuses a ptb webhook even if env validation were bypassed", async () => {
     // Forge the Env to exercise the runtime guard directly (defense in depth).
-    const env: Env = { ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: "https://ptb.discord.com/api/webhooks/123456789012345678/tok-tok-tok" };
+    const env: Env = { ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: "https://ptb.discord.com./api/webhooks/123456789012345678/tok-tok-tok" };
     expect(grokBotWebhookUrl(env)).toBeNull();
     let posted = 0;
     const result = await dispatchGrokJob(
