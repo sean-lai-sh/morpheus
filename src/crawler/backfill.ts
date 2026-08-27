@@ -81,6 +81,10 @@ export async function backfillChannel(
   // Must run after parent pagination is exhausted — including the empty last
   // page (parent count is a multiple of PAGE_SIZE). Returning on that empty
   // page skipped threads and last_backfill_complete blocked auto-retry (#66).
+  // If the thread pass throws, leave the parent incomplete so hourly
+  // auto-backfill retries. Per-thread last_backfill_complete already skips
+  // finished threads (#68).
+  let threadsFailed = false;
   if (channel.include_threads) {
     let threadIngested = 0;
     try {
@@ -103,11 +107,17 @@ export async function backfillChannel(
         before = ids[ids.length - 1];
       }
     } catch (err) {
+      threadsFailed = true;
       logger.warn({ err, channel_id: channel.id }, "thread backfill failed");
     }
     if (threadIngested > 0) {
       log.info({ thread_ingested: threadIngested }, "thread messages backfilled");
     }
+  }
+
+  if (threadsFailed) {
+    log.info({ pages, ingested }, "thread backfill failed; parent left incomplete for retry");
+    return { channelId: channel.id, ingested, pages, complete: false };
   }
 
   markBackfillComplete(channel.id);
