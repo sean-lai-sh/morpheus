@@ -1,34 +1,31 @@
-Parent: #25. Depends on #27 and #30.
+Parent: #25. GitHub issue **#31**. **Hosting update:** the “Grok polls Mini `/v1` over the internet” loop is **stale**. See [`docs/hosting.md`](../hosting.md) and [#37](https://github.com/sean-lai-sh/morpheus/issues/37).
 
 ## Goal
 
-Document and (minimally) stub how a **Cursor/Grok cloud agent** uses Morpheus: poll jobs, pull context, reply, optionally open GitHub issues with implementation suggestions.
+Keep **GitHub issues for implementation work only**. Grok Bot does **not** poll Morpheus over the internet (Mini has no public inbound IP). Mini **POSTs** `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL`. Grok Bot then posts FYIs to Discord incoming webhooks and, only for implementation work, may open a GitHub issue if `gh` exists (fail open if it does not).
 
-This slice is mostly contract + a thin helper. Do **not** put Discord bot tokens, Nia keys, or GitHub PATs in the repo. Do **not** implement a self-bot.
+Do **not** put Discord bot tokens, Nia keys, webhook URLs, or GitHub PATs in the repo. Do **not** implement a self-bot. Do **not** design Morpheus to run on AWS, Cursor cloud-agent VMs, or Grok Bot’s shared computer.
 
-Read `docs/context-layer.md` §4–§5.
+Read `docs/hosting.md`, `docs/context-layer.md` §4–§5.
 
 ## Deliverables
 
 ### 1. Agent contract doc
 
-Create `docs/agent-poll-loop.md` with a copy-pasteable loop:
+Create `docs/agent-poll-loop.md` **only as a localhost-on-Mini note** (optional `/v1` on 127.0.0.1). Do **not** document a public `MORPHEUS_BASE_URL` that Grok hits from the internet.
 
-1. `GET /v1/jobs?status=queued` (header `Authorization: Bearer $MORPHEUS_API_TOKEN`).
-2. `POST /v1/jobs/:id/claim` with `{ claimed_by: "$CURSOR_AGENT_ID" }`.
-3. `POST /v1/search` with the job's `namespace` (never switch namespace to "see more").
-4. Optional `GET /v1/channels/:channelId/messages` for recent window.
-5. Produce a Discord `reply` (short) and optionally a GitHub issue body (longer implementation checklist).
-6. Open the GitHub issue **as the Cursor agent** using its existing GitHub credentials (Cloud Agent `gh` / API) against a repo the club designates (e.g. `sean-lai-sh/morpheus` or a later club org). Put the issue URL in complete payload.
-7. `POST /v1/jobs/:id/complete` with `{ reply, github_issue_url }`.
+The live Grok path is:
 
-Include failure path: `POST /v1/jobs/:id/fail`.
+1. Mini (official bot + SQLite) POSTs `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL`.
+2. Grok Bot (one-shot) posts operational FYIs to `DISCORD_WEBHOOK_SPONSORS` / `_OPPORTUNITIES` / `_SPEAKERS` / `_INBOX`.
+3. If the work is **implementation**, Grok may open a GitHub issue using **its** credentials. If `gh` is missing, skip GitHub and still complete the Discord feed.
+4. Official bot `message.reply` for @mentions stays on the Mini (#30).
 
 State explicitly:
 
-- Official Discord bot holds `DISCORD_TOKEN` only on the Morpheus host.
-- Agent holds `MORPHEUS_API_TOKEN` + GitHub auth. Never both Discord + Nia.
-- Leadership jobs (`namespace=leadership`) must not be processed by an agent env that is allowed to post to public repos without a review flag. Recommend: leadership replies stay in Discord; GitHub issues from leadership jobs default **off** (`OPEN_GITHUB_ISSUES_FROM_LEADERSHIP=false`).
+- Official Discord bot holds `DISCORD_BOT_TOKEN` only on the **Mac Mini**.
+- Grok Bot holds `DISCORD_WEBHOOK_*`. Never `DISCORD_BOT_TOKEN` or `NIA_*`.
+- Leadership jobs (`namespace=leadership`) must not open public GitHub issues by default (`OPEN_GITHUB_ISSUES_FROM_LEADERSHIP=false`).
 
 ### 2. GitHub issue posting: agent-side, not bot-side (default)
 
@@ -38,26 +35,29 @@ If a follow-up wants the bot to open issues as a GitHub App, that is a new issue
 
 ### 3. Optional helper script (no secrets)
 
-`scripts/agent-poll-example.ts` — a **dry-run** client that reads `MORPHEUS_BASE_URL` + `MORPHEUS_API_TOKEN` from env and prints jobs. Guard with `if (import.meta.main)`. Do not default-loop in `bun run live`. Do not hardcode URLs with tokens.
+Optional: a dry-run that prints a sample Mini→Grok payload. Guard with `if (import.meta.main)`. Do not default-loop in `bun run live`. Do not hardcode URLs with tokens. Do not assume Grok can reach Mini HTTP.
 
 ### 4. README pointer
 
-Link the poll-loop doc from README. List new env names as empty placeholders only.
+Link [`docs/hosting.md`](../hosting.md) from README (already). List env names as empty placeholders only.
 
 ## Out of scope
 
-- Wiring Cursor Automations / webhooks (can mention as future).
+- Designing Morpheus as an internet-facing job API (stale vs #37).
+- Wiring Cursor Automations (Mini outbound webhook is the v1 trigger).
 - Pi-agent-core.
 - Changing Discord intents.
 
 ## Acceptance criteria
 
-- [ ] `docs/agent-poll-loop.md` exists and matches the real `/v1/jobs` routes from the claim/complete issue.
+- [ ] Docs say Grok does not poll Mini over the internet; Mini POSTs out.
+- [ ] GitHub is implementation-only; fail open if `gh` is missing.
+- [ ] AWS / cloud-agent / Grok-shared-box hosting is marked stale.
 - [ ] No secret values in the repo.
 - [ ] Leadership GitHub posting is documented as off by default.
 - [ ] Example script does not run unless invoked explicitly.
 
 ## Dependencies
 
-- HTTP v1 search.
-- Job claim/complete routes (doc can land in the same PR as that issue if needed).
+- Mini dispatch (#37) for the live Grok path.
+- Optional localhost `/v1` (#27) is not required for Grok to receive jobs.

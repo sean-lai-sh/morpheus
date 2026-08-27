@@ -1,6 +1,8 @@
 # Audit: issues & PRs vs Discord → Morpheus → Grok Bot
 
-Consumer for this work: **Cursor Grok Bot** (Tech@NYU summary / implementation agent), talked to through the **official Discord bot**, using Morpheus as a **remote queryable context layer**. Grok Bot **polls** Morpheus, then files GitHub issues and the bot posts Discord replies.
+Consumer for this work: **Cursor Grok Bot** (Tech@NYU summary / implementation agent). **Host = Mac Mini** ([`docs/hosting.md`](hosting.md)): official Discord gateway + Morpheus SQLite. Grok Bot is a **one-shot consumer**, not the host. Mini **POSTs** `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL`. Grok Bot then posts FYIs to Discord incoming webhooks (`#sponsors` / `#opportunities` / `#speakers`) and files GitHub issues **only** for implementation work.
+
+**Stale:** Grok Bot polling Mini `/v1` over the internet (needs a public inbound IP). **Stale:** AWS as the 24/7 host. **Stale:** running `bun run live` on Cursor cloud-agent VMs or on Grok Bot’s shared computer.
 
 This is **not**:
 
@@ -15,18 +17,20 @@ Investigated: all GitHub issues (open + closed #9), PRs #6 (merged), #23 (open),
 ## Target loop (breaking vs older plans)
 
 ```
- Tech@NYU Discord  --official bot token-->  Morpheus (always-on)
-        ^                                         |
-        | replies                                 | SQLite + HTTP /v1
-        |                                         v
-        +-------- complete job -----------  Grok Bot (Cursor Cloud)
-                                                    |
-                                                    +--> GitHub issues (Grok's gh identity)
+ Tech@NYU Discord  --official bot token-->  Mac Mini (Morpheus, 24/7)
+        │                                         |
+        │                                         | POST GROK_BOT_WEBHOOK_URL
+        │                                         v
+        │                                   Grok Bot (one-shot consumer)
+        │                                         |
+        +----- Discord incoming webhooks <--------+
+              (#sponsors #opportunities #speakers)
+              GitHub issues = implementation only
 ```
 
 **Breaking change vs agent-v1 (#10–#22):** mention does **not** call `runAgentTurn` in-process. Mention enqueues a **job**. Grok Bot is the model. Morpheus does not hold Anthropic/OpenAI keys for that path.
 
-**Breaking change vs Nia-index-overhaul (PR #6, on main):** markdown + Nia push remain until #28, but **retrieval for Grok Bot is HTTP + FTS, never a folder of artifacts.**
+**Breaking change vs Nia-index-overhaul (PR #6, on main):** markdown + Nia push remain until #28, but **retrieval for Grok Bot is Mini SQLite + outbound `GROK_BOT_WEBHOOK_URL`, never a folder of artifacts and never Grok polling Mini over the internet.**
 
 ---
 
@@ -65,7 +69,7 @@ No commits vs `main`. Dead name, not a hidden architecture.
 |---|---|
 | #1 `clientReady` | Official bot, one-line. Independent. |
 | #4 `--channel` backfill | Human ops; still useful when adding a channel. Not the agent loop. |
-| #7 events schema | **Keep.** Implemented in PR #23. Grok Bot later reads via HTTP (#35). |
+| #7 events schema | **Keep.** Implemented in PR #23. Optional localhost `/v1/events` later (#35); Grok does not poll Mini over the internet. |
 | #14 resumeBackfill **pagination only** | Useful freshness before Grok sees a channel. **Drop** `flushNamespace` / Nia. |
 | #22 `bun run setup` | Human CLI for `channels.yml`. **Drop** the “then run register-nia” step. Keep interactive allowlist writer. |
 | #25–#32 | Nia-exit + job queue (this investigation). Refine: Grok Bot is the named consumer. |
@@ -100,9 +104,9 @@ No commits vs `main`. Dead name, not a hidden architecture.
 
 Every new slice must assume all three:
 
-1. **Official Discord bot** (`discord.js` + `DISCORD_TOKEN` on the Morpheus host only). No self-bot, no user token.
-2. **Morpheus is HTTP + SQLite**, not `data/discord/**` and not Nia. Grok Bot polls `/v1/jobs`, `/v1/search`, `/v1/messages`, `/v1/poll` with `MORPHEUS_API_TOKEN`.
-3. **Grok Bot files GitHub issues** from Discord jobs (its GitHub identity). Morpheus posts Discord replies on `complete`. Leadership jobs do not open public GitHub issues by default.
+1. **Official Discord bot** (`discord.js` + `DISCORD_BOT_TOKEN` on the **Mac Mini** only). No self-bot, no user token.
+2. **Morpheus is SQLite on the Mini.** Mini POSTs `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL`. Grok Bot does not poll Mini over the internet (no public inbound IP). `/v1` if present is localhost-only.
+3. **Grok Bot** posts operational FYIs to Discord incoming webhooks (`#sponsors` / `#opportunities` / `#speakers` / `#inbox`) and files GitHub issues **only** for implementation work. Grok Bot does **not** host Morpheus. Leadership jobs do not open public GitHub issues by default.
 
 Do not add `ANTHROPIC_API_KEY` / `AGENT_MODEL` / pi-agent-core to the MVP path.
 

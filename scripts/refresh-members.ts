@@ -7,7 +7,7 @@
  *    bun run refresh-members
  */
 import { Client, GatewayIntentBits } from "discord.js";
-import { loadEnv } from "../src/config.ts";
+import { discordBotToken, loadEnv } from "../src/config.ts";
 import { logger } from "../src/logger.ts";
 import { upsertUser } from "../src/storage/users.ts";
 
@@ -18,7 +18,7 @@ async function main(): Promise<void> {
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
   });
 
-  await client.login(env.DISCORD_TOKEN);
+  await client.login(discordBotToken(env));
   logger.info("logged in; fetching guild members");
 
   const guild = await client.guilds.fetch(env.DISCORD_GUILD_ID);

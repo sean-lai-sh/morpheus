@@ -29,27 +29,28 @@ Do **not** treat this issue as a rewrite. Land the slices below in separate PRs.
 Each child issue is written so a Cursor agent can implement it without this chat.
 
 - [ ] **A.** `ContextStore` + SQLite FTS5, namespace-isolated, ingest writes the index (#26)
-- [ ] **B.** Authenticated HTTP `/v1/search` … `/v1/poll` with **scoped** tokens (#27)
 - [ ] **D.** Discord mention / reply-to-bot → `jobs` table (#29)
-- [ ] **E.** Job claim/complete HTTP + idempotent Discord replies (#30)
-- [ ] **Webhooks** operational feed `#sponsors` / `#opportunities` / `#speakers` / `#inbox` (no GitHub for FYIs)
+- [ ] **Mini dispatch** POST `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL` (#37)
+- [ ] **E.** Idempotent Discord replies from the official bot (#30)
+- [ ] **Webhooks** operational feed `#sponsors` / `#opportunities` / `#speakers` / `#inbox` (Grok Bot posts; no GitHub for FYIs) (#36)
 - [ ] **F.** GitHub issues for **implementation work only** (fail open if `gh` missing) (#31)
+- [ ] **B.** HTTP `/v1` **localhost on Mini only** (#27) — not the Grok internet path
 - [ ] **C. last** Feature-flag Nia off, then delete `src/nia/` (#28)
 
 ## Constraints
 
-- Official Discord bot only (`DISCORD_TOKEN` from Doppler). No user-token / self-bot.
+- Official Discord bot only (`DISCORD_BOT_TOKEN` on the **Mac Mini**). No user-token / self-bot.
 - Do not commit tokens, Doppler values, or a real `config/channels.yml`.
-- Cursor/Grok agents get `MORPHEUS_API_TOKEN`, **not** `DISCORD_TOKEN`.
+- Grok Bot gets `DISCORD_WEBHOOK_*` only. Mini gets `DISCORD_BOT_TOKEN` + `GROK_BOT_WEBHOOK_URL`. Never swap those.
 - Leadership (`isolated: true`) must never leak into general search/read/jobs.
 - Markdown export may stay until C ships; do not build new retrieval on it.
 
 ## Secrets / where things run
 
-Must stay on the always-on bot host (Doppler / env, never git): `DISCORD_TOKEN`, future `MORPHEUS_API_TOKEN`, current `NIA_*` until C, SQLite volume.
+Must stay on the **Mac Mini** (Doppler / env, never git): `DISCORD_BOT_TOKEN`, `GROK_BOT_WEBHOOK_URL`, current `NIA_*` until C, SQLite volume. **AWS is stale / overkill.** Not Cursor VMs. Not Grok Bot’s shared computer.
 
-Must **not** be given to Grok Bot: `DISCORD_TOKEN`, `NIA_API_KEY`. Webhook URLs (`DISCORD_WEBHOOK_*`) **are** for Grok Bot's operational feed.
+Must **not** be given to Grok Bot: `DISCORD_BOT_TOKEN`, `NIA_API_KEY`. Webhook URLs (`DISCORD_WEBHOOK_*`) **are** for Grok Bot's operational feed.
 
-Can run remotely against HTTP: search, read, poll, claim/complete jobs.
+**Stale:** Grok Bot polling Mini `/v1` over the internet. Mini has no public inbound IP. Context rides in the outbound POST to `GROK_BOT_WEBHOOK_URL`. `/v1` if built is localhost-on-Mini.
 
 `NVIDIA_API_KEY` and the `openai` package are unused leftovers (classifier removed). Do not treat them as required.

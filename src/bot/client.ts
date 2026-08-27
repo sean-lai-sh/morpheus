@@ -1,5 +1,5 @@
 import { Client, GatewayIntentBits, Partials } from "discord.js";
-import { loadEnv } from "../config.ts";
+import { discordBotToken, loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 
 let _client: Client | undefined;
@@ -31,7 +31,7 @@ export function getClient(): Client {
 export async function loginClient(): Promise<Client> {
   const env = loadEnv();
   const client = getClient();
-  if (!client.isReady()) await client.login(env.DISCORD_TOKEN);
+  if (!client.isReady()) await client.login(discordBotToken(env));
   return client;
 }
 

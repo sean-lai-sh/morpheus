@@ -2,7 +2,7 @@ Parent: #25. Depends on #29 and #27.
 
 ## Goal
 
-Let an external Cursor/Grok agent **claim** queued Discord jobs, do work using `/v1/search` etc., then **complete** them. Completing posts a **Discord reply from the official bot process**. The agent never receives `DISCORD_TOKEN`.
+**Hosting:** Grok Bot does **not** poll these routes over the internet. Mini has no public inbound IP; live jobs go out via `GROK_BOT_WEBHOOK_URL` (#37). Claim/complete HTTP, if built, is **localhost on the Mac Mini**. Completing posts a **Discord reply from the official bot process**. Grok never receives `DISCORD_BOT_TOKEN`.
 
 Depends on: jobs enqueue issue + HTTP v1 issue.
 
@@ -48,7 +48,7 @@ Claim CAS binds to `claimed_by`; a second worker with a different identity gets 
 
 - Same bearer as search. Do not add a second Discord-side token.
 - `reply` is untrusted agent text: send as message content (Discord markdown), no eval. Optional: reject `@everyone` / `@here` unless in leadership (simple string check).
-- Never echo `DISCORD_TOKEN` in job payloads or logs.
+- Never echo `DISCORD_BOT_TOKEN` (or webhook URLs) in job payloads or logs.
 
 ## Out of scope
 

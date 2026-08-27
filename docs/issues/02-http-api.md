@@ -2,9 +2,11 @@ Parent: #25. Depends on #26.
 
 ## Goal
 
-Expose the `ContextStore` from the FTS slice over HTTP so a **remote** Cursor/Grok agent can search/read/poll without a local `data/` dump or Nia. Serve it from the existing `Bun.serve` in `src/http/health.ts` (rename to `src/http/server.ts` if needed).
+Expose the `ContextStore` from the FTS slice over HTTP for **on-box tools on the Mac Mini**. Bind to **127.0.0.1**. This is **not** the Grok Bot internet path: Mini has no public inbound IP, and Grok Bot must not poll `/v1` over the network. Live context for Grok is pushed outbound via `GROK_BOT_WEBHOOK_URL` ([#37](https://github.com/sean-lai-sh/morpheus/issues/37), [`docs/hosting.md`](../hosting.md)).
 
-Depends on the ContextStore / FTS5 issue (#26). Read `docs/context-layer.md` §3 HTTP table and §5 secrets.
+AWS / Cursor cloud-agent VMs / Grok Bot’s shared computer are **not** hosts for this server.
+
+Depends on the ContextStore / FTS5 issue (#26). Read `docs/context-layer.md` §3 HTTP table, §5 secrets, and `docs/hosting.md`.
 
 ## Files to create / modify
 
@@ -33,13 +35,14 @@ Constant-time compare for the token (`crypto.timingSafeEqual` on hashed or padde
 - Reuse `startHealthServer` / `stopHealthServer` from `src/index.ts` live mode so one port (`HEALTH_PORT`) hosts both.
 - `limit` capped at 50.
 - Never return SQL errors to clients; log internally, 500.
-- CORS: default deny. This is a bot-to-agent API, not a browser app.
+- CORS: default deny. Localhost-on-Mini only; not a public API.
+- Bind `127.0.0.1` (not `0.0.0.0`). Mini does not need a public inbound IP.
 - Do not read `data/discord/**/*.md` in these handlers.
 
 ## Out of scope
 
 - Job queue routes (`/v1/jobs`) — later slice.
-- TLS (terminate at reverse proxy).
+- Public TLS / reverse proxy / AWS load balancer (stale). Grok does not poll this over the internet.
 - Removing Nia syncer.
 
 ## Acceptance criteria

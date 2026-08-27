@@ -2,11 +2,11 @@
 
 Discord intelligence bot for the club's eboard. Ingests messages into SQLite, renders them as structured markdown, and syncs to Nia for semantic search.
 
-**Direction (2026-08):** Nia is a write-only derived index, not the source of truth. The consumer is **Cursor Grok Bot** (Tech@NYU): official Discord bot → Morpheus HTTP/SQLite → Grok Bot polls jobs and files GitHub issues.
+**Direction (2026-08):** Nia is a write-only derived index. **Host = Mac Mini** (Sean's network). **Grok Bot = consumer**, not the host. AWS / Cursor VMs / Grok's shared box are not 24/7. See [docs/hosting.md](docs/hosting.md).
 
-- Plan: [docs/context-layer.md](docs/context-layer.md) · webhooks: [docs/discord-webhooks.md](docs/discord-webhooks.md)
+- Plan: [docs/context-layer.md](docs/context-layer.md) · hosting: [docs/hosting.md](docs/hosting.md) · webhooks: [docs/discord-webhooks.md](docs/discord-webhooks.md)
 - Issue/PR audit vs Grok Bot: [docs/grok-bot-audit.md](docs/grok-bot-audit.md)
-- Grok Bot spec: [#33](https://github.com/sean-lai-sh/morpheus/issues/33) · park old agent-v1: [#34](https://github.com/sean-lai-sh/morpheus/issues/34)
+- Grok Bot spec: [#33](https://github.com/sean-lai-sh/morpheus/issues/33) · Mini dispatch: [#37](https://github.com/sean-lai-sh/morpheus/issues/37) · park old agent-v1: [#34](https://github.com/sean-lai-sh/morpheus/issues/34)
 - Slices: [#32](https://github.com/sean-lai-sh/morpheus/issues/32) index · FTS → HTTP → jobs → replies · operational feed: webhooks (`bun run post-feed`) · GitHub only for implementation
 
 
@@ -69,19 +69,24 @@ bun install
 doppler login
 doppler setup --project morpheus-bot --config dev
 
-doppler secrets set DISCORD_TOKEN=...
+doppler secrets set DISCORD_BOT_TOKEN=...
 doppler secrets set DISCORD_GUILD_ID=...
-doppler secrets set NVIDIA_API_KEY=...
+doppler secrets set GROK_BOT_WEBHOOK_URL=...
+# optional until Nia is deleted:
 doppler secrets set NIA_API_KEY=...
 doppler secrets set NIA_BASE_URL=https://apigcp.trynia.ai/v2
 doppler secrets set LOG_LEVEL=info HEALTH_PORT=8080
 ```
 
+Grok Bot (not Mini) holds `DISCORD_WEBHOOK_SPONSORS` / `_OPPORTUNITIES` / `_SPEAKERS` / `_INBOX`. Never commit any of these.
+
+Run Morpheus on the **Mac Mini** (`docs/hosting.md`). Do not run `bun run live` on AWS, Cursor cloud agents, or Grok Bot's shared computer.
+
 ### 3. Discord bot
 
 1. Create an app at <https://discord.com/developers/applications> → Bot tab
 2. Enable privileged intents: `Message Content`, `Server Members`
-3. Copy token to Doppler as `DISCORD_TOKEN`
+3. Copy token to Doppler as `DISCORD_BOT_TOKEN`
 4. OAuth2 scopes: `bot` + `applications.commands`, permissions: `View Channels` + `Read Message History`
 5. Invite to the guild and restrict to the desired channels at the channel-permission level
 

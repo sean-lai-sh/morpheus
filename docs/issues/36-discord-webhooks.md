@@ -19,12 +19,12 @@ Filing a GitHub issue for every hello@ FYI is too much. Morning digest + time-se
 
 Already sketched in this repo (`src/notify/*`, `docs/discord-webhooks.md`, `bun run post-feed`):
 
-1. Store URLs in Doppler / Grok Bot secrets: `DISCORD_WEBHOOK_SPONSORS`, `_OPPORTUNITIES`, `_SPEAKERS`, `_INBOX`. Never commit.
+1. Store URLs in the **Grok Bot** secret store: `DISCORD_WEBHOOK_SPONSORS`, `_OPPORTUNITIES`, `_SPEAKERS`, `_INBOX`. Mini holds `GROK_BOT_WEBHOOK_URL` instead. Never commit.
 2. Grok Bot POSTs JSON to the webhook (`allowed_mentions.parse = []`, 2000 cap). No GitHub MCP.
 3. Operators create webhooks in Discord: channel → Integrations → Webhooks (see the doc).
 4. `routeFeedChannel` / `routeFeedFromText` for kind → channel.
 
-Optional later: Morpheus-originated digests using the same module on the persistent host.
+Optional later: Mini-originated digests using `bun run post-feed` on the Mac Mini.
 
 ## Out of scope
 

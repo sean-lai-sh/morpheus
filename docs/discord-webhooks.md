@@ -25,7 +25,7 @@ Parameterize by **logical key → webhook URL**, not hardcoded snowflakes in cod
 2. Edit channel → **Integrations** → **Webhooks** → **New Webhook** (or Server Settings → Integrations → Webhooks, then set the channel).
 3. Name it e.g. `Grok feed` (this is the display name of posts, not the bot user).
 4. Copy the URL. It looks like `https://discord.com/api/webhooks/{id}/{token}`. **The token is a secret.**
-5. Store it in Doppler (Morpheus host) **and/or** the Grok Bot agent secret store. Never commit it. `.gitignore` already covers `.env`.
+5. Store it in the **Grok Bot** secret store as `DISCORD_WEBHOOK_SPONSORS` (etc.). Never commit it. The Mac Mini does **not** need these URLs for the primary loop (Grok posts the feed). `.gitignore` already covers `.env`.
 
 Repeat once per logical key. Rotate by deleting the webhook in Discord and issuing a new URL.
 
@@ -40,9 +40,9 @@ Empty placeholders in `.env.example`:
 - `DISCORD_WEBHOOK_SPEAKERS`
 - `DISCORD_WEBHOOK_INBOX`
 
-**Grok Bot (preferred for FYIs):** reads those env vars and `POST`s JSON to Discord itself. No GitHub. No Morpheus hop. No public inbound IP.
+**Grok Bot (required for FYIs):** holds `DISCORD_WEBHOOK_*` and `POST`s JSON to Discord. No GitHub. Mini does not need a public inbound IP.
 
-**Morpheus host (optional):** same vars in Doppler. Use `bun run post-feed` or `postFeed()` for digests the indexer originates. Do not log the raw URL (the token is in the path).
+**Mac Mini:** holds `DISCORD_BOT_TOKEN` + `GROK_BOT_WEBHOOK_URL`. It does not need channel webhook URLs unless you want Mini-originated digests.
 
 Do **not** put webhook URLs in `config/channels.yml` (that file is channel snowflakes for ingest, and is easy to commit by mistake).
 
@@ -73,7 +73,7 @@ Time-sensitive hello@ vs morning digest: **same webhooks**. Prefix `URGENT` vs `
 
 - Cap content at 2000 characters (Discord limit); truncate with a marker.
 - `allowed_mentions: { parse: [] }` so hello@ bodies cannot `@everyone`.
-- Never send `DISCORD_TOKEN` or webhook URLs in the message body.
+- Never send `DISCORD_BOT_TOKEN`, `GROK_BOT_WEBHOOK_URL`, or channel webhook URLs in the message body.
 
 ## Code in this PR
 

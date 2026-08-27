@@ -1,4 +1,4 @@
-Parent: #25. Depends on #26 and **#27 serving Grok Bot**. **Last** in the cutover (do not delete Nia before search HTTP works).
+Parent: #25. Depends on #26 (FTS) and **#37 Mini→Grok dispatch**. **Last** in the cutover (do not delete Nia before Mini can retrieve SQLite context and POST it to Grok). AWS-as-host is **stale**. `/v1` (#27) is localhost-on-Mini, not a Grok internet dependency.
 
 ## Goal
 
@@ -52,4 +52,4 @@ Optional follow-up (not required here): remove unused `openai` dependency and `N
 ## Dependencies
 
 - ContextStore FTS (so search still exists).
-- HTTP v1 preferred before deleting, so remote agents have a replacement.
+- Mini FTS (#26) + outbound Grok dispatch (#37) preferred before deleting, so Grok has a replacement without Nia or a public Mini IP. HTTP `/v1` is localhost-on-Mini only.

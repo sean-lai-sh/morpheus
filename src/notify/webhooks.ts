@@ -63,7 +63,7 @@ async function defaultPoster(url: string, body: unknown): Promise<{ ok: boolean;
 
 /**
  * Post an operational-feed message via a Discord *incoming webhook*.
- * Does not use DISCORD_TOKEN or a user account (not a self-bot).
+ * Does not use DISCORD_BOT_TOKEN or a user account (not a self-bot).
  */
 export async function postFeed(
   input: FeedPostInput,

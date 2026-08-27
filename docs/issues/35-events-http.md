@@ -1,8 +1,8 @@
 ## Goal
 
-Once the events table from #7 / PR #23 is on main, expose it over the **same authenticated HTTP** as messages so **Grok Bot** can read/update club events without an in-process Pi tool and without slash commands as the first entry point.
+Once the events table from #7 / PR #23 is on main, expose it over **localhost HTTP on the Mac Mini** (same `/v1` as #27). This is for **on-box tools**, not Grok Bot polling over the internet (no public inbound IP). Event context for Grok can ride in the Mini→`GROK_BOT_WEBHOOK_URL` POST body (#37).
 
-This **replaces** implementing #17 / #18 as `pi-agent-core` tools.
+This **replaces** implementing #17 / #18 as `pi-agent-core` tools. Do **not** host this API on AWS, Cursor VMs, or Grok Bot’s shared computer.
 
 ## Why this waits
 
@@ -34,10 +34,10 @@ Namespace: if `channel_id` is set, reject writes from a job whose namespace cann
 
 ## Acceptance
 
-- [ ] Grok Bot can list/get events with the same token as `/v1/search`
+- [ ] On-box `/v1/events` (localhost Mini) can list/get; Grok does not need to poll it over the internet
 - [ ] Version conflict returns 409 JSON, not a 500
 - [ ] Manual-lock parser semantics unchanged
-- [ ] No `DISCORD_TOKEN` or Nia env required for these routes
+- [ ] No `DISCORD_BOT_TOKEN` or Nia env required for these routes
 
 ## Dependencies
 
