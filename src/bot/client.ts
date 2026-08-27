@@ -4,6 +4,11 @@ import { logger } from "../logger.ts";
 
 let _client: Client | undefined;
 
+/** Existing client or undefined — does not construct (HTTP complete must not login). */
+export function peekClient(): Client | undefined {
+  return _client;
+}
+
 export function getClient(): Client {
   if (_client) return _client;
   const client = new Client({

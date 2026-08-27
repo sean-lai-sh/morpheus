@@ -3,6 +3,7 @@ import { logger } from "../logger.ts";
 import { ingestFreshness } from "../context/store.ts";
 import { handleV1 } from "./fs.ts";
 import { resolveListenHost } from "./listen-host.ts";
+import { handleJobsRequest } from "./jobs.ts";
 
 let server: ReturnType<typeof Bun.serve> | undefined;
 
@@ -21,6 +22,9 @@ export async function handleRequest(req: Request): Promise<Response> {
     if (url.pathname === "/health" && req.method === "GET") {
       return Response.json(healthBody(), { headers: { "cache-control": "no-store" } });
     }
+    if (url.pathname === "/v1/jobs" || url.pathname.startsWith("/v1/jobs/")) {
+      return handleJobsRequest(req, url);
+    }
     if (url.pathname.startsWith("/v1/")) {
       return handleV1(req);
     }
@@ -30,6 +34,9 @@ export async function handleRequest(req: Request): Promise<Response> {
     return Response.json({ error: "internal" }, { status: 500 });
   }
 }
+
+/** Alias for jobs HTTP tests. Same handler as `/health` + `/v1`. */
+export const handleHttpRequest = handleRequest;
 
 export function startHealthServer(): void {
   if (server) return;

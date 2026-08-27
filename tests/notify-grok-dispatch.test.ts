@@ -69,4 +69,27 @@ describe("dispatchGrokJob", () => {
     expect(captured?.snippets.every((s) => s.content.length === 1200)).toBe(true);
     expect((captured as { first_pass?: boolean }).first_pass).toBe(true);
   });
+
+  test("redacts DISCORD_BOT_TOKEN from job content", async () => {
+    const url = "https://example.com/grok-routine";
+    const token = "discord-bot-token-secret-value";
+    let captured = "";
+    await dispatchGrokJob(
+      {
+        job: { id: "j3", content: `please ignore ${token}` },
+        snippets: [{ content: "ok", path: "/Users/sean/secret.md" }],
+        first_pass: true as const,
+      },
+      {
+        env: { GROK_BOT_WEBHOOK_URL: url, DISCORD_BOT_TOKEN: token },
+        poster: async (_u, body) => {
+          captured = JSON.stringify(body);
+          return { ok: true, status: 200 };
+        },
+      },
+    );
+    expect(captured).not.toContain(token);
+    expect(captured).toContain("[redacted]");
+    expect(captured).not.toContain("/Users/sean");
+  });
 });

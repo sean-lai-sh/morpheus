@@ -10,6 +10,17 @@ const emptyToUndef = (v: unknown) => {
   return v;
 };
 
+const parseBoolish = (v: unknown) => {
+  if (v == null || v === "") return undefined;
+  if (typeof v === "boolean") return v;
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "1" || s === "true" || s === "yes") return true;
+    if (s === "0" || s === "false" || s === "no") return false;
+  }
+  return v;
+};
+
 const envSchema = z
   .object({
     /** Preferred name on the Mac Mini (Doppler). */
@@ -48,6 +59,25 @@ const envSchema = z
     ),
     MORPHEUS_API_TOKEN_GENERAL: z.preprocess(emptyToUndef, z.string().min(1).optional()),
     MORPHEUS_API_TOKEN_LEADERSHIP: z.preprocess(emptyToUndef, z.string().min(1).optional()),
+    JOB_QUEUE_ENABLED: z.preprocess(parseBoolish, z.boolean().default(true)),
+    JOB_TRIGGER_ROLE_IDS: z.preprocess(emptyToUndef, z.string().optional()),
+    JOB_MAX_OUTSTANDING_PER_AUTHOR: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(1).max(100).default(2),
+    ),
+    JOB_MAX_PER_AUTHOR_PER_HOUR: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(1).max(1000).default(5),
+    ),
+    JOB_CLAIM_LEASE_MS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(1_000).max(86_400_000).default(600_000),
+    ),
+    DISCORD_POST_REPLIES: z.preprocess(parseBoolish, z.boolean().default(true)),
+    GITHUB_ISSUE_REPO: z.preprocess(emptyToUndef, z.string().min(1).optional()),
+    OPEN_GITHUB_ISSUES_FROM_LEADERSHIP: z.preprocess(parseBoolish, z.boolean().default(false)),
+    JOB_WORKER_GENERAL: z.preprocess(emptyToUndef, z.string().min(1).optional()),
+    JOB_WORKER_LEADERSHIP: z.preprocess(emptyToUndef, z.string().min(1).optional()),
     RETENTION_MONTHS: z
       .preprocess((v) => (v === "" || v == null ? undefined : v), z.coerce.number().int().min(1).optional()),
     NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
@@ -125,6 +155,17 @@ export function discordBotToken(env: Env = loadEnv()): string {
     throw new Error("DISCORD_BOT_TOKEN (or legacy DISCORD_TOKEN) is not set");
   }
   return token;
+}
+
+/** Bind Morpheus HTTP to Tailscale or loopback — never a public NIC by default. */
+export function httpBindHostname(env: Env = loadEnv()): string {
+  return env.HEALTH_HOST ?? "127.0.0.1";
+}
+
+/** Comma/whitespace-separated snowflakes. Empty set → fail closed on enqueue. */
+export function jobTriggerRoleIds(env: Env = loadEnv()): Set<string> {
+  const raw = env.JOB_TRIGGER_ROLE_IDS ?? "";
+  return new Set(raw.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean));
 }
 
 export function loadChannels(): ChannelsConfig {

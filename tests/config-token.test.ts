@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { discordBotToken, loadEnv, resetEnvForTest } from "../src/config.ts";
+import { discordBotToken, httpBindHostname, jobTriggerRoleIds, loadEnv, resetEnvForTest } from "../src/config.ts";
 
 const TOKEN_KEYS = [
   "DISCORD_BOT_TOKEN",
@@ -7,6 +7,7 @@ const TOKEN_KEYS = [
   "DISCORD_GUILD_ID",
   "GROK_BOT_WEBHOOK_URL",
   "HEALTH_HOST",
+  "JOB_TRIGGER_ROLE_IDS",
 ] as const;
 const saved: Record<string, string | undefined> = {};
 
@@ -96,5 +97,22 @@ describe("HEALTH_HOST", () => {
     process.env.DISCORD_GUILD_ID = "123456789012345678";
     process.env.HEALTH_HOST = "192.168.1.5";
     expect(() => loadEnv()).toThrow(/loopback|Tailscale/);
+  });
+
+  test("blank HEALTH_HOST binds loopback", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    expect(httpBindHostname(loadEnv())).toBe("127.0.0.1");
+  });
+});
+
+describe("job roles", () => {
+  test("empty JOB_TRIGGER_ROLE_IDS is an empty set (fail closed)", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.JOB_TRIGGER_ROLE_IDS = "";
+    expect(jobTriggerRoleIds(loadEnv()).size).toBe(0);
   });
 });

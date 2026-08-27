@@ -1,9 +1,10 @@
 import type { Client } from "discord.js";
 import cron, { type ScheduledTask } from "node-cron";
 import { registerLiveHandlers } from "../bot/events.ts";
-import { loadChannels } from "../config.ts";
+import { loadChannels, loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 import { backupDb } from "../storage/backup.ts";
+import { requeueExpiredClaims } from "../storage/jobs.ts";
 import { getState } from "../storage/crawl-state.ts";
 import { backfillAll } from "./backfill.ts";
 import { reconcileAll } from "./reconcile.ts";
@@ -11,6 +12,7 @@ import { reconcileAll } from "./reconcile.ts";
 let reconcileTask: ScheduledTask | undefined;
 let backupTask: ScheduledTask | undefined;
 let autoBackfillTask: ScheduledTask | undefined;
+let claimSweep: ReturnType<typeof setInterval> | undefined;
 
 /**
  * Wire live event handlers onto an already-logged-in client and schedule
@@ -57,13 +59,26 @@ export function startLive(client: Client): void {
     }
   });
   logger.info({ cron: "17 3 * * *" }, "nightly db backup scheduled");
+
+  const leaseMs = loadEnv().JOB_CLAIM_LEASE_MS;
+  claimSweep = setInterval(() => {
+    try {
+      const n = requeueExpiredClaims(Date.now(), leaseMs);
+      if (n > 0) logger.info({ n }, "requeued expired job claims");
+    } catch (err) {
+      logger.error({ err }, "job claim sweeper failed");
+    }
+  }, 30_000);
+  claimSweep.unref?.();
 }
 
 export function stopLive(): void {
   reconcileTask?.stop();
   backupTask?.stop();
   autoBackfillTask?.stop();
+  if (claimSweep) clearInterval(claimSweep);
   reconcileTask = undefined;
   backupTask = undefined;
   autoBackfillTask = undefined;
+  claimSweep = undefined;
 }
