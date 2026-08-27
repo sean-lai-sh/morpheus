@@ -87,11 +87,9 @@ function migrate(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_classification_queue_enqueued
       ON classification_queue(enqueued_at);
 
-    CREATE TABLE IF NOT EXISTS nia_sync_state (
+    CREATE TABLE IF NOT EXISTS export_dirty_state (
       folder_path TEXT PRIMARY KEY,
-      last_sync_at INTEGER,
-      dirty INTEGER NOT NULL DEFAULT 0,
-      consecutive_failures INTEGER NOT NULL DEFAULT 0
+      dirty INTEGER NOT NULL DEFAULT 0
     );
   `);
 }
@@ -119,6 +117,7 @@ function migrateAlter(db: Database): void {
       updated_at INTEGER NOT NULL
     )
   `);
+  try { db.exec(`DROP TABLE IF EXISTS nia_sync_state`); } catch { /* ignore */ }
 }
 
 export function vacuum(): void {

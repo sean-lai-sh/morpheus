@@ -31,10 +31,6 @@ const envSchema = z
         .optional(),
     ),
     NVIDIA_API_KEY: z.string().min(1).optional(),
-    NIA_API_KEY: z.string().min(1).optional(),
-    NIA_BASE_URL: z.string().url().default("https://api.trynia.ai"),
-    NIA_DISCORD_SOURCE_ID: z.string().optional(),
-    NIA_DISCORD_LEADERSHIP_SOURCE_ID: z.string().optional(),
     LOG_LEVEL: z.string().default("info"),
     HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8080),
     RETENTION_MONTHS: z

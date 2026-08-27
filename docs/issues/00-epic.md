@@ -9,8 +9,8 @@ Do **not** treat this issue as a rewrite. Land the slices below in separate PRs.
 - Official `discord.js` bot (not a self-bot). Ingest-only: MessageCreate/Update/Delete + reactions.
 - **SQLite is the source of truth** (`data/morpheus.db`).
 - Markdown under `data/discord/{general,leadership}/` is a **local** render Morpheus writes itself.
-- Nia is a **remote push**: `PUT {NIA_BASE_URL}/fs/{id}/files` of every `.md` every 60s when dirty. This repo never searches or reads Nia. There is **no nia-cli** runtime dependency.
-- Dual namespaces: `isolated: true` in `config/channels.yml` → leadership dir / `NIA_DISCORD_LEADERSHIP_SOURCE_ID`; everything else → general.
+- Nia runtime is **gone** (`src/nia/` deleted). Mini needs **zero `NIA_*` secrets**.
+- Dual namespaces: `isolated: true` in `config/channels.yml` → leadership markdown dir; everything else → general.
 
 ## Corrections to older issues
 
@@ -39,7 +39,7 @@ Each child issue is written so a Cursor agent can implement it without this chat
 - [ ] **Webhooks** `#sponsors` / `#opportunities` / `#speakers` / `#inbox` (#36)
 - [ ] **F.** GitHub implementation-only; fail open (#31). Not the job-delivery contract.
 - [ ] **#35** events HTTP after PR #23 + `grok_bot` enum
-- [ ] **C. last** Feature-flag Nia off, then delete `src/nia/` (#28)
+- [x] **C.** Feature-flag Nia off, then delete `src/nia/` (#28 — landed in PR #24)
 
 ## Constraints
 
@@ -52,9 +52,9 @@ Each child issue is written so a Cursor agent can implement it without this chat
 
 ## Secrets / where things run
 
-Must stay on the **Mac Mini** (Doppler / env, never git): `DISCORD_BOT_TOKEN`, `GROK_BOT_WEBHOOK_URL`, current `NIA_*` until C, SQLite volume. **AWS is stale / overkill.** Not Cursor VMs. Not Grok Bot’s shared computer.
+Must stay on the **Mac Mini** (Doppler / env, never git): `DISCORD_BOT_TOKEN`, `GROK_BOT_WEBHOOK_URL`, SQLite volume. **AWS is stale / overkill.** Not Cursor VMs. Not Grok Bot’s shared computer. **No `NIA_*`.**
 
-Must **not** be given to Grok Bot: `DISCORD_BOT_TOKEN`, `NIA_API_KEY`. Webhook URLs (`DISCORD_WEBHOOK_*`) **are** for Grok Bot's operational feed. Grok also holds `MORPHEUS_BASE_URL` (tailnet) + a scoped `MORPHEUS_API_TOKEN_*`. Activation: #42.
+Must **not** be given to Grok Bot: `DISCORD_BOT_TOKEN`. Webhook URLs (`DISCORD_WEBHOOK_*`) **are** for Grok Bot's operational feed. Grok also holds `MORPHEUS_BASE_URL` (tailnet) + a scoped `MORPHEUS_API_TOKEN_*`. Activation: #42.
 
 **Stale:** stuffing the whole index into `GROK_BOT_WEBHOOK_URL`. Mini POSTs a **first-pass** pack; Grok **live-searches** `/v1/fs` over **Tailscale** (`tag:morpheus`, HTTP port only). Public internet still has no inbound Morpheus port. Homedir is **not** shared.
 

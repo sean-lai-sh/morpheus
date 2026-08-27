@@ -11,7 +11,6 @@
     "reindex": "doppler run -- bun src/index.ts reindex",
     "rotate": "doppler run -- bun src/index.ts rotate",
     "list-channels": "doppler run -- bun scripts/list-channels.ts",
-    "register-nia": "doppler run -- bun scripts/register-nia-source.ts",
     "post-feed": "doppler run -- bun scripts/post-feed.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",

@@ -70,7 +70,7 @@ Documented empty in `.env.example`. Inject via Doppler **on the Mini** or the Gr
 
 Do not put these in git, in `config/channels.yml`, or in PR text. Do not put `MORPHEUS_BASE_URL` or API tokens in the Discord webhook payload.
 
-`NIA_*` stay Mini/Doppler until Nia is deleted; they are not Grok Bot secrets.
+Mini Doppler does **not** need `NIA_*`. Nia is unsupported; delete leftover Nia secrets.
 
 ## Operator notes (Mini)
 

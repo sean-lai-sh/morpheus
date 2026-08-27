@@ -3,7 +3,7 @@
 # Reload without restart: send SIGHUP to the running process.
 #
 # category: used to group channels into subdirectories in data/discord/{general|leadership}/{category}/{channel}/
-# isolated: true → channel goes into the leadership Nia index (NIA_DISCORD_LEADERSHIP_SOURCE_ID) instead of general
+# isolated: true → leadership namespace (data/discord/leadership/…); everything else is general
 #
 # Copy this file to config/channels.yml and replace IDs with your own Discord snowflakes.
 # Right-click any channel in Discord → Copy Channel ID (Developer Mode must be on).
@@ -30,7 +30,7 @@ channels:
     category: "teams"
     classify: true
     include_threads: true
-    isolated: true          # routes to NIA_DISCORD_LEADERSHIP_SOURCE_ID (separate Nia namespace)
+    isolated: true          # leadership namespace (local markdown under data/discord/leadership/)
 
   - id: "CHANNEL_SNOWFLAKE_4"
     name: "marketing-team"

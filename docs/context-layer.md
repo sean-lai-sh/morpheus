@@ -4,7 +4,7 @@ Investigation of https://github.com/sean-lai-sh/morpheus (main @ `291a3ef`, afte
 
 **Host (decided):** persistent **Mac Mini** on Sean's network — official Discord gateway + Morpheus **index**. **Not AWS**. **Not** a Cursor cloud-agent VM. **Not** Grok Bot's shared computer. Live Grok tools reach the index over **Tailscale only** (`tag:morpheus`, HTTP port, scoped token). Not a homedir mount. See [`docs/hosting.md`](hosting.md).
 
-**This PR (#24) is investigation + hosting/webhook docs + `src/notify` ops-feed helpers.** Do not implement jobs enqueue, FTS ContextStore, `/v1/fs`, or mention replies here — sibling PRs take those slices. Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
+**This PR (#24) removes the Nia runtime (`src/nia/` gone; Mini needs zero `NIA_*`) plus investigation + hosting/webhook docs + `src/notify` ops-feed helpers.** Do not implement jobs enqueue, FTS ContextStore, `/v1/fs`, or mention replies here — sibling PRs take those slices. Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
 
 **Corrections vs. the investigation brief**
 
