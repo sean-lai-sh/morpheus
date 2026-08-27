@@ -51,9 +51,8 @@ export async function backfillChannel(
     });
     pages++;
     if (batch.size === 0) {
-      log.info({ pages, ingested }, "reached oldest message; backfill complete");
-      markBackfillComplete(channel.id);
-      return { channelId: channel.id, ingested, pages, complete: true };
+      log.info({ pages, ingested }, "reached oldest message; parent pages exhausted");
+      break;
     }
 
     // discord.js returns messages newest-first. Iterate to ingest each.
@@ -73,13 +72,15 @@ export async function backfillChannel(
     );
 
     if (batch.size < PAGE_SIZE) {
-      log.info({ pages, ingested }, "tail page reached; backfill complete");
-      markBackfillComplete(channel.id);
+      log.info({ pages, ingested }, "tail page reached; parent pages exhausted");
       break;
     }
   }
 
   // Thread backfill: active + archived, if the channel opts in.
+  // Must run after parent pagination is exhausted — including the empty last
+  // page (parent count is a multiple of PAGE_SIZE). Returning on that empty
+  // page skipped threads and last_backfill_complete blocked auto-retry (#66).
   if (channel.include_threads) {
     let threadIngested = 0;
     try {
@@ -109,6 +110,7 @@ export async function backfillChannel(
     }
   }
 
+  markBackfillComplete(channel.id);
   return { channelId: channel.id, ingested, pages, complete: true };
 }
 
