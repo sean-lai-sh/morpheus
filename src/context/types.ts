@@ -57,6 +57,10 @@ export interface SearchHit {
   authorName: string;
   createdAt: number;
   permalink: string;
+  /** Google Drive/Docs URLs extracted from the message (`links` table). */
+  links: string[];
+  /** "strict" = every query term matched; "loose" = recall pass, at least two terms matched. */
+  match: "strict" | "loose";
 }
 
 export interface PollPage {

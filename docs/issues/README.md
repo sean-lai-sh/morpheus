@@ -30,5 +30,6 @@ These markdown files are the implementation-slice bodies for the Nia-exit / Disc
 | `40-live-index-vfs.md` | Live tree/grep/cat over the index | #40 |
 | `42-grok-bot-activation.md` | Worker at GROK_BOT_WEBHOOK_URL | #42 |
 | `43-slash-ask.md` | `/ask` enqueues the same jobs table (#41) | follow-up to #29 |
+| `50-vfs-search-recall.md` | Search recall: strict→loose FTS, `/v1/links`, FTS-first snippets | #50 |
 
 Do not put secrets in these files.
