@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { isAllowedListenHost } from "./http/listen-allowlist.ts";
 
 const emptyToUndef = (v: unknown) => {
   if (v == null) return undefined;
@@ -33,14 +34,17 @@ const envSchema = z
     NVIDIA_API_KEY: z.string().min(1).optional(),
     LOG_LEVEL: z.string().default("info"),
     HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8080),
-    /** Bind address for Morpheus HTTP. Default loopback. Never 0.0.0.0. */
+    /** Bind address for Morpheus HTTP. Loopback or Tailscale only. Default 127.0.0.1. */
     HEALTH_HOST: z.preprocess(
       emptyToUndef,
       z
         .string()
         .min(1)
         .default("127.0.0.1")
-        .refine((h) => h !== "0.0.0.0" && h !== "::" && h !== "*" && h !== "[::]" && h !== "::0", "must not bind all interfaces"),
+        .refine(
+          isAllowedListenHost,
+          "must be loopback (127.0.0.1 / ::1) or Tailscale (100.64/10 or fd7a:)",
+        ),
     ),
     MORPHEUS_API_TOKEN_GENERAL: z.preprocess(emptyToUndef, z.string().min(1).optional()),
     MORPHEUS_API_TOKEN_LEADERSHIP: z.preprocess(emptyToUndef, z.string().min(1).optional()),

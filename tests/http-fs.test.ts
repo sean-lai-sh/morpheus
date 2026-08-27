@@ -5,7 +5,8 @@ import { resetChannelsForTest, resetEnvForTest } from "../src/config.ts";
 import { withTempCwd, withTempDb } from "./helpers.ts";
 import { handleRequest } from "../src/http/health.ts";
 import { indexFromRow } from "../src/context/store.ts";
-import { getMessage, upsertMessage } from "../src/storage/messages.ts";
+import { indexPathForRow } from "../src/context/paths.ts";
+import { getMessage, markDeleted, upsertMessage } from "../src/storage/messages.ts";
 
 function writeChannelsFixture(): void {
   mkdirSync(resolve(process.cwd(), "config"), { recursive: true });
@@ -201,6 +202,7 @@ describe("path isolation", () => {
     expect((await get("/v1/fs/tree?path=/general/../leadership", "tok-general")).status).toBe(404);
     expect((await get("/v1/fs/read?path=~/src", "tok-general")).status).toBe(404);
     expect((await get("/v1/fs/read?path=/etc/passwd", "tok-general")).status).toBe(404);
+    expect((await get("/v1/fs/tree?path=//Users/sean", "tok-general")).status).toBe(404);
     expect(
       (await post("/v1/fs/search", { query: "sponsors", pathPrefix: "%2e%2e" }, "tok-general")).status,
     ).toBe(404);
@@ -222,6 +224,9 @@ describe("search HTTP", () => {
       "tok-general",
     );
     expect(res.status).toBe(400);
+    expect((await get(`/v1/messages/${GENERAL_MSG}?includeDeleted=true`, "tok-general")).status).toBe(400);
+    expect((await get("/v1/fs/read?path=/general&includeDeleted=true", "tok-general")).status).toBe(400);
+    expect((await get("/v1/poll?includeDeleted=true", "tok-general")).status).toBe(400);
   });
 
   test("leadership thread is not in general search", async () => {
@@ -316,5 +321,40 @@ describe("tree / read / poll", () => {
     expect(after.status).toBe(200);
     const page2 = (await after.json()) as { documents: Array<{ id: string; content: string }> };
     expect(page2.documents.find((d) => d.id === id)?.content).toContain("edited");
+  });
+
+  test("deleted messages are 404 on cat and omit content on poll", async () => {
+    const id = "100000000000000077";
+    upsertMessage({
+      id,
+      channelId: "1001",
+      authorId: "u1",
+      authorName: "alice",
+      content: "http-deleted-body-secret unique-del-http",
+      createdAt: 9_000,
+    });
+    indexFromRow(getMessage(id)!);
+    const path = indexPathForRow(getMessage(id)!)!;
+    const live = await get(`/v1/messages/${id}`, "tok-general");
+    expect(live.status).toBe(200);
+    expect(((await live.json()) as { document: { content: string } }).document.content).toContain(
+      "http-deleted-body-secret",
+    );
+
+    const before = getMessage(id)!.seq;
+    markDeleted(id, 9_500);
+    indexFromRow(getMessage(id)!);
+
+    expect((await get(`/v1/messages/${id}`, "tok-general")).status).toBe(404);
+    expect((await get(`/v1/fs/read?path=${encodeURIComponent(path)}`, "tok-general")).status).toBe(404);
+
+    const poll = await get(`/v1/poll?cursor=${encodeURIComponent(`${before}:${id}`)}&limit=50`, "tok-general");
+    expect(poll.status).toBe(200);
+    const page = (await poll.json()) as {
+      documents: Array<{ id: string; content: string; deletedAt: number | null }>;
+    };
+    const hit = page.documents.find((d) => d.id === id);
+    expect(hit?.deletedAt).toBe(9_500);
+    expect(hit?.content).toBe("");
   });
 });

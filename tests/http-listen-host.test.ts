@@ -33,7 +33,7 @@ afterEach(() => {
 });
 
 describe("resolveListenHost", () => {
-  test("HEALTH_HOST wins when set to a unicast address", () => {
+  test("HEALTH_HOST wins when set to a Tailscale address", () => {
     isolate();
     process.env.DISCORD_BOT_TOKEN = "bot-token";
     process.env.DISCORD_GUILD_ID = "123456789012345678";
@@ -42,15 +42,29 @@ describe("resolveListenHost", () => {
     expect(resolveListenHost()).toBe("100.64.1.2");
   });
 
-  test("wildcard HEALTH_HOST is refused by loadEnv (never listen on 0.0.0.0)", () => {
+  test("::1 is allowed", () => {
+    isolate();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.HEALTH_HOST = "::1";
+    expect(resolveListenHost()).toBe("::1");
+  });
+
+  test("wildcard and LAN/WAN unicasts are refused", () => {
     isolate();
     process.env.DISCORD_BOT_TOKEN = "bot-token";
     process.env.DISCORD_GUILD_ID = "123456789012345678";
     process.env.HEALTH_HOST = "0.0.0.0";
-    expect(() => loadEnv()).toThrow(/all interfaces/);
+    expect(() => loadEnv()).toThrow(/loopback|Tailscale/);
     resetEnvForTest();
     process.env.HEALTH_HOST = "::0";
-    expect(() => loadEnv()).toThrow(/all interfaces/);
+    expect(() => loadEnv()).toThrow(/loopback|Tailscale/);
+    resetEnvForTest();
+    process.env.HEALTH_HOST = "192.168.1.5";
+    expect(() => loadEnv()).toThrow(/loopback|Tailscale/);
+    resetEnvForTest();
+    process.env.HEALTH_HOST = "8.8.8.8";
+    expect(() => loadEnv()).toThrow(/loopback|Tailscale/);
   });
 
   test("unset HEALTH_HOST defaults to 127.0.0.1 and never 0.0.0.0", () => {

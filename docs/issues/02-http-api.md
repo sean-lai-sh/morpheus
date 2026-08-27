@@ -44,9 +44,9 @@ Virtual, POSIX-looking, rooted at `/general` or `/leadership`:
 | GET | `/health` | none | — | `{ ok, last_message_at, fts_count }`. No bodies. |
 | GET | `/v1/fs/tree?path=` | Bearer | ls/tree | Children of an index path. Cap 100. |
 | POST | `/v1/fs/search` | Bearer | grep | FTS. Body: `{ query, pathPrefix?, limit? }`. **No** client namespace. **No** `includeDeleted` (default deny; `true` → 400). |
-| GET | `/v1/fs/read?path=` | Bearer | cat | One virtual doc (message or channel window). 404 if missing or other namespace. |
-| GET | `/v1/messages/:id` | Bearer | cat | Same isolation as read. |
-| GET | `/v1/poll?cursor=&limit=` | Bearer | — | Optional catch-up in token namespace. Cursor = monotonic **seq**, not `created_at`. |
+| GET | `/v1/fs/read?path=` | Bearer | cat | One virtual doc (message or channel window). 404 if missing, other namespace, or **deleted**. |
+| GET | `/v1/messages/:id` | Bearer | cat | Same isolation as read. Deleted → **404**. |
+| GET | `/v1/poll?cursor=&limit=` | Bearer | — | Optional catch-up in token namespace. Cursor = monotonic **seq**, not `created_at`. Deleted rows are **tombstones with empty `content`** (catch-up without leaking bodies). |
 
 ## Negative tests (principals, not query params)
 
@@ -55,12 +55,13 @@ Virtual, POSIX-looking, rooted at `/general` or `/leadership`:
 - [ ] `path=/Users/sean` or `path=../` → **404**.
 - [ ] Encoded `..` (`%2e%2e`, `%252e%252e`) and `/general/../leadership` with a general token → **404**.
 - [ ] `~/src`, `/etc/passwd`, and other absolute host paths → **404**.
-- [ ] `includeDeleted: true` on HTTP → **400**.
+- [ ] `includeDeleted: true` on **any** `/v1/*` route (search, read, messages, poll, tree) → **400**. Cat of a deleted message → **404**. Poll may emit the tombstone with empty content.
 - [ ] No token → 401 on every `/v1/*` except `/health`.
 
 ## Implementation notes
 
-- Same `Bun.serve` as `/health`. Bind `HEALTH_HOST` (zod, default `127.0.0.1`). Never listen on `0.0.0.0`. Mini operators set `HEALTH_HOST` to the Tailscale IP. Tokens and bind address go through `loadEnv()` / zod (`MORPHEUS_API_TOKEN_GENERAL`, `MORPHEUS_API_TOKEN_LEADERSHIP`, `HEALTH_HOST`).
+- Same `Bun.serve` as `/health`. Bind `HEALTH_HOST` (zod allowlist: `127.0.0.1`, `::1`, Tailscale `100.64/10` / `fd7a:`). Default `127.0.0.1`. Refuse `0.0.0.0`, `::`, `::0`, LAN/WAN unicasts. Tokens and bind address go through `loadEnv()` / zod (`MORPHEUS_API_TOKEN_GENERAL`, `MORPHEUS_API_TOKEN_LEADERSHIP`, `HEALTH_HOST`).
+- This slice is **#40** (live vfs). Do **not** close [#41](https://github.com/sean-lai-sh/morpheus/issues/41) from this PR.
 - `limit` capped at 50 for search, 100 for tree.
 - Never return SQL errors; 500 internally.
 - CORS default deny.

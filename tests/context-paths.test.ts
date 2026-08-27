@@ -16,6 +16,7 @@ describe("path traversal: decode then normalize then prefix-check", () => {
     expect(sanitizeIndexPath("/general/%2e%2e/%2e%2e/Users/sean")).toBeNull();
     expect(sanitizeIndexPath("/general/%252e%252e/Users/sean")).toBeNull();
     expect(constrainIndexPath("/general/%2e%2e/leadership", "general")).toBeNull();
+    expect(sanitizeIndexPath("/general%2f..%2f..%2fUsers/sean")).toBeNull();
   });
 
   test("normalize-then-prefix: /general/../leadership is not general", () => {
@@ -24,6 +25,7 @@ describe("path traversal: decode then normalize then prefix-check", () => {
     expect(constrainIndexPath("/general/../leadership", "leadership")).toBe("/leadership");
     expect(constrainIndexPath("/general%2f..%2fleadership", "general")).toBeNull();
     expect(constrainIndexPath("/general/%2e%2e/leadership", "general")).toBeNull();
+    expect(sanitizeIndexPath("/general%2f..%2f..%2fUsers/sean")).toBeNull();
   });
 
   test("normalize-then-prefix: ../../../Users escapes and is rejected", () => {
@@ -31,6 +33,14 @@ describe("path traversal: decode then normalize then prefix-check", () => {
     expect(constrainIndexPath("/general/foo/../../../Users/sean", "general")).toBeNull();
     expect(posixNormalize("/general/a/b/../c")).toBe("/general/a/c");
     expect(constrainIndexPath("/general/a/b/../c", "general")).toBe("/general/a/c");
+  });
+
+  test("denylist runs after slash-collapse: //Users normalizes then rejects", () => {
+    expect(posixNormalize("//Users/sean")).toBe("/Users/sean");
+    expect(isForbiddenOsPath("/Users/sean")).toBe(true);
+    expect(sanitizeIndexPath("//Users/sean")).toBeNull();
+    expect(sanitizeIndexPath("///Users/sean")).toBeNull();
+    expect(constrainIndexPath("//Users/sean", "general")).toBeNull();
   });
 
   test("rejects /Users, ~, and absolute host paths", () => {

@@ -246,6 +246,7 @@ describe("seq poll (not created_at)", () => {
     const deletedHit = afterDelete.documents.find((d) => d.id === id);
     expect(deletedHit).toBeDefined();
     expect(deletedHit?.deletedAt).toBe(10_000);
+    expect(deletedHit?.content).toBe("");
   });
 
   test("setReactions bumps seq so poll sees it", () => {

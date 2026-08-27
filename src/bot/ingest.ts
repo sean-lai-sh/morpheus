@@ -190,6 +190,10 @@ export async function ingestDeleteById(messageId: string): Promise<IngestResult>
 
   const channel = getChannel(effId);
   if (!channel) return { action: "skipped", reason: "channel-config-missing" };
+
+  const wasNew = markDeleted(messageId);
+  if (!wasNew) return { action: "skipped", reason: "already-deleted-or-unknown" };
+
   appendBlock(channel, loadEnv().DISCORD_GUILD_ID, stored, "delete");
   const fresh = getMessage(messageId);
   if (fresh) tryIndex(fresh);

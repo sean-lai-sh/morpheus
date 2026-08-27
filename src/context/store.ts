@@ -81,6 +81,7 @@ function syncFtsRow(row: MessageRow): void {
   } catch {
     // row may not be in FTS yet
   }
+  if (row.deleted_at != null) return;
   db.query(`INSERT INTO messages_fts(rowid, content) VALUES (?, ?)`).run(meta.rowid, row.content);
 }
 
@@ -227,8 +228,14 @@ function search(q: SearchQuery): SearchHit[] {
 function readMessage(id: string, namespace: Namespace): IndexDocument | null {
   const row = getMessage(id);
   if (!row) return null;
+  if (row.deleted_at != null) return null;
   if (!rowInNamespace(row, namespace)) return null;
   return documentFromRow(row, namespace);
+}
+
+function redactDeletedContent(doc: IndexDocument): IndexDocument {
+  if (doc.deletedAt == null) return doc;
+  return { ...doc, content: "" };
 }
 
 function capNodes(nodes: IndexNode[]): IndexNode[] {
@@ -471,7 +478,7 @@ function poll(namespace: Namespace, cursor: string | null, limit = 20): PollPage
     .query<MessageRow, (string | number)[]>(sql)
     .all(...params)
     .filter((r) => rowInNamespace(r, namespace));
-  const documents = rows.map((r) => documentFromRow(r, namespace));
+  const documents = rows.map((r) => redactDeletedContent(documentFromRow(r, namespace)));
   const last = documents[documents.length - 1];
   const nextCursor = last ? `${last.seq}:${last.id}` : (cursor ?? "0:0");
   return { cursor: nextCursor, documents };

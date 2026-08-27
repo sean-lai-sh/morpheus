@@ -88,7 +88,6 @@ export function isForbiddenOsPath(path: string): boolean {
 export function posixNormalize(path: string): string | null {
   if (path.includes("\0") || path.includes("\\")) return null;
   if (!path.startsWith("/")) return null;
-  if (path.startsWith("//")) return null;
   const out: string[] = [];
   for (const part of path.split("/")) {
     if (part === "" || part === ".") continue;
@@ -103,13 +102,14 @@ export function posixNormalize(path: string): string | null {
 }
 
 /**
- * Decode → reject OS/host/`~`/`/Users` → POSIX normalize (resolve `..`) → reject OS again.
- * Does not apply the token namespace prefix (see `constrainIndexPath`).
+ * Decode → POSIX normalize (slash-collapse, resolve `..`) → OS denylist → return.
+ * Client paths must then pass `constrainIndexPath` (token prefix).
  */
 export function sanitizeIndexPath(raw: string): string | null {
   const decoded = decodeEncodedPath(raw);
   if (decoded == null) return null;
-  if (isForbiddenOsPath(decoded)) return null;
+  if (decoded.includes("\0") || decoded.includes("\\")) return null;
+  if (decoded === "~" || decoded.startsWith("~/") || /^[A-Za-z]:[\\/]/.test(decoded)) return null;
   const normalized = posixNormalize(decoded === "" ? "/" : decoded);
   if (normalized == null) return null;
   if (isForbiddenOsPath(normalized)) return null;

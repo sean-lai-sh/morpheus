@@ -35,6 +35,13 @@ async function readJsonBody(req: Request): Promise<Record<string, unknown> | nul
   }
 }
 
+function rejectIncludeDeleted(url: URL, body?: Record<string, unknown> | null): Response | null {
+  if (body?.includeDeleted === true || url.searchParams.get("includeDeleted") === "true") {
+    return json({ error: "includeDeleted is not allowed" }, 400);
+  }
+  return null;
+}
+
 function rejectPath(raw: string | null, namespace: Namespace): Response | null {
   if (raw == null) return json({ error: "not found" }, 404);
   if (constrainIndexPath(raw, namespace) == null) {
@@ -56,12 +63,15 @@ export async function handleV1(req: Request): Promise<Response> {
   if (!auth.ok) return json({ error: auth.error }, auth.status);
   const { namespace } = auth;
 
+  const deletedFlag = rejectIncludeDeleted(url, body);
+  if (deletedFlag) return deletedFlag;
+
   try {
     if (url.pathname === "/v1/fs/tree" && req.method === "GET") {
       return handleTree(url, namespace);
     }
     if (url.pathname === "/v1/fs/search" && req.method === "POST") {
-      return handleSearch(url, namespace, body ?? {});
+      return handleSearch(namespace, body ?? {});
     }
     if (url.pathname === "/v1/fs/read" && req.method === "GET") {
       return handleRead(url, namespace);
@@ -92,10 +102,7 @@ function handleTree(url: URL, namespace: Namespace): Response {
   return json({ path: safe, nodes });
 }
 
-function handleSearch(url: URL, namespace: Namespace, body: Record<string, unknown>): Response {
-  if (body.includeDeleted === true || url.searchParams.get("includeDeleted") === "true") {
-    return json({ error: "includeDeleted is not allowed" }, 400);
-  }
+function handleSearch(namespace: Namespace, body: Record<string, unknown>): Response {
   const query = typeof body.query === "string" ? body.query : "";
   if (!query.trim() || !toFtsQuery(query)) {
     return json({ error: "query required" }, 400);

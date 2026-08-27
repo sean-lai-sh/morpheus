@@ -40,7 +40,7 @@ Grok holds `MORPHEUS_BASE_URL` (tailnet) + `MORPHEUS_API_TOKEN_GENERAL` or `_LEA
 | grep | `POST /v1/fs/search` | FTS / filters; namespace from token |
 | cat | `GET /v1/fs/read?path=` | read one virtual doc (message or channel window) |
 
-`includeDeleted` default **deny** on HTTP. Namespace from the bearer, not a client field.
+`includeDeleted` default **deny** on HTTP (search, cat, poll). `includeDeleted: true` → **400**. Cat of a deleted message → **404**. Poll may emit tombstones with empty `content` for seq catch-up. Namespace from the bearer, not a client field.
 
 ## Do not build
 
@@ -48,3 +48,5 @@ Grok holds `MORPHEUS_BASE_URL` (tailnet) + `MORPHEUS_API_TOKEN_GENERAL` or `_LEA
 - Homedir / project share
 - Public `MORPHEUS_BASE_URL`
 - One shared token + `namespace=leadership`
+
+This file is the **#40** slice only. Do **not** close [#41](https://github.com/sean-lai-sh/morpheus/issues/41) from the vfs PR.
