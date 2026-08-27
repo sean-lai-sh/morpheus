@@ -135,7 +135,8 @@ function handleSearch(namespace: Scope, body: Record<string, unknown>): Response
   if (!query.trim() || !toFtsQuery(query)) {
     return json({ error: "query required" }, 400);
   }
-  const pathPrefix = typeof body.pathPrefix === "string" ? body.pathPrefix : undefined;
+  const pathPrefix = stringFromBody(body, "pathPrefix");
+  if (pathPrefix === null) return json({ error: "invalid pathPrefix" }, 400);
   if (pathPrefix != null) {
     const bad = rejectPath(pathPrefix, namespace);
     if (bad) return bad;

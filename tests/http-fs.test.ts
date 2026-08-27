@@ -411,6 +411,9 @@ describe("search HTTP", () => {
       ["untilMs", null],
       ["untilMs", "later"],
       ["untilMs", {}],
+      ["pathPrefix", null],
+      ["pathPrefix", 42],
+      ["pathPrefix", ""],
     ];
     for (const [key, value] of cases) {
       const res = await post("/v1/fs/search", { query: "retreat", [key]: value }, LEADERSHIP);
