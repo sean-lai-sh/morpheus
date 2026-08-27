@@ -15,6 +15,24 @@ function isDiscordHost(hostname: string): boolean {
   return false;
 }
 
+/**
+ * Percent-decode then lowercase path segments. WHATWG `URL` leaves encodings
+ * of unreserved characters in `pathname` (`%77` stays `%77`), but Discord's
+ * router decodes once — `/api/%77ebhooks/{id}/{token}` executes as a webhook.
+ * One decode matches Discord (double-encoded forms are a generic 404 there).
+ * Malformed encoding → null; Discord-host callers must fail closed on it.
+ */
+function decodedPathSegments(pathname: string): string[] | null {
+  try {
+    return pathname
+      .split("/")
+      .filter(Boolean)
+      .map((seg) => decodeURIComponent(seg).toLowerCase());
+  } catch {
+    return null;
+  }
+}
+
 export function isDiscordWebhookUrl(raw: string): boolean {
   try {
     const u = new URL(raw);
@@ -22,9 +40,11 @@ export function isDiscordWebhookUrl(raw: string): boolean {
     if (!isDiscordHost(u.hostname)) return false;
     // Execute path is /webhooks/{id}/{token} on the API base — either the
     // unversioned default alias (/api/webhooks/…) or the documented versioned
-    // base (/api/v10/webhooks/…). Compare case-insensitively: this is a
-    // denylist, so an uppercased path must not slip past it.
-    const parts = u.pathname.split("/").filter(Boolean).map((p) => p.toLowerCase());
+    // base (/api/v10/webhooks/…). Segments are decoded then lowercased: this
+    // is a denylist, so `%77ebhooks` or `/API/` must not slip past it, and an
+    // undecodable path on a Discord host fails closed (treated as a webhook).
+    const parts = decodedPathSegments(u.pathname);
+    if (parts === null) return true;
     if (parts[0] !== "api") return false;
     const rest = /^v\d+$/.test(parts[1] ?? "") ? parts.slice(2) : parts.slice(1);
     return rest[0] === "webhooks" && rest.length >= 3;

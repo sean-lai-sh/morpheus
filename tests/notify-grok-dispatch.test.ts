@@ -110,6 +110,55 @@ describe("GROK_BOT_WEBHOOK_URL refuses Discord incoming webhooks on every Discor
     }
   });
 
+  test("percent-encoded webhook paths are refused at both layers (Discord decodes them)", () => {
+    // All of these execute as webhooks on Discord (%77=w, %65…=ebhooks, %31%30=10, %61=a, %68=h).
+    const hooks = [
+      "https://discord.com/api/%77ebhooks/123456789012345678/tok-tok-tok",
+      "https://discord.com/api/%77%65%62%68%6f%6f%6b%73/123456789012345678/tok-tok-tok",
+      "https://discord.com/api/v%31%30/webhooks/123456789012345678/tok-tok-tok",
+      "https://discord.com/api/v10/%77ebhooks/123456789012345678/tok-tok-tok",
+      "https://discord.com/%61pi/webhooks/123456789012345678/tok-tok-tok",
+      "https://discord.com/api/web%68ooks/123456789012345678/tok-tok-tok",
+      "https://ptb.discord.com/api/%77ebhooks/123456789012345678/tok-tok-tok",
+      // Malformed encoding on a Discord host fails closed: treated as a webhook.
+      "https://discord.com/api/%zzebhooks/123456789012345678/tok-tok-tok",
+    ];
+    for (const hook of hooks) {
+      expect(() => envFor({ GROK_BOT_WEBHOOK_URL: hook })).toThrow(/Discord incoming webhook/);
+      const env: Env = { ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: hook };
+      expect(grokBotWebhookUrl(env)).toBeNull();
+    }
+    // Control pinning one-decode semantics: a double-encoded path is a generic
+    // 404 on Discord (not an executable webhook), so it stays allowed.
+    const doubleEncoded = "https://discord.com/api/%2577ebhooks/123456789012345678/tok-tok-tok";
+    expect(grokBotWebhookUrl({ ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: doubleEncoded })).toBe(doubleEncoded);
+  });
+
+  test("dispatchGrokJob refuses a percent-encoded webhook path; the poster is never called", async () => {
+    const env: Env = {
+      ...liveEnv(EBOARD),
+      GROK_BOT_WEBHOOK_URL: "https://discord.com/api/%77ebhooks/123456789012345678/tok-tok-tok",
+    };
+    let posted = 0;
+    const result = await dispatchGrokJob(
+      {
+        job: { id: "j-enc", namespace: EBOARD, discord_channel_id: SPONSORS, content: "hi there friends" },
+        snippets: [],
+        first_pass: true,
+      },
+      {
+        env,
+        poster: async () => {
+          posted += 1;
+          return { ok: true, status: 204 };
+        },
+      },
+    );
+    expect(result.dispatched).toBe(false);
+    expect(result.skipped).toBe("refused-discord-incoming-webhook");
+    expect(posted).toBe(0);
+  });
+
   test("dispatchGrokJob refuses a versioned v10 Discord webhook; the poster is never called", async () => {
     const env: Env = {
       ...liveEnv(EBOARD),
