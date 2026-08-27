@@ -316,6 +316,52 @@ describe("storage/jobs lease sweeper", () => {
       expect(retry.job.error).toBeNull();
     }
   });
+
+  test("post-expiry retry in flight is not re-armed by a later sweeper tick", () => {
+    const { job } = enqueue("m-lease-rearm");
+    const t0 = 6_000_000;
+    claimJob(job.id, "w1", t0);
+    prepareComplete(job.id, "w1", { reply: "pending-rearm", completion_key: "rearm-key" }, t0);
+    requeueExpiredClaims(t0 + 700_000, 600_000);
+    expect(getJob(job.id)?.error).toBe("lease-expired-before-send");
+
+    const retry = prepareComplete(
+      job.id,
+      "w1",
+      { reply: "retry-send", completion_key: "rearm-key" },
+      t0 + 700_000,
+    );
+    expect(retry.ok).toBe(true);
+    if (retry.ok) expect(retry.alreadyCompleted).toBe(false);
+    expect(getJob(job.id)?.error).toBeNull();
+    expect(getJob(job.id)?.result_discord_message_id).toBeNull();
+
+    const second = prepareComplete(
+      job.id,
+      "w1",
+      { reply: "overlap", completion_key: "rearm-key" },
+      t0 + 700_000,
+    );
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.reason).toBe("in-progress");
+
+    const n = requeueExpiredClaims(t0 + 730_000, 600_000);
+    expect(n).toBe(0);
+    expect(getJob(job.id)?.error).toBeNull();
+    expect(getJob(job.id)?.status).toBe("claimed");
+    expect(getJob(job.id)?.claimed_by).toBe("w1");
+    expect(getJob(job.id)?.completion_key).toBe("rearm-key");
+    expect(getJob(job.id)?.result_discord_message_id).toBeNull();
+
+    const third = prepareComplete(
+      job.id,
+      "w1",
+      { reply: "third-should-409", completion_key: "rearm-key" },
+      t0 + 730_000,
+    );
+    expect(third.ok).toBe(false);
+    if (!third.ok) expect(third.reason).toBe("in-progress");
+  });
 });
 
 describe("storage/jobs outstanding count", () => {

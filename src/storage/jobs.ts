@@ -255,7 +255,9 @@ export interface CompleteInput {
 /**
  * Persist reply_text + completion_key **before** Discord send (CAS).
  * First winner may post. Losers must not: already-completed, or in-progress 409.
- * Same worker + same completion_key may retry after markJobSendError.
+ * Same worker + same completion_key may retry after markJobSendError or after
+ * lease-expired-before-send. Refresh claimed_at so the sweeper does not treat
+ * an in-flight post-expiry send as another crash (#74 leftover).
  */
 export function prepareComplete(
   id: string,
@@ -280,15 +282,15 @@ export function prepareComplete(
   const github = input.github_issue_url ?? job.github_issue_url ?? null;
 
   const updated = getDb()
-    .query<JobRow, [string, string, string | null, number, string, string, string]>(
+    .query<JobRow, [string, string, string | null, number, number, string, string, string]>(
       `UPDATE jobs
-       SET reply_text = ?, completion_key = ?, github_issue_url = ?, updated_at = ?, error = NULL
+       SET reply_text = ?, completion_key = ?, github_issue_url = ?, updated_at = ?, claimed_at = ?, error = NULL
        WHERE id = ? AND status = 'claimed' AND claimed_by = ?
          AND result_discord_message_id IS NULL
          AND (completion_key IS NULL OR (completion_key = ? AND error IS NOT NULL))
        RETURNING *`,
     )
-    .get(input.reply, completionKey, github, now, id, worker, completionKey);
+    .get(input.reply, completionKey, github, now, now, id, worker, completionKey);
 
   const mapped = updated ? mapJob(updated) : null;
   if (mapped) return { ok: true, job: mapped, alreadyCompleted: false };
@@ -379,6 +381,10 @@ export function failJob(id: string, claimedBy: string, error: string, now: numbe
  * persisted before Discord send. Do not requeue (duplicate-post risk). After the
  * lease expires the send is no longer in flight — set error so the same worker
  * can retry complete (#74) and free the outstanding cap on success/fail.
+ *
+ * Do not match a row whose claimed_at or updated_at is still inside the lease:
+ * a post-expiry retry refreshes both, and an in-flight send must stay 409 until
+ * recordJobDiscordSend / markJobSendError (not re-armed every 30s).
  */
 export function requeueExpiredClaims(now: number, leaseMs: number): number {
   const cutoff = now - leaseMs;
@@ -389,11 +395,12 @@ export function requeueExpiredClaims(now: number, leaseMs: number): number {
        WHERE status = 'claimed'
          AND claimed_at IS NOT NULL
          AND claimed_at < ?
+         AND updated_at < ?
          AND result_discord_message_id IS NULL
          AND completion_key IS NOT NULL
          AND error IS NULL`,
     )
-    .run(now, cutoff);
+    .run(now, cutoff, cutoff);
   const res = getDb()
     .query(
       `UPDATE jobs
