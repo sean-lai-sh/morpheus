@@ -6,7 +6,11 @@ import { logger } from "../logger.ts";
 import { MAX_JOB_CHANNEL_IDS, type JobScope } from "../storage/jobs.ts";
 import { isDiscordWebhookUrl } from "./webhooks.ts";
 
-/** Every Mini secret that must never leave the process, by env name (values never logged). */
+/**
+ * Every Mini secret that must never leave the process, by env name (values
+ * never logged). Includes the CURSOR_SDK_* / CURSOR_API_KEY secrets a shared
+ * Doppler config may inject into the Mini (experiment #47).
+ */
 function knownSecrets(env: Env): Array<{ name: string; value: string | undefined }> {
   return [
     { name: "DISCORD_BOT_TOKEN", value: env.DISCORD_BOT_TOKEN },
@@ -23,14 +27,19 @@ function knownSecrets(env: Env): Array<{ name: string; value: string | undefined
 
 /**
  * No try/catch: if the configured workspace bearers cannot be enumerated, the
- * secret scanner must fail CLOSED (callers refuse to dispatch), never behave
- * as if there were no secrets to strip.
+ * secret scanner must fail CLOSED (callers refuse to dispatch / refuse posting),
+ * never behave as if there were no secrets to strip — the text may contain the
+ * very tokens we failed to load. Matches main's fail-closed policy (#59).
  */
 function loadWorkspaceTokenEntries(): Array<{ name: string; value: string }> {
   return loadWorkspaceTokens().map((t) => ({ name: t.envName, value: t.token }));
 }
 
-/** Strip Mini secrets from untrusted Discord text before it leaves the process. */
+/**
+ * Strip Mini secrets from untrusted Discord text before it leaves the process.
+ * Throws when the workspace token list cannot be loaded; callers must treat
+ * that as "do not send" (fail closed), not "nothing to redact".
+ */
 export function redactSecrets(text: string, env: Env = loadEnv()): string {
   let out = text;
   for (const { value } of knownSecrets(env)) {
@@ -324,9 +333,9 @@ export async function dispatchGrokJob(
     }
   } catch (err) {
     // The redactor/scanner could not enumerate the Mini's secrets — that is a
-    // refusal to dispatch, never "no secrets to strip".
-    logger.error({ err, job_id: payload.job.id }, "refusing Grok dispatch: secret scanner unavailable (fail closed)");
-    return { dispatched: false, skipped: "secrets-unavailable" };
+    // refusal to dispatch, never "no secrets to strip" (main #59 fail-closed).
+    logger.error({ err, job_id: payload.job.id }, "refusing Grok dispatch: secret redaction unavailable (workspace tokens failed to load)");
+    return { dispatched: false, skipped: "secret-redaction-unavailable" };
   }
   const result = await poster(url, capped, headers);
   if (!result.ok) {

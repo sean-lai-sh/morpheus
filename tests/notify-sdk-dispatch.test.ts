@@ -210,7 +210,7 @@ describe("redactSecrets / findLeakedSecretEnv (fail-closed tripwire)", () => {
       expect(sdk.dispatched).toBe(false);
       // Workspace membership checks run before the scanner and also fail closed
       // without config; either way nothing may leave the process.
-      expect(["secrets-unavailable", "namespace-required"]).toContain(sdk.skipped!);
+      expect(["secret-redaction-unavailable", "namespace-required"]).toContain(sdk.skipped!);
       const grok = await dispatchGrokJob(payload, {
         env: sdkEnv({ GROK_BOT_WEBHOOK_URL: GROK_URL, GROK_BOT_WEBHOOK_SECRET: GROK_SECRET }),
         poster,

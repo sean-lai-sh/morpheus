@@ -323,7 +323,7 @@ Bind to the **Tailscale** address (`tag:morpheus`, Morpheus port only). Grok hol
 
 ### Search semantics (Grok tool wrapper contract) — issue #50
 
-`POST /v1/fs/search` body: `{ query, pathPrefix?, channelHint?, threadId?, sinceMs?, untilMs?, limit? (1..50, default 10) }`.
+`POST /v1/fs/search` body: `{ query, pathPrefix?, channelHint?, threadId?, sinceMs?, untilMs?, limit? (1..50, default 10) }`. A present-but-invalid filter (wrong type, non-finite number) is a 400, never silently ignored. `channelHint` takes a snowflake id or a channel name; a name shared by two visible channels is 400 (pass the id), an unknown/out-of-scope hint returns empty hits.
 
 - **Two passes.** `strict` = every non-stopword term must match (porter-stemmed). If that yields fewer than `limit` hits and the query has ≥3 terms, a `loose` pass adds hits matching **any two** terms, bm25-ranked. Each hit carries `match: "strict" | "loose"` — treat loose hits as leads, not facts.
 - `"quoted phrases"` are matched as phrases. Stopwords (`the, before, is, lol, pls, …`) are dropped unless the query is nothing but stopwords.
@@ -331,7 +331,7 @@ Bind to the **Tailscale** address (`tag:morpheus`, Morpheus port only). Grok hol
 - `pathPrefix` is applied in SQL (as a channel filter) before ranking, so a busy sibling channel cannot starve a quiet one.
 - Wrapper guidance for Grok: (1) send the user's question verbatim first; (2) if `strict` hits are empty, retry with the 2–3 rarest words (`f26`, `tracker`, a person's name); (3) call `GET /v1/links?kind=docs` to enumerate shared docs when the question is about "the sheet / the tracker / the doc"; (4) `GET /v1/fs/read?path=<channel path>` for the surrounding conversation before answering "not in the index".
 
-`GET /v1/links` is scoped by the token via the **message's** effective channel (`COALESCE(parent_channel_id, channel_id)`) — never `links.channel_id`, which holds the thread id for thread posts. Deleted messages are excluded; results are newest-first and deduped by Drive `file_id`.
+`GET /v1/links` is scoped by the token via the **message's** effective channel (`COALESCE(parent_channel_id, channel_id)`) — never `links.channel_id`, which holds the thread id for thread posts. Deleted messages are excluded; results are newest-first and deduped by Drive `file_id`. `since`/`until` bound the **posted time** (`messages.created_at`, ms epoch) — never `first_seen_at` ingest time, which diverges on backfill — and ordering/dedupe use posted time too. `firstSeenAt` is still returned per link. `channel=` takes a snowflake id or a channel name; a name shared by two visible channels is rejected with 400 (pass the id) rather than silently picking one.
 
 The first-pass snippet pack the Mini POSTs to Grok is now FTS-first (strict → loose on the job text, same channel/workspace filter) and then back-filled by recency, capped at 12.
 

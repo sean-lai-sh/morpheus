@@ -604,6 +604,98 @@ describe("ContextStore search recall (issue #50)", () => {
     ).toEqual([]);
   });
 
+  test("a thread pathPrefix is applied in SQL: busy sibling threads cannot starve it", () => {
+    // Busy sibling thread under general-chat 5005: 48 identical hits (> limit*4 SQL cap).
+    const BUSY_THREAD = "710000000000007001";
+    for (let i = 0; i < 48; i++) {
+      const id = `71000000000001${String(1000 + i)}`;
+      upsertMessage({
+        id,
+        channelId: BUSY_THREAD,
+        parentChannelId: "5005",
+        authorId: "u5",
+        authorName: "erin",
+        content: "thread-starve-token quorum reached",
+        createdAt: 5_000 + i,
+        threadId: BUSY_THREAD,
+        threadName: "Busy planning",
+      });
+      indexFromRow(getMessage(id)!);
+    }
+    // The quiet target thread has one hit, with a HIGHER id so a rank tie sorts it last.
+    const QUIET_THREAD = "720000000000007777";
+    const QUIET_MSG = "720000000000009999";
+    upsertMessage({
+      id: QUIET_MSG,
+      channelId: QUIET_THREAD,
+      parentChannelId: "5005",
+      authorId: "u5",
+      authorName: "erin",
+      content: "thread-starve-token quorum reached",
+      createdAt: 6_000,
+      threadId: QUIET_THREAD,
+      threadName: "Quiet corner",
+    });
+    indexFromRow(getMessage(QUIET_MSG)!);
+
+    const hits = contextStore.search({
+      query: "thread-starve-token quorum",
+      scope: eboard,
+      pathPrefix: "/eboard/general-chat-5005/threads/quiet-corner-7777",
+      limit: 10,
+    });
+    expect(hits.map((h) => h.id)).toEqual([QUIET_MSG]);
+
+    // A `/threads` dir prefix only covers thread messages; the busy main channel
+    // cannot starve them either.
+    for (let i = 0; i < 48; i++) {
+      const id = `73000000000001${String(1000 + i)}`;
+      upsertMessage({
+        id,
+        channelId: "5005",
+        authorId: "u5",
+        authorName: "erin",
+        content: "main-starve-token quorum reached",
+        createdAt: 7_000 + i,
+      });
+      indexFromRow(getMessage(id)!);
+    }
+    const QUIET_MSG_2 = "740000000000009999";
+    upsertMessage({
+      id: QUIET_MSG_2,
+      channelId: QUIET_THREAD,
+      parentChannelId: "5005",
+      authorId: "u5",
+      authorName: "erin",
+      content: "main-starve-token quorum reached",
+      createdAt: 8_000,
+      threadId: QUIET_THREAD,
+      threadName: "Quiet corner",
+    });
+    indexFromRow(getMessage(QUIET_MSG_2)!);
+    const dirHits = contextStore.search({
+      query: "main-starve-token quorum",
+      scope: eboard,
+      pathPrefix: "/eboard/general-chat-5005/threads",
+      limit: 10,
+    });
+    // The strict thread hit is found (pre-fix the 48 main-channel strict matches
+    // filled the SQL cap first); loose sibling-thread hits may follow, but no
+    // main-channel row can appear under a /threads prefix.
+    expect(dirHits[0]?.id).toBe(QUIET_MSG_2);
+    expect(dirHits[0]?.match).toBe("strict");
+    expect(dirHits.every((h) => h.threadId != null)).toBe(true);
+
+    // A message pathPrefix pins the row itself.
+    const msgHits = contextStore.search({
+      query: "thread-starve-token quorum",
+      scope: eboard,
+      pathPrefix: `/eboard/general-chat-5005/threads/quiet-corner-7777/${QUIET_MSG}`,
+      limit: 10,
+    });
+    expect(msgHits.map((h) => h.id)).toEqual([QUIET_MSG]);
+  });
+
   test("hits carry links from the links table", () => {
     const hits = contextStore.search({ query: "sponsor-deck-unique", scope: eboard });
     const hit = hits.find((h) => h.id === LINK_MSG);

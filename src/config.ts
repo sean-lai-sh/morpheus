@@ -26,6 +26,24 @@ export const parseBoolish = (v: unknown) => {
 export const WORKSPACE_ID = /^[a-z0-9][a-z0-9-]*$/;
 const ENV_NAME = /^[A-Z][A-Z0-9_]*$/;
 
+/**
+ * True when repeated percent-decoding leaves `s` unchanged. Mirrors the decode
+ * loop in `context/paths.ts#decodeEncodedPath` (which cannot be imported here —
+ * paths.ts imports config.ts). A config value embedded in index paths must be a
+ * fixed point of that loop, or the sanitized path diverges from the configured
+ * one (`%2F` becomes a separator, `%2e%2e` a dot segment, `%25…` re-decodes).
+ * Malformed escapes (a lone `%`) also fail: they make the path undecodable.
+ */
+function stableUnderPercentDecoding(s: string): boolean {
+  try {
+    // A fixed point of one decode is a fixed point of the repeated loop.
+    return decodeURIComponent(s) === s;
+  } catch {
+    // Malformed escape (lone `%`): the sanitized path would be undecodable.
+    return false;
+  }
+}
+
 const parseIdList = (v: unknown) => {
   if (v == null) return [];
   if (Array.isArray(v)) return v;
@@ -181,7 +199,28 @@ const channelSchema = z
     classify: z.boolean().default(true),
     confidence_threshold: z.number().min(0).max(1).optional(),
     include_threads: z.boolean().default(false),
-    category: z.string().optional(),
+    /**
+     * One safe path segment: `category` is embedded verbatim in index paths
+     * (`/{workspace}/{category}/{slug}`) and markdown export directories
+     * (`data/discord/{workspace}/{category}/`). Separators or dot segments
+     * would escape the export root and produce unparseable index paths.
+     * It must also be stable under the repeated percent-decoding that index
+     * paths go through (`sanitizeIndexPath`): a category like `%2F` or
+     * `%2e%2e` (or double-encoded forms) would decode into a separator or dot
+     * segment and silently corrupt the path after the segment checks passed.
+     */
+    category: z
+      .string()
+      .min(1)
+      .refine(
+        (s) => !/[/\\\0]/.test(s) && s !== "." && s !== ".." && s.trim() === s,
+        "must be a single path segment (no slashes, backslashes, or dot segments)",
+      )
+      .refine(
+        (s) => stableUnderPercentDecoding(s),
+        "must not change under percent-decoding (no %2F, %2e%2e, or double-encoded forms; index paths are URI-decoded)",
+      )
+      .optional(),
     /** Workspace this channel (and its threads) belongs to. Must exist under `workspaces:`. */
     workspace: z.string().regex(WORKSPACE_ID, "must be a single lowercase slug segment"),
   })

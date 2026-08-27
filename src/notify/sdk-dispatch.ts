@@ -143,8 +143,8 @@ export async function dispatchSdkJob(
       return { dispatched: false, skipped: "refused-secret-in-payload" };
     }
   } catch (err) {
-    logger.error({ err, job_id: payload.job.id }, "refusing SDK dispatch: secret scanner unavailable (fail closed)");
-    return { dispatched: false, skipped: "secrets-unavailable" };
+    logger.error({ err, job_id: payload.job.id }, "refusing SDK dispatch: secret redaction unavailable (fail closed)");
+    return { dispatched: false, skipped: "secret-redaction-unavailable" };
   }
   const result = await poster(url, capped, headers);
   if (!result.ok) {

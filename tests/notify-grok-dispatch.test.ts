@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { parseEnv, type Env } from "../src/config.ts";
+import { parseEnv, resetEnvForTest, type Env } from "../src/config.ts";
 import {
   capGrokPayload,
   dispatchGrokJob,
@@ -15,6 +15,8 @@ import {
   EBOARD,
   EBOARD_TOKEN,
   LEADERSHIP,
+  LEADERSHIP_TOKEN,
+  TOKEN_ENV,
   LEADERSHIP_TEAM_PATH,
   MENTORSHIP_CHAT_PATH,
   PROGRAMS_DEV,
@@ -61,6 +63,199 @@ describe("grokBotWebhookUrl", () => {
   });
 });
 
+describe("GROK_BOT_WEBHOOK_URL refuses Discord incoming webhooks on every Discord host", () => {
+  const HOSTS = [
+    "discord.com",
+    "ptb.discord.com",
+    "canary.discord.com",
+    "discordapp.com",
+    "canary.discordapp.com",
+    // Absolute DNS names (trailing dot) resolve to the same hosts.
+    "discord.com.",
+    "ptb.discord.com.",
+    "discordapp.com.",
+  ];
+
+  test("parseEnv rejects a Discord webhook URL on any Discord host (first layer)", () => {
+    for (const host of HOSTS) {
+      const hook = `https://${host}/api/webhooks/123456789012345678/tok-tok-tok`;
+      expect(() => envFor({ GROK_BOT_WEBHOOK_URL: hook })).toThrow(/Discord incoming webhook/);
+    }
+  });
+
+  test("dispatch-time guard nulls every Discord host form, trailing dots included (second layer)", () => {
+    for (const host of HOSTS) {
+      const env: Env = {
+        ...liveEnv(EBOARD),
+        GROK_BOT_WEBHOOK_URL: `https://${host}/api/webhooks/123456789012345678/tok-tok-tok`,
+      };
+      expect(grokBotWebhookUrl(env)).toBeNull();
+    }
+  });
+
+  test("versioned (/api/v10, /api/v9) and case-variant webhook paths are refused at both layers", () => {
+    const paths = [
+      "/api/v10/webhooks/123456789012345678/tok-tok-tok",
+      "/api/v9/webhooks/123456789012345678/tok-tok-tok",
+      "/API/webhooks/123456789012345678/tok-tok-tok",
+      "/api/V10/Webhooks/123456789012345678/tok-tok-tok",
+    ];
+    for (const host of ["discord.com", "ptb.discord.com"]) {
+      for (const p of paths) {
+        const hook = `https://${host}${p}`;
+        expect(() => envFor({ GROK_BOT_WEBHOOK_URL: hook })).toThrow(/Discord incoming webhook/);
+        const env: Env = { ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: hook };
+        expect(grokBotWebhookUrl(env)).toBeNull();
+      }
+    }
+  });
+
+  test("percent-encoded webhook paths are refused at both layers (Discord decodes them)", () => {
+    // All of these execute as webhooks on Discord (%77=w, %65…=ebhooks, %31%30=10, %61=a, %68=h).
+    const hooks = [
+      "https://discord.com/api/%77ebhooks/123456789012345678/tok-tok-tok",
+      "https://discord.com/api/%77%65%62%68%6f%6f%6b%73/123456789012345678/tok-tok-tok",
+      "https://discord.com/api/v%31%30/webhooks/123456789012345678/tok-tok-tok",
+      "https://discord.com/api/v10/%77ebhooks/123456789012345678/tok-tok-tok",
+      "https://discord.com/%61pi/webhooks/123456789012345678/tok-tok-tok",
+      "https://discord.com/api/web%68ooks/123456789012345678/tok-tok-tok",
+      "https://ptb.discord.com/api/%77ebhooks/123456789012345678/tok-tok-tok",
+      // Malformed encoding on a Discord host fails closed: treated as a webhook.
+      "https://discord.com/api/%zzebhooks/123456789012345678/tok-tok-tok",
+    ];
+    for (const hook of hooks) {
+      expect(() => envFor({ GROK_BOT_WEBHOOK_URL: hook })).toThrow(/Discord incoming webhook/);
+      const env: Env = { ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: hook };
+      expect(grokBotWebhookUrl(env)).toBeNull();
+    }
+    // Control pinning one-decode semantics: a double-encoded path is a generic
+    // 404 on Discord (not an executable webhook), so it stays allowed.
+    const doubleEncoded = "https://discord.com/api/%2577ebhooks/123456789012345678/tok-tok-tok";
+    expect(grokBotWebhookUrl({ ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: doubleEncoded })).toBe(doubleEncoded);
+  });
+
+  test("encoded-slash (%2F) webhook paths are refused at both layers (Discord splits on the decoded separator)", () => {
+    // All live-verified as execute paths on Discord (code 10015).
+    const hooks = [
+      "https://discord.com/api/webhooks%2F123456789012345678/tok-tok-tok",
+      "https://discord.com/api/webhooks%2F123456789012345678%2Ftok-tok-tok",
+      "https://discord.com/api/%2fwebhooks/123456789012345678/tok-tok-tok",
+      "https://discord.com/api/v10%2Fwebhooks/123456789012345678/tok-tok-tok",
+      "https://discord.com/api/v10/webhooks%2F123456789012345678%2Ftok-tok-tok",
+      "https://discord.com/api/webhooks/123456789012345678%2Ftok-tok-tok",
+      "https://discord.com/api/%2fwebhooks%2F123456789012345678%2Ftok-tok-tok",
+    ];
+    for (const hook of hooks) {
+      expect(() => envFor({ GROK_BOT_WEBHOOK_URL: hook })).toThrow(/Discord incoming webhook/);
+      const env: Env = { ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: hook };
+      expect(grokBotWebhookUrl(env)).toBeNull();
+    }
+    // One-decode control: double-encoded %252F is a generic 404 on Discord —
+    // it must not become a separator after the single decode.
+    const doubleEncoded = "https://discord.com/api/webhooks%252F123456789012345678%252Ftok-tok-tok";
+    expect(grokBotWebhookUrl({ ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: doubleEncoded })).toBe(doubleEncoded);
+  });
+
+  test("dispatchGrokJob refuses an encoded-slash webhook path; the poster is never called", async () => {
+    const env: Env = {
+      ...liveEnv(EBOARD),
+      GROK_BOT_WEBHOOK_URL: "https://discord.com/api/webhooks%2F123456789012345678%2Ftok-tok-tok",
+    };
+    let posted = 0;
+    const result = await dispatchGrokJob(
+      {
+        job: { id: "j-encslash", namespace: EBOARD, discord_channel_id: SPONSORS, content: "hi there friends" },
+        snippets: [],
+        first_pass: true,
+      },
+      {
+        env,
+        poster: async () => {
+          posted += 1;
+          return { ok: true, status: 204 };
+        },
+      },
+    );
+    expect(result.dispatched).toBe(false);
+    expect(result.skipped).toBe("refused-discord-incoming-webhook");
+    expect(posted).toBe(0);
+  });
+
+  test("dispatchGrokJob refuses a percent-encoded webhook path; the poster is never called", async () => {
+    const env: Env = {
+      ...liveEnv(EBOARD),
+      GROK_BOT_WEBHOOK_URL: "https://discord.com/api/%77ebhooks/123456789012345678/tok-tok-tok",
+    };
+    let posted = 0;
+    const result = await dispatchGrokJob(
+      {
+        job: { id: "j-enc", namespace: EBOARD, discord_channel_id: SPONSORS, content: "hi there friends" },
+        snippets: [],
+        first_pass: true,
+      },
+      {
+        env,
+        poster: async () => {
+          posted += 1;
+          return { ok: true, status: 204 };
+        },
+      },
+    );
+    expect(result.dispatched).toBe(false);
+    expect(result.skipped).toBe("refused-discord-incoming-webhook");
+    expect(posted).toBe(0);
+  });
+
+  test("dispatchGrokJob refuses a versioned v10 Discord webhook; the poster is never called", async () => {
+    const env: Env = {
+      ...liveEnv(EBOARD),
+      GROK_BOT_WEBHOOK_URL: "https://discord.com/api/v10/webhooks/123456789012345678/tok-tok-tok",
+    };
+    let posted = 0;
+    const result = await dispatchGrokJob(
+      {
+        job: { id: "j-v10", namespace: EBOARD, discord_channel_id: SPONSORS, content: "hi there friends" },
+        snippets: [],
+        first_pass: true,
+      },
+      {
+        env,
+        poster: async () => {
+          posted += 1;
+          return { ok: true, status: 204 };
+        },
+      },
+    );
+    expect(result.dispatched).toBe(false);
+    expect(result.skipped).toBe("refused-discord-incoming-webhook");
+    expect(posted).toBe(0);
+  });
+
+  test("dispatch-time guard refuses a ptb webhook even if env validation were bypassed", async () => {
+    // Forge the Env to exercise the runtime guard directly (defense in depth).
+    const env: Env = { ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: "https://ptb.discord.com./api/webhooks/123456789012345678/tok-tok-tok" };
+    expect(grokBotWebhookUrl(env)).toBeNull();
+    let posted = 0;
+    const result = await dispatchGrokJob(
+      {
+        job: { id: "j-ptb", namespace: EBOARD, discord_channel_id: SPONSORS, content: "hi there friends" },
+        snippets: [],
+        first_pass: true,
+      },
+      {
+        env,
+        poster: async () => {
+          posted += 1;
+          return { ok: true, status: 200 };
+        },
+      },
+    );
+    expect(result.dispatched).toBe(false);
+    expect(result.skipped).toBe("refused-discord-incoming-webhook");
+    expect(posted).toBe(0);
+  });
+});
+
 describe("grokBotWebhookSecret", () => {
   test("missing → null", () => {
     expect(grokBotWebhookSecret(envFor())).toBeNull();
@@ -85,6 +280,51 @@ describe("redactSecrets", () => {
     const out = redactSecrets(`leaked ${EBOARD_TOKEN} here`, envFor());
     expect(out).not.toContain(EBOARD_TOKEN);
     expect(out).toContain("[redacted]");
+  });
+});
+
+describe("fail closed when workspace tokens cannot load", () => {
+  /** Two workspaces sharing one bearer makes loadWorkspaceTokens() throw. */
+  function withBrokenTokenEnv<T>(fn: () => T): T {
+    const saved = process.env[TOKEN_ENV.eboard];
+    process.env[TOKEN_ENV.eboard] = process.env[TOKEN_ENV.leadership];
+    resetEnvForTest();
+    try {
+      return fn();
+    } finally {
+      if (saved === undefined) delete process.env[TOKEN_ENV.eboard];
+      else process.env[TOKEN_ENV.eboard] = saved;
+      resetEnvForTest();
+    }
+  }
+
+  test("redactSecrets throws instead of silently redacting nothing", () => {
+    withBrokenTokenEnv(() => {
+      expect(() => redactSecrets(`leaked ${LEADERSHIP_TOKEN} here`, envFor())).toThrow(/distinct/);
+    });
+  });
+
+  test("dispatchGrokJob refuses dispatch; the poster is never called", async () => {
+    await withBrokenTokenEnv(async () => {
+      let posted = 0;
+      const result = await dispatchGrokJob(
+        {
+          job: { id: "j-fc", namespace: EBOARD, discord_channel_id: SPONSORS, content: `leak ${LEADERSHIP_TOKEN}` },
+          snippets: [],
+          first_pass: true,
+        },
+        {
+          env: liveEnv(EBOARD),
+          poster: async () => {
+            posted += 1;
+            return { ok: true, status: 200 };
+          },
+        },
+      );
+      expect(result.dispatched).toBe(false);
+      expect(result.skipped).toBe("secret-redaction-unavailable");
+      expect(posted).toBe(0);
+    });
   });
 });
 

@@ -149,7 +149,10 @@ export interface LinkQuery {
   /** Allowlisted parent channel ids; matched against COALESCE(parent_channel_id, channel_id). */
   channelIds: string[];
   kind?: LinkKind;
-  /** Inclusive bounds on links.first_seen_at (ms epoch). */
+  /**
+   * Inclusive bounds on the message's posted time (messages.created_at, ms epoch) —
+   * NOT links.first_seen_at, which is ingest time and diverges on backfill.
+   */
   sinceMs?: number;
   untilMs?: number;
   /** Restrict to one parent channel (matches the channel itself or threads under it). */
@@ -158,16 +161,18 @@ export interface LinkQuery {
   limit: number;
 }
 
-/** A link joined with its (non-deleted) message row. Ordered newest first by first_seen_at. */
+/** A link joined with its (non-deleted) message row. Ordered newest first by posted time. */
 export type LinkWithMessage = LinkRow & { message: MessageRow };
 
 /**
  * Links whose message lives in one of `channelIds` (by effective/parent channel,
  * never `links.channel_id`, which holds the thread id for thread messages).
- * Deleted messages are always excluded. Rows are deduped by file_id (falling
- * back to url) keeping the newest, *before* `limit` is applied, so a frequently
- * reshared file cannot crowd out older unique files. Callers must still
- * post-filter with `rowInScope` and map to an index path.
+ * Deleted messages are always excluded. Time semantics are posted-at
+ * (messages.created_at) throughout: since/until bounds, newest-first ordering,
+ * and which duplicate wins. Rows are deduped by file_id (falling back to url)
+ * keeping the newest, *before* `limit` is applied, so a frequently reshared
+ * file cannot crowd out older unique files. Callers must still post-filter
+ * with `rowInScope` and map to an index path.
  */
 export function queryLinks(q: LinkQuery): LinkWithMessage[] {
   if (q.channelIds.length === 0) return [];
@@ -180,11 +185,11 @@ export function queryLinks(q: LinkQuery): LinkWithMessage[] {
     params.push(q.kind);
   }
   if (q.sinceMs != null) {
-    where += ` AND l.first_seen_at >= ?`;
+    where += ` AND m.created_at >= ?`;
     params.push(q.sinceMs);
   }
   if (q.untilMs != null) {
-    where += ` AND l.first_seen_at <= ?`;
+    where += ` AND m.created_at <= ?`;
     params.push(q.untilMs);
   }
   if (q.channelId) {
@@ -199,13 +204,13 @@ export function queryLinks(q: LinkQuery): LinkWithMessage[] {
              m.*,
              ROW_NUMBER() OVER (
                PARTITION BY COALESCE(l.file_id, l.url)
-               ORDER BY l.first_seen_at DESC, l.link_id DESC
+               ORDER BY m.created_at DESC, l.link_id DESC
              ) AS rn
       FROM links l
       JOIN messages m ON m.id = l.message_id${where}
     )
     WHERE rn = 1
-    ORDER BY first_seen_at DESC, link_id DESC
+    ORDER BY created_at DESC, link_id DESC
     LIMIT ?`;
   params.push(q.limit);
   type Raw = MessageRow & {
