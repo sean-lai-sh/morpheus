@@ -240,6 +240,13 @@ describe("ContextStore search isolation", () => {
     ).toEqual([]);
   });
 
+  test("pathPrefix `/` returns the same hits as omitting it", () => {
+    const omitted = contextStore.search({ query: "sponsors budget", scope: eboard });
+    const root = contextStore.search({ query: "sponsors budget", scope: eboard, pathPrefix: "/" });
+    expect(omitted.length).toBeGreaterThan(0);
+    expect(root.map((h) => h.id)).toEqual(omitted.map((h) => h.id));
+  });
+
   test("deleted messages are excluded by default", () => {
     upsertMessage({
       id: "100000000000000088",

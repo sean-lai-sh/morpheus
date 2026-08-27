@@ -340,10 +340,12 @@ function search(q: SearchQuery): SearchHit[] {
     if (!channelFilter) return [];
   }
 
-  const prefix =
+  const rawPrefix =
     q.pathPrefix && q.pathPrefix.endsWith("/") && q.pathPrefix.length > 1
       ? q.pathPrefix.slice(0, -1)
       : q.pathPrefix;
+  // Sanitized `/` is a no-op prefix (every index path is under `/`); same as omitting it.
+  const prefix = rawPrefix && rawPrefix !== "/" ? rawPrefix : undefined;
   let prefixFilter: PrefixSqlFilter | null = null;
   if (prefix) {
     prefixFilter = sqlFilterForPathPrefix(prefix, q.scope);

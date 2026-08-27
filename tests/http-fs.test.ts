@@ -351,6 +351,17 @@ describe("search HTTP", () => {
     expect(await hitsOf(res)).toEqual([]);
   });
 
+  test("pathPrefix `/` returns the same hits as omitting it", async () => {
+    const omitted = await post("/v1/fs/search", { query: "sponsors budget" }, EBOARD);
+    const root = await post("/v1/fs/search", { query: "sponsors budget", pathPrefix: "/" }, EBOARD);
+    expect(omitted.status).toBe(200);
+    expect(root.status).toBe(200);
+    const omittedHits = await hitsOf(omitted);
+    const rootHits = await hitsOf(root);
+    expect(omittedHits.length).toBeGreaterThan(0);
+    expect(rootHits).toEqual(omittedHits);
+  });
+
   test("eboard can search a descendant via pathPrefix", async () => {
     const res = await post(
       "/v1/fs/search",
@@ -414,6 +425,8 @@ describe("search HTTP", () => {
       ["pathPrefix", null],
       ["pathPrefix", 42],
       ["pathPrefix", ""],
+      ["pathPrefix", " "],
+      ["pathPrefix", "\t\n"],
     ];
     for (const [key, value] of cases) {
       const res = await post("/v1/fs/search", { query: "retreat", [key]: value }, LEADERSHIP);
