@@ -215,13 +215,13 @@ describe("dispatchEnqueuedJob lane routing", () => {
   test("flag off (default): interactive lane goes to Grok, sdk poster never called", async () => {
     const grok = countingPoster();
     const sdk = countingPoster();
-    const dispatched = await dispatchEnqueuedJob(jobRow("r-int-off"), {
+    const result = await dispatchEnqueuedJob(jobRow("r-int-off"), {
       lane: "interactive",
       env: bothConfigured(),
       poster: grok.poster,
       sdkPoster: sdk.poster,
     });
-    expect(dispatched).toBe(true);
+    expect(result.dispatched).toBe(true);
     expect(grok.posts.length).toBe(1);
     expect(grok.posts[0]!.url).toBe(GROK_URL);
     expect(sdk.posts.length).toBe(0);
@@ -230,13 +230,13 @@ describe("dispatchEnqueuedJob lane routing", () => {
   test("flag on: interactive lane goes to the SDK sibling, grok poster never called", async () => {
     const grok = countingPoster();
     const sdk = countingPoster();
-    const dispatched = await dispatchEnqueuedJob(jobRow("r-int-on"), {
+    const result = await dispatchEnqueuedJob(jobRow("r-int-on"), {
       lane: "interactive",
       env: bothConfigured({ CURSOR_SDK_DISPATCH: "true" }),
       poster: grok.poster,
       sdkPoster: sdk.poster,
     });
-    expect(dispatched).toBe(true);
+    expect(result.dispatched).toBe(true);
     expect(sdk.posts.length).toBe(1);
     expect(sdk.posts[0]!.url).toBe(SDK_URL);
     expect(sdk.posts[0]!.headers?.Authorization).toBe(`Bearer ${SDK_SECRET}`);
@@ -246,13 +246,13 @@ describe("dispatchEnqueuedJob lane routing", () => {
   test("flag on: background lane still goes to Grok — the flag never steals /background", async () => {
     const grok = countingPoster();
     const sdk = countingPoster();
-    const dispatched = await dispatchEnqueuedJob(jobRow("r-bg-on"), {
+    const result = await dispatchEnqueuedJob(jobRow("r-bg-on"), {
       lane: "background",
       env: bothConfigured({ CURSOR_SDK_DISPATCH: "true" }),
       poster: grok.poster,
       sdkPoster: sdk.poster,
     });
-    expect(dispatched).toBe(true);
+    expect(result.dispatched).toBe(true);
     expect(grok.posts.length).toBe(1);
     expect(grok.posts[0]!.url).toBe(GROK_URL);
     expect(sdk.posts.length).toBe(0);
@@ -261,25 +261,25 @@ describe("dispatchEnqueuedJob lane routing", () => {
   test("flag off: background lane goes to Grok (as today)", async () => {
     const grok = countingPoster();
     const sdk = countingPoster();
-    const dispatched = await dispatchEnqueuedJob(jobRow("r-bg-off"), {
+    const result = await dispatchEnqueuedJob(jobRow("r-bg-off"), {
       lane: "background",
       env: bothConfigured(),
       poster: grok.poster,
       sdkPoster: sdk.poster,
     });
-    expect(dispatched).toBe(true);
+    expect(result.dispatched).toBe(true);
     expect(grok.posts.length).toBe(1);
     expect(sdk.posts.length).toBe(0);
   });
 
   test("flag on, interactive: sdk skip (missing URL) does not silently fall back to Grok", async () => {
     const grok = countingPoster();
-    const dispatched = await dispatchEnqueuedJob(jobRow("r-int-nourl"), {
+    const result = await dispatchEnqueuedJob(jobRow("r-int-nourl"), {
       lane: "interactive",
       env: bothConfigured({ CURSOR_SDK_DISPATCH: "true", CURSOR_SDK_WEBHOOK_URL: "" }),
       poster: grok.poster,
     });
-    expect(dispatched).toBe(false);
+    expect(result.dispatched).toBe(false);
     expect(grok.posts.length).toBe(0);
   });
 });

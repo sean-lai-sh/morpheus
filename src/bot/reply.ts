@@ -2,6 +2,7 @@ import type { Client, Message, TextBasedChannel } from "discord.js";
 import { loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 import { redactSecrets } from "../notify/grok-dispatch.ts";
+import { stopJobTyping } from "./typing.ts";
 import {
   failJob,
   getJob,
@@ -192,7 +193,10 @@ export async function completeJobWithReply(
     const status = prep.reason === "not-found" ? 404 : 409;
     return { ok: false, status, error: prep.reason };
   }
+  // Typing stops only once the reply is on Discord (or the job is terminal). A send
+  // error leaves the job claimed for retry, and the indicator must survive that.
   if (prep.alreadyCompleted) {
+    stopJobTyping(id);
     if (prep.job.status === "claimed" && prep.job.result_discord_message_id) {
       const done = markJobCompleted(id, prep.job.result_discord_message_id, opts.now);
       return { ok: true, status: 200, job: done ?? prep.job, posted: false };
@@ -201,11 +205,13 @@ export async function completeJobWithReply(
   }
 
   if (prep.job.result_discord_message_id) {
+    stopJobTyping(id);
     const done = markJobCompleted(id, prep.job.result_discord_message_id, opts.now);
     return { ok: true, status: 200, job: done ?? prep.job, posted: false };
   }
 
   if (postReplies === false) {
+    stopJobTyping(id);
     const done = markJobCompleted(id, null, opts.now);
     return { ok: true, status: 200, job: done ?? prep.job, posted: false };
   }
@@ -220,17 +226,21 @@ export async function completeJobWithReply(
       client: opts.client,
       onFirstSent: (messageId) => {
         recordJobDiscordSend(id, messageId, opts.now);
+        stopJobTyping(id);
       },
     });
     if (!sent.messageId) {
       markJobSendError(id, sent.skipped ?? "discord-send-failed", opts.now);
+      // Job stays claimed for a retry; leave typing running until it posts or times out.
       return { ok: false, status: 502, error: sent.skipped ?? "discord-send-failed", job: getJob(id) ?? prep.job };
     }
+    stopJobTyping(id);
     const done = markJobCompleted(id, sent.messageId, opts.now);
     return { ok: true, status: 200, job: done ?? getJob(id) ?? prep.job, posted: sent.skipped !== "already-sent" };
   } catch (err) {
     const recorded = getJob(id)?.result_discord_message_id;
     if (recorded) {
+      stopJobTyping(id);
       const done = markJobCompleted(id, recorded, opts.now);
       logger.error({ err, job_id: id }, "job Discord follow-up failed; first send recorded, not retrying post");
       return { ok: true, status: 200, job: done ?? getJob(id) ?? prep.job, posted: true };
@@ -254,5 +264,6 @@ export function failJobAsWorker(
     if (!existing) return { ok: false, status: 404, error: "not-found" };
     return { ok: false, status: 409, error: "claimed-by-mismatch" };
   }
+  stopJobTyping(id);
   return { ok: true, status: 200, job };
 }

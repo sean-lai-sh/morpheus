@@ -19,6 +19,8 @@ const TOKEN_KEYS = [
   "GITHUB_ISSUES_WORKSPACES",
   "HEALTH_HOST",
   "JOB_TRIGGER_ROLE_IDS",
+  "DISCORD_TYPING_ON_DISPATCH",
+  "DISCORD_TYPING_MAX_MS",
 ] as const;
 const saved: Record<string, string | undefined> = {};
 
@@ -234,5 +236,23 @@ describe("loadWorkspaceTokens", () => {
     expect(() => loadWorkspaceTokens(baseEnv({ MORPHEUS_API_TOKEN_EBOARD: "too-short" }))).toThrow(
       /16/,
     );
+  });
+});
+
+describe("DISCORD_TYPING_ON_DISPATCH", () => {
+  test("defaults on", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    expect(loadEnv().DISCORD_TYPING_ON_DISPATCH).toBe(true);
+    expect(loadEnv().DISCORD_TYPING_MAX_MS).toBe(180_000);
+  });
+
+  test("false is honored", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.DISCORD_TYPING_ON_DISPATCH = "false";
+    expect(loadEnv().DISCORD_TYPING_ON_DISPATCH).toBe(false);
   });
 });
