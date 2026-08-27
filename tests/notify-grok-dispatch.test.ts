@@ -530,6 +530,80 @@ describe("dispatchGrokJob", () => {
   });
 });
 
+describe("dispatchGrokJob default fetch must not follow redirects", () => {
+  const jobPack: GrokJobPayload = {
+    job: {
+      id: "j-redir",
+      namespace: EBOARD,
+      discord_channel_id: SPONSORS,
+      content: "summarize the private planning notes",
+    },
+    snippets: [{ content: "secret-snippet-body", path: `${SPONSORS_PATH}/m1`, channelId: SPONSORS }],
+    first_pass: true,
+  };
+
+  test("307 to 127.0.0.1 HEALTH_PORT /v1/jobs does not POST the job pack", async () => {
+    const hopPosts: { method: string; url: string; body: string }[] = [];
+    const hop = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        hopPosts.push({ method: req.method, url: req.url, body: await req.text() });
+        return new Response("captured", { status: 200 });
+      },
+    });
+    const first = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        return new Response(null, {
+          status: 307,
+          headers: { Location: `http://127.0.0.1:${hop.port}/v1/jobs` },
+        });
+      },
+    });
+    try {
+      const env: Env = {
+        ...liveEnv(EBOARD, { GROK_DISPATCH_TIMEOUT_MS: "3000" }),
+        GROK_BOT_WEBHOOK_URL: `http://127.0.0.1:${first.port}/grok`,
+      };
+      const r = await dispatchGrokJob(jobPack, { env });
+      expect(r.dispatched).toBe(false);
+      expect(r.skipped).toBe("refused-redirect");
+      expect(hopPosts).toEqual([]);
+    } finally {
+      first.stop(true);
+      hop.stop(true);
+    }
+  });
+
+  test("307 to discord.com/api/webhooks does not POST the job pack", async () => {
+    const first = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        return new Response(null, {
+          status: 307,
+          headers: {
+            Location: "https://discord.com/api/webhooks/123456789012345678/tok-tok-tok",
+          },
+        });
+      },
+    });
+    try {
+      const env: Env = {
+        ...liveEnv(EBOARD, { GROK_DISPATCH_TIMEOUT_MS: "3000" }),
+        GROK_BOT_WEBHOOK_URL: `http://127.0.0.1:${first.port}/grok`,
+      };
+      const r = await dispatchGrokJob(jobPack, { env });
+      expect(r.dispatched).toBe(false);
+      expect(r.skipped).toBe("refused-discord-incoming-webhook");
+    } finally {
+      first.stop(true);
+    }
+  });
+});
+
 describe("capGrokPayload", () => {
   test("drops Mini filesystem paths including body", () => {
     const capped = capGrokPayload(

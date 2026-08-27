@@ -100,6 +100,7 @@ async function defaultPoster(url: string, body: unknown): Promise<{ ok: boolean;
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    redirect: "error",
   });
   return { ok: res.ok, status: res.status };
 }
