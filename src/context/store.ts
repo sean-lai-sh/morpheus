@@ -365,7 +365,10 @@ function search(q: SearchQuery): SearchHit[] {
       if (!rowInScope(row, q.scope)) continue;
       const path = indexPathForRow(row);
       if (!path) continue;
-      if (prefix && !pathPrefixMatches(path, prefix)) continue;
+      // SQL already pins `m.thread_id` for a thread (or in-thread message) prefix.
+      // Do not re-drop on `thread_name` in the path: Discord rename leaves mixed
+      // old/new names on the same id, and the other name would fill limit*4 (#65).
+      if (prefix && !prefixFilter?.threadId && !pathPrefixMatches(path, prefix)) continue;
       seen.add(row.id);
       hits.push({
         id: row.id,

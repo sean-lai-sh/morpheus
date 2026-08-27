@@ -703,6 +703,50 @@ describe("ContextStore search recall (issue #50)", () => {
     expect(msgHits.map((h) => h.id)).toEqual([QUIET_MSG]);
   });
 
+  test("a renamed thread's new slug pathPrefix is not starved by old thread_name rows", () => {
+    // Same thread_id, mixed names: 48 rows still stored under the old title (fills
+    // limit*4) plus one row under the new title (higher id, last in rank-then-id).
+    const RENAMED_THREAD = "810000000000008888";
+    const TOKEN = "rename-starve-token quorum reached";
+    for (let i = 0; i < 48; i++) {
+      const id = `81000000000001${String(1000 + i)}`;
+      upsertMessage({
+        id,
+        channelId: RENAMED_THREAD,
+        parentChannelId: "5005",
+        authorId: "u5",
+        authorName: "erin",
+        content: TOKEN,
+        createdAt: 9_000 + i,
+        threadId: RENAMED_THREAD,
+        threadName: "Old Title",
+      });
+      indexFromRow(getMessage(id)!);
+    }
+    const NEW_MSG = "810000000000019999";
+    upsertMessage({
+      id: NEW_MSG,
+      channelId: RENAMED_THREAD,
+      parentChannelId: "5005",
+      authorId: "u5",
+      authorName: "erin",
+      content: TOKEN,
+      createdAt: 9_999,
+      threadId: RENAMED_THREAD,
+      threadName: "New Title",
+    });
+    indexFromRow(getMessage(NEW_MSG)!);
+
+    const hits = contextStore.search({
+      query: "rename-starve-token quorum",
+      scope: eboard,
+      pathPrefix: "/eboard/general-chat-5005/threads/new-title-8888",
+      limit: 10,
+    });
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hits.every((h) => h.threadId === RENAMED_THREAD)).toBe(true);
+  });
+
   test("hits carry links from the links table", () => {
     const hits = contextStore.search({ query: "sponsor-deck-unique", scope: eboard });
     const hit = hits.find((h) => h.id === LINK_MSG);
