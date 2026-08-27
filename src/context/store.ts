@@ -170,22 +170,44 @@ export function toFtsQueryLoose(raw: string): string {
 }
 
 /**
- * Effective channel ids covered by a `pathPrefix`, or null for no restriction (`/`).
- * Applied in SQL before the LIMIT so a small channel is not starved by a busy sibling.
- * An unparseable or out-of-scope prefix yields [] (nothing can match it).
+ * SQL-level restriction covered by a `pathPrefix`. Applied before the LIMIT so a
+ * small channel — or a quiet thread — is not starved by a busy sibling.
+ * `channelIds: null` means no restriction (`/`); `[]` means nothing can match
+ * (unparseable or out-of-scope prefix).
  */
-function channelIdsForPathPrefix(prefix: string, scope: Scope): string[] | null {
+interface PrefixSqlFilter {
+  channelIds: string[] | null;
+  /** Set when the prefix names a thread (or a message inside one). */
+  threadId: string | null;
+  /** True for a `/…/threads` dir prefix: only thread messages can match. */
+  threadsOnly: boolean;
+  /** Set when the prefix names a single message. */
+  messageId: string | null;
+}
+
+function sqlFilterForPathPrefix(prefix: string, scope: Scope): PrefixSqlFilter {
+  const none: PrefixSqlFilter = { channelIds: [], threadId: null, threadsOnly: false, messageId: null };
   const parsed = parseIndexPath(prefix);
-  if (!parsed) return [];
-  if (parsed.kind === "root") return null;
-  if (!scope.visible.has(parsed.namespace)) return [];
-  if (parsed.kind === "namespace") return channelIdsForNamespace(parsed.namespace);
-  if (parsed.kind === "category") {
-    return loadChannels()
-      .channels.filter((c) => c.workspace === parsed.namespace && c.category === parsed.category)
-      .map((c) => c.id);
+  if (!parsed) return none;
+  if (parsed.kind === "root") return { ...none, channelIds: null };
+  if (!scope.visible.has(parsed.namespace)) return none;
+  if (parsed.kind === "namespace") {
+    return { ...none, channelIds: channelIdsForNamespace(parsed.namespace) };
   }
-  return [parsed.channel.id];
+  if (parsed.kind === "category") {
+    return {
+      ...none,
+      channelIds: loadChannels()
+        .channels.filter((c) => c.workspace === parsed.namespace && c.category === parsed.category)
+        .map((c) => c.id),
+    };
+  }
+  return {
+    channelIds: [parsed.channel.id],
+    threadId: parsed.kind === "thread" || parsed.kind === "message" ? parsed.threadId ?? null : null,
+    threadsOnly: parsed.kind === "threadsDir",
+    messageId: parsed.kind === "message" ? parsed.messageId : null,
+  };
 }
 
 function resolveChannelHint(scope: Scope, hint: string): string | null {
@@ -223,7 +245,14 @@ interface FtsHitRow extends MessageRow {
 
 const SNIPPET_TOKENS = 32;
 
-function ftsRows(q: SearchQuery, ftsExpr: string, nsIds: string[], channelFilter: string | null, cap: number): FtsHitRow[] {
+function ftsRows(
+  q: SearchQuery,
+  ftsExpr: string,
+  nsIds: string[],
+  channelFilter: string | null,
+  prefixFilter: PrefixSqlFilter | null,
+  cap: number,
+): FtsHitRow[] {
   const { sql: inSql, params: inParams } = inClause(nsIds);
   const params: (string | number)[] = [ftsExpr, ...inParams];
   let sql = `
@@ -243,6 +272,19 @@ function ftsRows(q: SearchQuery, ftsExpr: string, nsIds: string[], channelFilter
   if (q.threadId) {
     sql += ` AND m.thread_id = ?`;
     params.push(q.threadId);
+  }
+  // Prefix predicates beyond the channel ids, so a busy sibling thread (or the
+  // parent channel itself) cannot fill the row cap before the target thread.
+  if (prefixFilter?.threadId) {
+    sql += ` AND m.thread_id = ?`;
+    params.push(prefixFilter.threadId);
+  }
+  if (prefixFilter?.threadsOnly) {
+    sql += ` AND m.thread_id IS NOT NULL`;
+  }
+  if (prefixFilter?.messageId) {
+    sql += ` AND m.id = ?`;
+    params.push(prefixFilter.messageId);
   }
   if (q.sinceMs != null) {
     sql += ` AND m.created_at >= ?`;
@@ -296,10 +338,11 @@ function search(q: SearchQuery): SearchHit[] {
     q.pathPrefix && q.pathPrefix.endsWith("/") && q.pathPrefix.length > 1
       ? q.pathPrefix.slice(0, -1)
       : q.pathPrefix;
+  let prefixFilter: PrefixSqlFilter | null = null;
   if (prefix) {
-    const prefixIds = channelIdsForPathPrefix(prefix, q.scope);
-    if (prefixIds) {
-      const allowed = new Set(prefixIds);
+    prefixFilter = sqlFilterForPathPrefix(prefix, q.scope);
+    if (prefixFilter.channelIds) {
+      const allowed = new Set(prefixFilter.channelIds);
       nsIds = nsIds.filter((id) => allowed.has(id));
       if (nsIds.length === 0) return [];
     }
@@ -333,10 +376,10 @@ function search(q: SearchQuery): SearchHit[] {
     }
   };
 
-  collect(ftsRows(q, strict, nsIds, channelFilter, limit * 4), "strict");
+  collect(ftsRows(q, strict, nsIds, channelFilter, prefixFilter, limit * 4), "strict");
   const loose = toFtsQueryLoose(q.query);
   if (hits.length < limit && loose && loose !== strict) {
-    collect(ftsRows(q, loose, nsIds, channelFilter, limit * 4), "loose");
+    collect(ftsRows(q, loose, nsIds, channelFilter, prefixFilter, limit * 4), "loose");
   }
 
   const links = linksForHits(hits.map((h) => h.id));
