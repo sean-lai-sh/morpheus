@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { ChannelType, type Client } from "discord.js";
-import { resetChannelsForTest } from "../src/config.ts";
+import { getChannel, resetChannelsForTest } from "../src/config.ts";
 import { scopeFor } from "../src/context/namespace.ts";
 import { contextStore, indexFromRow } from "../src/context/store.ts";
+import { getState, setOldestSeen } from "../src/storage/crawl-state.ts";
 import { getMessage, upsertMessage } from "../src/storage/messages.ts";
 import { withTempCwd, withTempDb, writeCanonicalChannels } from "./helpers.ts";
 
@@ -260,4 +261,90 @@ describe("reconcileChannel", () => {
     expect(getMessage(liveReply)?.deleted_at).toBeNull();
     expect(getMessage(parentMsg)?.deleted_at).toBeNull();
   });
+
+  test("thread reconcile ingest does not rewind parent oldest_seen_id", async () => {
+    // In-progress parent backfill cursor sits above unfetched MID. An archived
+    // thread last-N snowflake is older than MID; ingesting it must not jump the
+    // parent cursor or backfill(before=threadId) skips MID and marks complete.
+    const parentId = "2002";
+    const oldestSeen = "200000000000000900";
+    const mid = "200000000000000500";
+    const old = "200000000000000100";
+    const threadId = "200000000000000200";
+    const parentRecent = "200000000000000950";
+    const parentContent = "leadership parent lookback for cursor isolate";
+    const threadContent = "archived thread last-n unique-cursor-rewind snacks";
+    const midContent = "parent mid unique-unfetched-mid-token snacks";
+    const oldContent = "parent old unique-unfetched-old-token snacks";
+
+    setOldestSeen(parentId, oldestSeen);
+    expect(getState(parentId)?.last_backfill_complete).toBe(0);
+
+    upsertMessage({
+      id: threadId,
+      channelId: threadId,
+      parentChannelId: parentId,
+      authorId: "u1",
+      authorName: "alice",
+      content: threadContent,
+      createdAt: 1_200,
+      threadId,
+      threadName: "Archived budget thread",
+    });
+    indexFromRow(getMessage(threadId)!);
+
+    const contentFor = (id: string) => {
+      if (id === mid) return midContent;
+      if (id === old) return oldContent;
+      return parentContent;
+    };
+    const thread = {
+      id: threadId,
+      name: "Archived budget thread",
+      messages: {
+        fetch: async () => collectionOf([mockMsg(threadId, threadId, threadContent)]),
+      },
+    };
+    const parentChannel = {
+      id: parentId,
+      type: ChannelType.GuildText,
+      messages: {
+        fetch: async ({ limit, before }: { limit: number; before?: string }) => {
+          if (!before) {
+            return collectionOf([mockMsg(parentRecent, parentId, parentContent)]);
+          }
+          const older = [parentRecent, oldestSeen, mid, old].filter((id) => BigInt(id) < BigInt(before));
+          const page = [...older].sort((a, b) => (BigInt(a) < BigInt(b) ? 1 : -1)).slice(0, limit);
+          return collectionOf(page.map((id) => mockMsg(id, parentId, contentFor(id))));
+        },
+      },
+      threads: {
+        fetchActive: async () => ({ threads: new Map(), hasMore: false }),
+        fetchArchived: async () => ({ threads: collectionOf([thread]), hasMore: false }),
+      },
+    };
+    const client = {
+      channels: {
+        fetch: async (id: string) => {
+          if (id === parentId) return parentChannel;
+          return { id, type: ChannelType.GuildVoice };
+        },
+      },
+    } as unknown as Client;
+
+    const { reconcileAll } = await import("../src/crawler/reconcile.ts");
+    await reconcileAll(client);
+
+    expect(getState(parentId)?.oldest_seen_id).toBe(oldestSeen);
+    expect(getMessage(mid)).toBeNull();
+
+    const { backfillChannel } = await import("../src/crawler/backfill.ts");
+    const channel = getChannel(parentId)!;
+    expect(channel.include_threads).toBe(true);
+    await backfillChannel(client, channel);
+
+    expect(getMessage(mid)).not.toBeNull();
+    expect(getMessage(mid)?.content).toBe(midContent);
+    expect(getMessage(old)).not.toBeNull();
+  }, 20_000);
 });

@@ -118,11 +118,15 @@ export interface IngestResult {
 /**
  * Ingest a message. For thread messages, pass parentChannelId (the parent text
  * channel's id) and threadName (the thread channel's display name).
+ *
+ * `updateCrawlCursors` defaults true. Reconcile's thread pass sets it false so
+ * archived thread snowflakes cannot rewind an in-progress parent backfill cursor.
  */
 export async function ingestMessage(
   message: Message,
   parentChannelId?: string | null,
   threadName?: string | null,
+  opts?: { updateCrawlCursors?: boolean },
 ): Promise<IngestResult> {
   const configChannelId = parentChannelId ?? message.channelId;
 
@@ -153,8 +157,10 @@ export async function ingestMessage(
   }
 
   // Crawl cursors track under the effective (config) channel id.
-  setOldestSeen(configChannelId, input.id);
-  setNewestSeen(configChannelId, input.id);
+  if (opts?.updateCrawlCursors !== false) {
+    setOldestSeen(configChannelId, input.id);
+    setNewestSeen(configChannelId, input.id);
+  }
 
   const links = extractLinks(input.content);
   if (edited) removeLinksNotIn(input.id, links.map((l) => l.url));

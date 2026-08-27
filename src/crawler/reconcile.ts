@@ -127,7 +127,9 @@ async function reconcileChannelThreads(
       const result = await paginateLookback(
         (opts) => thread.messages.fetch(opts),
         lookback,
-        (m) => ingestMessage(m, channel.id, thread.name),
+        // Do not write thread snowflakes onto the parent crawl row — an archived
+        // thread last-N can rewind oldest_seen_id and skip in-progress backfill.
+        (m) => ingestMessage(m, channel.id, thread.name, { updateCrawlCursors: false }),
       );
       // Empty first page while the thread still exists (we listed it): do not
       // treat an empty fetched set as "everything deleted".
