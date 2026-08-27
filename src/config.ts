@@ -139,7 +139,20 @@ const channelSchema = z
     classify: z.boolean().default(true),
     confidence_threshold: z.number().min(0).max(1).optional(),
     include_threads: z.boolean().default(false),
-    category: z.string().optional(),
+    /**
+     * One safe path segment: `category` is embedded verbatim in index paths
+     * (`/{workspace}/{category}/{slug}`) and markdown export directories
+     * (`data/discord/{workspace}/{category}/`). Separators or dot segments
+     * would escape the export root and produce unparseable index paths.
+     */
+    category: z
+      .string()
+      .min(1)
+      .refine(
+        (s) => !/[/\\\0]/.test(s) && s !== "." && s !== ".." && s.trim() === s,
+        "must be a single path segment (no slashes, backslashes, or dot segments)",
+      )
+      .optional(),
     /** Workspace this channel (and its threads) belongs to. Must exist under `workspaces:`. */
     workspace: z.string().regex(WORKSPACE_ID, "must be a single lowercase slug segment"),
   })

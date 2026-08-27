@@ -81,6 +81,27 @@ channels:
     ).toThrow(/isolated was removed/);
   });
 
+  test("category must be a single path segment (no traversal into export dirs or index paths)", () => {
+    for (const category of ["../escape", "a/b", "..", ".", "x\\y", " padded "]) {
+      expect(() =>
+        parse(`
+workspaces:
+  eboard: {}
+channels:
+  - { id: "1001", name: sponsors, category: "${category.replace(/\\/g, "\\\\")}", workspace: eboard }
+`),
+      ).toThrow(/single path segment/);
+    }
+    // Permissive otherwise: uppercase and spaces inside a segment still work.
+    const ok = parse(`
+workspaces:
+  eboard: {}
+channels:
+  - { id: "1001", name: sponsors, category: "Eboard Teams", workspace: eboard }
+`);
+    expect(ok.channels[0]!.category).toBe("Eboard Teams");
+  });
+
   test("unknown channel workspace names the offending channel", () => {
     expect(() =>
       parse(`
