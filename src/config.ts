@@ -33,6 +33,15 @@ const envSchema = z
     NVIDIA_API_KEY: z.string().min(1).optional(),
     LOG_LEVEL: z.string().default("info"),
     HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8080),
+    /** Bind address for /health. Default loopback. Never 0.0.0.0. */
+    HEALTH_HOST: z.preprocess(
+      emptyToUndef,
+      z
+        .string()
+        .min(1)
+        .default("127.0.0.1")
+        .refine((h) => h !== "0.0.0.0" && h !== "::" && h !== "*", "must not bind all interfaces"),
+    ),
     RETENTION_MONTHS: z
       .preprocess((v) => (v === "" || v == null ? undefined : v), z.coerce.number().int().min(1).optional()),
     NODE_ENV: z.enum(["development", "production", "test"]).default("development"),

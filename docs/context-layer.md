@@ -197,7 +197,7 @@ Keep ingest as-is. Add a `ContextStore` in-process (FTS5). Mini POSTs a **first-
                          └── optional markdown export (no Nia push)
 ```
 
-Feature-flag the Nia syncer (`NIA_SYNC_ENABLED=false` default once the API exists), then delete `src/nia/` and `register-nia`.
+Nia runtime was **removed in PR #24**. Mini needs zero `NIA_*` secrets. Markdown export stays local (`isolated: true` → leadership).
 
 ### Interfaces (implement these; do not call Nia)
 
@@ -433,9 +433,9 @@ Implementers should not blindly follow these:
 
 Issue drafts (same text filed on GitHub) live in [`docs/issues/`](issues/). Tracking epic: **#25**. PR: **#24**.
 
-## 7. Implementation order (one cutover sequence)
+## 7. Implementation order (Nia already removed in #24)
 
-**#28 is last.** Nia stays as rollback until live Tailscale search works. AWS/Fly as host is stale. Do **not** start GitHub #26 from its frozen body — implement in-repo `docs/issues/01-context-store.md` after #39.
+Nia runtime is **gone** (PR #24). AWS/Fly as host is stale. Do **not** start GitHub #26 from its frozen body — implement in-repo `docs/issues/01-context-store.md` after #39.
 
 1. **#39** Mini host: launchd, Doppler, Tailscale `tag:morpheus`, no public inbound, no `~` share.
 2. **#26** ContextStore + FTS5 (`namespaceForRow`, `channelId`+`parentChannelId`, poll **seq** not `created_at`).
@@ -447,8 +447,9 @@ Issue drafts (same text filed on GitHub) live in [`docs/issues/`](issues/). Trac
 8. **#36** Discord incoming webhooks `#sponsors` `#opportunities` `#speakers` `#inbox` (parallel).
 9. **#31** GitHub **only** for implementation; **fail open** if `gh` is missing. Not how Grok receives work.
 10. **#35** `/v1/events` after PR #23 + `grok_bot` enum.
-11. **#28 last** — flag off Nia, soak, then delete `src/nia/`. Acceptance is `rg`/`tsc`/`bun test` (no Doppler).
+
+Nia was **removed in #24**. Leftover #28 prose is now unused `openai` / `NVIDIA_API_KEY` (see `docs/issues/03-remove-nia.md`).
 
 Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41). Use relative in-repo links (`docs/context-layer.md`), not `blob/cursor/nia-migration-plan-9afa/...`. Filed GitHub #25/#26 still pin the branch; owner paste in #38.
 
-Markdown export (`appendBlock`) can stay until #28 so a rollback to Nia is possible; do not build new retrieval on it.
+Markdown export (`appendBlock`) stays as a local dump; do not build new retrieval on it.

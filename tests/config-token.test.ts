@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { discordBotToken, loadEnv, resetEnvForTest } from "../src/config.ts";
 
-const TOKEN_KEYS = ["DISCORD_BOT_TOKEN", "DISCORD_TOKEN", "DISCORD_GUILD_ID", "GROK_BOT_WEBHOOK_URL"] as const;
+const TOKEN_KEYS = [
+  "DISCORD_BOT_TOKEN",
+  "DISCORD_TOKEN",
+  "DISCORD_GUILD_ID",
+  "GROK_BOT_WEBHOOK_URL",
+  "HEALTH_HOST",
+] as const;
 const saved: Record<string, string | undefined> = {};
 
 function isolateEnv(): void {
@@ -65,5 +71,22 @@ describe("GROK_BOT_WEBHOOK_URL", () => {
     process.env.DISCORD_GUILD_ID = "123456789012345678";
     process.env.GROK_BOT_WEBHOOK_URL = "http://example.com/hook";
     expect(() => loadEnv()).toThrow(/https/);
+  });
+});
+
+describe("HEALTH_HOST", () => {
+  test("defaults to 127.0.0.1", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    expect(loadEnv().HEALTH_HOST).toBe("127.0.0.1");
+  });
+
+  test("rejects 0.0.0.0", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.HEALTH_HOST = "0.0.0.0";
+    expect(() => loadEnv()).toThrow(/all interfaces/);
   });
 });

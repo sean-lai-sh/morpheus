@@ -35,7 +35,7 @@ Investigated: all GitHub issues (open + closed #9), PRs #6 (merged), #23 (open),
 
 **Breaking change vs agent-v1 (#10–#22):** mention does **not** call `runAgentTurn` in-process. Mention enqueues a **job**. Grok Bot is the model. Morpheus does not hold Anthropic/OpenAI keys for that path.
 
-**Breaking change vs Nia-index-overhaul (PR #6, on main):** markdown + Nia push remain until #28, but **retrieval for Grok Bot is live Tailscale vfs over SQLite** (plus a thin first-pass webhook), never a folder of artifacts, never a Mini homedir mount, never Grok polling Mini over the public internet.
+**Breaking change vs Nia-index-overhaul (PR #6, on main):** Nia push was **removed in #24**. Local markdown export remains. **Retrieval for Grok Bot is live Tailscale vfs over SQLite** (plus a thin first-pass webhook), never a folder of artifacts, never a Mini homedir mount, never Grok polling Mini over the public internet.
 
 ---
 

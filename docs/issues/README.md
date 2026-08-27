@@ -12,7 +12,7 @@ These markdown files are the implementation-slice bodies for the Nia-exit / Disc
 | `00-epic.md` | Tracking epic + checklist | #25 |
 | `01-context-store.md` | FTS5 ContextStore | #26 |
 | `02-http-api.md` | Tailscale `/v1/fs` vfs; **scoped tokens** | #27 |
-| `03-remove-nia.md` | Flag off + delete Nia (#28 last; `rg`/`tsc` acceptance) | #28 |
+| `03-remove-nia.md` | Nia **removed in #24**; leftover openai/`NVIDIA_API_KEY` | #28 |
 | `04-jobs-enqueue.md` | Mentions → jobs table | #29 |
 | `05-jobs-claim-reply.md` | Claim/complete + Discord replies | #30 |
 | `06-agent-poll-github.md` | GitHub for implementation only (poll-over-internet **stale**) | #31 |
