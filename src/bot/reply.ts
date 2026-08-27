@@ -7,6 +7,7 @@ import {
   markJobCompleted,
   markJobSendError,
   prepareComplete,
+  recordJobDiscordSend,
   type CompleteInput,
   type JobRow,
 } from "../storage/jobs.ts";
@@ -54,12 +55,21 @@ function isTextChannel(channel: unknown): channel is TextBasedChannel & {
 }
 
 export async function postJobReply(
-  job: Pick<JobRow, "discord_channel_id" | "discord_message_id" | "id">,
+  job: Pick<JobRow, "discord_channel_id" | "discord_message_id" | "id"> & {
+    result_discord_message_id?: string | null;
+  },
   content: string,
-  opts: { client?: DiscordReplyClient } = {},
+  opts: {
+    client?: DiscordReplyClient;
+    onFirstSent?: (messageId: string) => void;
+  } = {},
 ): Promise<{ messageId: string | null; skipped?: string }> {
   const client = opts.client;
   if (!client) return { messageId: null, skipped: "client-missing" };
+
+  if (job.result_discord_message_id) {
+    return { messageId: job.result_discord_message_id, skipped: "already-sent" };
+  }
 
   const channel = await client.channels.fetch(job.discord_channel_id);
   if (!isTextChannel(channel)) {
@@ -78,16 +88,22 @@ export async function postJobReply(
       repliedUser: false,
     },
   });
-  for (const extra of chunks.slice(1)) {
-    await channel.send({
-      content: extra,
-      allowedMentions: {
-        parse: [],
-        users: [],
-        roles: [],
-        repliedUser: false,
-      },
-    });
+  opts.onFirstSent?.(sent.id);
+  try {
+    for (const extra of chunks.slice(1)) {
+      await channel.send({
+        content: extra,
+        allowedMentions: {
+          parse: [],
+          users: [],
+          roles: [],
+          repliedUser: false,
+        },
+      });
+    }
+  } catch (err) {
+    logger.error({ err, job_id: job.id }, "job reply follow-up failed after first send; not re-posting");
+    return { messageId: sent.id, skipped: "follow-up-failed" };
   }
   return { messageId: sent.id };
 }
@@ -179,6 +195,11 @@ export async function completeJobWithReply(
     return { ok: true, status: 200, job: prep.job, posted: false };
   }
 
+  if (prep.job.result_discord_message_id) {
+    const done = markJobCompleted(id, prep.job.result_discord_message_id, opts.now);
+    return { ok: true, status: 200, job: done ?? prep.job, posted: false };
+  }
+
   if (postReplies === false) {
     const done = markJobCompleted(id, null, opts.now);
     return { ok: true, status: 200, job: done ?? prep.job, posted: false };
@@ -190,14 +211,25 @@ export async function completeJobWithReply(
   }
 
   try {
-    const sent = await postJobReply(prep.job, reply, { client: opts.client });
+    const sent = await postJobReply(prep.job, reply, {
+      client: opts.client,
+      onFirstSent: (messageId) => {
+        recordJobDiscordSend(id, messageId, opts.now);
+      },
+    });
     if (!sent.messageId) {
       markJobSendError(id, sent.skipped ?? "discord-send-failed", opts.now);
       return { ok: false, status: 502, error: sent.skipped ?? "discord-send-failed", job: getJob(id) ?? prep.job };
     }
     const done = markJobCompleted(id, sent.messageId, opts.now);
-    return { ok: true, status: 200, job: done ?? prep.job, posted: true };
+    return { ok: true, status: 200, job: done ?? getJob(id) ?? prep.job, posted: sent.skipped !== "already-sent" };
   } catch (err) {
+    const recorded = getJob(id)?.result_discord_message_id;
+    if (recorded) {
+      const done = markJobCompleted(id, recorded, opts.now);
+      logger.error({ err, job_id: id }, "job Discord follow-up failed; first send recorded, not retrying post");
+      return { ok: true, status: 200, job: done ?? getJob(id) ?? prep.job, posted: true };
+    }
     const msg = err instanceof Error ? err.message : "discord-send-failed";
     logger.error({ err, job_id: id }, "job Discord reply failed; leaving claimed");
     markJobSendError(id, msg, opts.now);

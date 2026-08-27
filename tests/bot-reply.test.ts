@@ -102,6 +102,51 @@ describe("completeJobWithReply", () => {
     expect(second.job?.result_discord_message_id).toBe("posted-1");
     expect(replies).toBe(1);
   });
+
+  test("partial multi-chunk send records first message id and retry does not re-post", async () => {
+    const { job } = enqueueJob({
+      discordMessageId: "c-partial",
+      discordChannelId: "c1",
+      discordThreadId: null,
+      authorId: "u1",
+      namespace: "general",
+      content: "q",
+    });
+    claimJob(job.id, "w1");
+    let replies = 0;
+    let sends = 0;
+    const stub = {
+      channels: {
+        fetch: async () => ({
+          isTextBased: () => true,
+          messages: {
+            fetch: async () => ({
+              reply: async () => {
+                replies += 1;
+                return { id: "first-chunk" };
+              },
+            }),
+          },
+          send: async () => {
+            sends += 1;
+            throw new Error("discord 5xx on follow-up");
+          },
+        }),
+      },
+    };
+    const long = "a".repeat(2500);
+    const first = await completeJobWithReply(job.id, "w1", { reply: long }, { client: stub });
+    expect(first.ok).toBe(true);
+    expect(first.job?.result_discord_message_id).toBe("first-chunk");
+    expect(first.job?.status).toBe("completed");
+    expect(replies).toBe(1);
+    expect(sends).toBe(1);
+    const second = await completeJobWithReply(job.id, "w1", { reply: long }, { client: stub });
+    expect(second.ok).toBe(true);
+    expect(second.posted).toBe(false);
+    expect(replies).toBe(1);
+    expect(sends).toBe(1);
+  });
 });
 
 describe("allowlistedGithubIssueUrl", () => {

@@ -223,6 +223,26 @@ export function markJobCompleted(
   return row ? mapJob(row) : null;
 }
 
+/**
+ * Persist a Discord message id as soon as Discord accepts a send, while still claimed.
+ * Retry must not post again once this is set (#30).
+ */
+export function recordJobDiscordSend(
+  id: string,
+  resultDiscordMessageId: string,
+  now: number = Date.now(),
+): JobRow | null {
+  const row = getDb()
+    .query<JobRow, [string, number, string]>(
+      `UPDATE jobs
+       SET result_discord_message_id = ?, updated_at = ?
+       WHERE id = ? AND result_discord_message_id IS NULL
+       RETURNING *`,
+    )
+    .get(resultDiscordMessageId, now, id);
+  return row ? mapJob(row) : getJob(id);
+}
+
 /** Discord send failed before any message id — stay claimed so the same worker can retry. */
 export function markJobSendError(id: string, error: string, now: number = Date.now()): JobRow | null {
   const row = getDb()

@@ -11,6 +11,7 @@ import {
   markJobCompleted,
   markJobSendError,
   prepareComplete,
+  recordJobDiscordSend,
   requeueExpiredClaims,
 } from "../src/storage/jobs.ts";
 
@@ -149,6 +150,18 @@ describe("storage/jobs lease sweeper", () => {
     expect(getJob(job.id)?.status).toBe("completed");
     requeueExpiredClaims(t0 + 700_000, 600_000);
     expect(getJob(job.id)?.status).toBe("completed");
+  });
+
+  test("does not requeue a claimed job after a partial Discord send was recorded", () => {
+    const { job } = enqueue("m-lease-partial");
+    const t0 = 4_000_000;
+    claimJob(job.id, "w1", t0);
+    recordJobDiscordSend(job.id, "first-chunk", t0);
+    expect(getJob(job.id)?.status).toBe("claimed");
+    expect(getJob(job.id)?.result_discord_message_id).toBe("first-chunk");
+    requeueExpiredClaims(t0 + 700_000, 600_000);
+    expect(getJob(job.id)?.status).toBe("claimed");
+    expect(getJob(job.id)?.result_discord_message_id).toBe("first-chunk");
   });
 });
 
