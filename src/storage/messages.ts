@@ -198,6 +198,18 @@ export function nonDeletedMessageIds(channelId: string): string[] {
     .map((r) => r.id);
 }
 
+/** Live ids in one thread. Parent-channel rows and sibling threads are excluded. */
+export function nonDeletedThreadMessageIds(threadId: string): string[] {
+  return getDb()
+    .query<{ id: string }, [string]>(
+      `SELECT id FROM messages
+       WHERE thread_id = ?
+         AND deleted_at IS NULL`,
+    )
+    .all(threadId)
+    .map((r) => r.id);
+}
+
 export function lastMessageAt(): number | null {
   return (
     getDb()

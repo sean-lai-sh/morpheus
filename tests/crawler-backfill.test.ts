@@ -100,4 +100,41 @@ describe("backfillChannel include_threads", () => {
     expect(getMessage(THREAD_MSG)?.thread_id).toBe(THREAD_ID);
     expect(getState(THREAD_ID)?.last_backfill_complete).toBe(1);
   }, 20_000);
+
+  test("does not mark parent complete when include_threads fetchActive throws", async () => {
+    // Distinct allowlisted include_threads channel so the 100-page suite above
+    // does not leave this parent already last_backfill_complete.
+    const parentId = "2002";
+    const parentMsg = "800000000000002000";
+    const parentChannel = {
+      id: parentId,
+      type: ChannelType.GuildText,
+      messages: {
+        fetch: fetchByBefore([parentMsg], parentId, () => "parent body for thread-fetch throw"),
+      },
+      threads: {
+        fetchActive: async () => {
+          throw new Error("missing GuildMembers (simulated)");
+        },
+        fetchArchived: async () => ({ threads: new Map(), hasMore: false }),
+      },
+    };
+    const client = {
+      channels: {
+        fetch: async (id: string) => {
+          if (id === parentId) return parentChannel;
+          return null;
+        },
+      },
+    } as unknown as Client;
+
+    const { backfillChannel } = await import("../src/crawler/backfill.ts");
+    const channel = getChannel(parentId)!;
+    expect(channel.include_threads).toBe(true);
+    const result = await backfillChannel(client, channel);
+
+    expect(result.complete).toBe(false);
+    expect(getState(parentId)?.last_backfill_complete).not.toBe(1);
+    expect(getMessage(parentMsg)).not.toBeNull();
+  }, 20_000);
 });
