@@ -1,48 +1,24 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { withTempCwd, withTempDb } from "./helpers.ts";
-import { resetChannelsForTest } from "../src/config.ts";
+import { withTempDb } from "./helpers.ts";
 import { authorPassesRoleGate, tryEnqueueJob, type JobCandidate } from "../src/bot/enqueue.ts";
 import { upsertMessage } from "../src/storage/messages.ts";
-import { getJobByDiscordMessageId } from "../src/storage/jobs.ts";
+import { getJobByDiscordMessageId, type ChannelResolver } from "../src/storage/jobs.ts";
 
 const ROLE = "role-eboard";
 const BOT = "bot-1";
 const GENERAL = "111111111111111111";
 const LEADERSHIP = "222222222222222222";
 
-function writeChannels(): void {
-  mkdirSync(resolve(process.cwd(), "config"), { recursive: true });
-  writeFileSync(
-    resolve(process.cwd(), "config/channels.yml"),
-    `
-channels:
-  - id: "${GENERAL}"
-    name: "eboard"
-    include_threads: true
-    isolated: false
-  - id: "${LEADERSHIP}"
-    name: "leadership-team"
-    include_threads: true
-    isolated: true
-defaults:
-  confidence_threshold: 0.5
-  reconcile_lookback: 200
-  reconcile_interval_hours: 6
-`,
-    "utf8",
-  );
-  resetChannelsForTest();
-}
+const CHANNELS = new Map<string, { isolated?: boolean }>([
+  [GENERAL, { isolated: false }],
+  [LEADERSHIP, { isolated: true }],
+]);
+const resolveChannel: ChannelResolver = (id) => CHANNELS.get(id);
 
-const cwd = withTempCwd();
-writeChannels();
 const db = withTempDb();
 beforeAll(() => {});
 afterAll(() => {
   db.cleanup();
-  cwd.cleanup();
 });
 
 function candidate(over: Partial<JobCandidate> & { discordMessageId: string }): JobCandidate {
@@ -66,6 +42,7 @@ const policy = {
   dispatch: false as const,
   maxOutstanding: 50,
   maxPerHour: 50,
+  resolveChannel,
 };
 
 describe("tryEnqueueJob positives", () => {
@@ -255,6 +232,7 @@ describe("tryEnqueueJob grok dispatch", () => {
       {
         triggerRoleIds: new Set([ROLE]),
         dispatch: true,
+        resolveChannel,
         env: {
           GROK_BOT_WEBHOOK_URL: "https://example.com/grok-routine",
           GROK_BOT_WEBHOOK_SECRET: "grok-sender-key-for-tests",

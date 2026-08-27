@@ -9,9 +9,12 @@ import {
   enqueueJob,
   firstPassSnippets,
   namespaceForRow,
+  type ChannelResolver,
   type JobRow,
 } from "../storage/jobs.ts";
 import { isMentionTrigger, isReplyToBot, memberRoleIds, mentionUserIds, threadParentId } from "./triggers.ts";
+
+export type { ChannelResolver };
 
 export type EnqueueSkipReason =
   | "disabled"
@@ -50,6 +53,8 @@ export interface TryEnqueueOpts {
   dispatch?: boolean;
   poster?: HttpsPoster;
   env?: NodeJS.ProcessEnv;
+  /** Tests inject a Map so this file does not mutate global channels.yml / cwd. */
+  resolveChannel?: ChannelResolver;
 }
 
 export interface TryEnqueueResult {
@@ -124,14 +129,18 @@ export async function tryEnqueueJob(
     candidate.source === "slash" || candidate.mentionedBot || candidate.replyToBot;
   if (!isTrigger) return { job: null, skipped: "not-trigger" };
 
+  const resolveChannel = opts.resolveChannel ?? getChannel;
   const channelId = configChannelId(candidate);
-  const channel = getChannel(channelId);
+  const channel = resolveChannel(channelId);
   if (!channel) return { job: null, skipped: "channel-not-allowlisted" };
 
-  const namespace = namespaceForRow({
-    channel_id: candidate.discordChannelId,
-    parent_channel_id: candidate.parentChannelId,
-  });
+  const namespace = namespaceForRow(
+    {
+      channel_id: candidate.discordChannelId,
+      parent_channel_id: candidate.parentChannelId,
+    },
+    resolveChannel,
+  );
   if (!namespace) return { job: null, skipped: "unknown-namespace" };
 
   if (!authorPassesRoleGate(candidate.authorRoleIds, triggerRoles)) {
@@ -187,16 +196,17 @@ export async function tryEnqueueJob(
   const dispatched = await dispatchEnqueuedJob(job, {
     poster: opts.poster,
     env: envVars,
+    resolveChannel,
   });
   return { job, dispatched };
 }
 
 export async function dispatchEnqueuedJob(
   job: JobRow,
-  opts: { poster?: HttpsPoster; env?: NodeJS.ProcessEnv } = {},
+  opts: { poster?: HttpsPoster; env?: NodeJS.ProcessEnv; resolveChannel?: ChannelResolver } = {},
 ): Promise<boolean> {
   try {
-    const snippets = firstPassSnippets(job);
+    const snippets = firstPassSnippets(job, 12, opts.resolveChannel ?? getChannel);
     const result = await dispatchGrokJob(
       {
         first_pass: true,

@@ -192,6 +192,10 @@ export async function completeJobWithReply(
     return { ok: false, status, error: prep.reason };
   }
   if (prep.alreadyCompleted) {
+    if (prep.job.status === "claimed" && prep.job.result_discord_message_id) {
+      const done = markJobCompleted(id, prep.job.result_discord_message_id, opts.now);
+      return { ok: true, status: 200, job: done ?? prep.job, posted: false };
+    }
     return { ok: true, status: 200, job: prep.job, posted: false };
   }
 

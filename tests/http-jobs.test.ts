@@ -73,13 +73,30 @@ describe("HTTP /v1/jobs claim/complete", () => {
       content: "q",
     });
     const a = await handleHttpRequest(
-      req("POST", `/v1/jobs/${job.id}/claim`, { body: { claimed_by: "w1" } }),
+      req("POST", `/v1/jobs/${job.id}/claim`, { body: { claimed_by: "grok-general" } }),
     );
     const b = await handleHttpRequest(
-      req("POST", `/v1/jobs/${job.id}/claim`, { body: { claimed_by: "w2" } }),
+      req("POST", `/v1/jobs/${job.id}/claim`, { body: { claimed_by: "grok-general" } }),
     );
     expect(a.status).toBe(200);
     expect(b.status).toBe(409);
+  });
+
+  test("claimed_by that is not the token worker identity → 409 even when JOB_WORKER_* is unset", async () => {
+    expect(process.env.JOB_WORKER_GENERAL).toBeUndefined();
+    const { job } = enqueueJob({
+      discordMessageId: "h-identity",
+      discordChannelId: "c1",
+      discordThreadId: null,
+      authorId: "u1",
+      namespace: "general",
+      content: "q",
+    });
+    const res = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/claim`, { body: { claimed_by: "someone-else" } }),
+    );
+    expect(res.status).toBe(409);
+    expect(getJob(job.id)?.status).toBe("queued");
   });
 
   test("complete with wrong claimed_by → 409", async () => {
@@ -91,7 +108,7 @@ describe("HTTP /v1/jobs claim/complete", () => {
       namespace: "general",
       content: "q",
     });
-    claimJob(job.id, "w1");
+    claimJob(job.id, "grok-general");
     const res = await handleHttpRequest(
       req("POST", `/v1/jobs/${job.id}/complete`, {
         body: { claimed_by: "w2", reply: "nope" },
@@ -110,12 +127,12 @@ describe("HTTP /v1/jobs claim/complete", () => {
       content: "q",
     });
     const claim = await handleHttpRequest(
-      req("POST", `/v1/jobs/${job.id}/claim`, { body: { claimed_by: "w1" } }),
+      req("POST", `/v1/jobs/${job.id}/claim`, { body: { claimed_by: "grok-general" } }),
     );
     expect(claim.status).toBe(200);
     const first = await handleHttpRequest(
       req("POST", `/v1/jobs/${job.id}/complete`, {
-        body: { claimed_by: "w1", reply: "hello", completion_key: "ck-1" },
+        body: { claimed_by: "grok-general", reply: "hello", completion_key: "ck-1" },
       }),
     );
     expect(first.status).toBe(200);
@@ -123,7 +140,7 @@ describe("HTTP /v1/jobs claim/complete", () => {
     expect(firstBody.posted).toBe(false); // DISCORD_POST_REPLIES=false
     const second = await handleHttpRequest(
       req("POST", `/v1/jobs/${job.id}/complete`, {
-        body: { claimed_by: "w1", reply: "hello again", completion_key: "ck-1" },
+        body: { claimed_by: "grok-general", reply: "hello again", completion_key: "ck-1" },
       }),
     );
     expect(second.status).toBe(200);
@@ -144,21 +161,21 @@ describe("HTTP /v1/jobs claim/complete", () => {
     const res = await handleHttpRequest(
       req("POST", `/v1/jobs/${job.id}/claim`, {
         token: GENERAL_TOKEN,
-        body: { claimed_by: "w1" },
+        body: { claimed_by: "grok-general" },
       }),
     );
     expect(res.status).toBe(409);
     const leadClaim = await handleHttpRequest(
       req("POST", `/v1/jobs/${job.id}/claim`, {
         token: LEAD_TOKEN,
-        body: { claimed_by: "lead-w" },
+        body: { claimed_by: "grok-leadership" },
       }),
     );
     expect(leadClaim.status).toBe(200);
     const complete = await handleHttpRequest(
       req("POST", `/v1/jobs/${job.id}/complete`, {
         token: GENERAL_TOKEN,
-        body: { claimed_by: "lead-w", reply: "leak" },
+        body: { claimed_by: "grok-general", reply: "leak" },
       }),
     );
     expect(complete.status).toBe(409);

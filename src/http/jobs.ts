@@ -56,17 +56,13 @@ async function readJson(req: Request): Promise<Record<string, unknown> | null> {
   }
 }
 
+/** Token scope is the worker identity. A supplied claimed_by must match it. */
 function claimedByFrom(body: Record<string, unknown> | null, req: Request, scope: TokenScope): string | null {
   const fromBody = typeof body?.claimed_by === "string" ? body.claimed_by.trim() : "";
   const fromHeader = (req.headers.get("x-morpheus-worker") ?? "").trim();
-  const claimedBy = fromBody || fromHeader || scope.workerId;
-  if (!claimedBy) return null;
-  const required =
-    scope.namespace === "general"
-      ? process.env.JOB_WORKER_GENERAL?.trim()
-      : process.env.JOB_WORKER_LEADERSHIP?.trim();
-  if (required && claimedBy !== required) return null;
-  return claimedBy;
+  const supplied = fromBody || fromHeader;
+  if (supplied && supplied !== scope.workerId) return null;
+  return scope.workerId;
 }
 
 function jobIdFromPath(pathname: string): string | null {

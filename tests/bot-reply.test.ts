@@ -8,7 +8,7 @@ import {
 } from "../src/bot/reply.ts";
 import { withTempDb } from "./helpers.ts";
 import { afterAll, beforeAll } from "bun:test";
-import { claimJob, enqueueJob } from "../src/storage/jobs.ts";
+import { claimJob, enqueueJob, getJob } from "../src/storage/jobs.ts";
 
 const db = withTempDb();
 beforeAll(() => {});
@@ -100,6 +100,55 @@ describe("completeJobWithReply", () => {
     expect(second.ok).toBe(true);
     expect(second.posted).toBe(false);
     expect(second.job?.result_discord_message_id).toBe("posted-1");
+    expect(replies).toBe(1);
+  });
+
+  test("overlapping completes: second is in-progress and does not post", async () => {
+    const { job } = enqueueJob({
+      discordMessageId: "c-overlap",
+      discordChannelId: "c1",
+      discordThreadId: null,
+      authorId: "u1",
+      namespace: "general",
+      content: "q",
+    });
+    claimJob(job.id, "w1");
+    let replies = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stub = {
+      channels: {
+        fetch: async () => ({
+          isTextBased: () => true,
+          messages: {
+            fetch: async () => ({
+              reply: async () => {
+                replies += 1;
+                await gate;
+                return { id: "posted-overlap" };
+              },
+            }),
+          },
+          send: async () => ({ id: "posted-extra" }),
+        }),
+      },
+    };
+    const firstP = completeJobWithReply(job.id, "w1", { reply: "one", completion_key: "ck-o" }, { client: stub });
+    const started = Date.now();
+    while (!getJob(job.id)?.completion_key) {
+      if (Date.now() - started > 2000) throw new Error("first complete never persisted completion_key");
+      await Promise.resolve();
+    }
+    const second = await completeJobWithReply(job.id, "w1", { reply: "two", completion_key: "ck-o" }, { client: stub });
+    expect(second.ok).toBe(false);
+    expect(second.status).toBe(409);
+    expect(second.error).toBe("in-progress");
+    release();
+    const first = await firstP;
+    expect(first.ok).toBe(true);
+    expect(first.posted).toBe(true);
     expect(replies).toBe(1);
   });
 

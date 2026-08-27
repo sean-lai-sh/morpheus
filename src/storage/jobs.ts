@@ -5,6 +5,9 @@ import { effectiveChannelId, type MessageRow } from "./messages.ts";
 export type Namespace = "general" | "leadership";
 export type JobStatus = "queued" | "claimed" | "completed" | "failed" | "cancelled";
 
+/** Channel lookup used for namespace + first-pass snippets. Tests inject a Map. */
+export type ChannelResolver = (channelId: string) => { isolated?: boolean } | undefined;
+
 export interface JobRow {
   id: string;
   discord_message_id: string;
@@ -38,12 +41,15 @@ export interface EnqueueJobInput {
  * Namespace from the *parent/allowlisted* channel, never a bare thread id.
  * Unknown / non-allowlisted → null (callers fail closed; do not map to general).
  */
-export function namespaceForRow(row: {
-  channel_id: string;
-  parent_channel_id: string | null;
-}): Namespace | null {
+export function namespaceForRow(
+  row: {
+    channel_id: string;
+    parent_channel_id: string | null;
+  },
+  resolveChannel: ChannelResolver = getChannel,
+): Namespace | null {
   const parentId = effectiveChannelId(row as MessageRow);
-  const ch = getChannel(parentId);
+  const ch = resolveChannel(parentId);
   if (!ch) return null;
   return ch.isolated ? "leadership" : "general";
 }
@@ -163,7 +169,7 @@ export function claimJob(id: string, claimedBy: string, now: number = Date.now()
 
 export type PrepareCompleteResult =
   | { ok: true; job: JobRow; alreadyCompleted: boolean }
-  | { ok: false; reason: "not-found" | "claimed-by-mismatch" | "not-claimed" };
+  | { ok: false; reason: "not-found" | "claimed-by-mismatch" | "not-claimed" | "in-progress" };
 
 export interface CompleteInput {
   reply: string;
@@ -172,8 +178,9 @@ export interface CompleteInput {
 }
 
 /**
- * Persist reply_text + completion_key **before** Discord send.
- * Already-completed jobs return the stored row (idempotent; caller must not re-post).
+ * Persist reply_text + completion_key **before** Discord send (CAS).
+ * First winner may post. Losers must not: already-completed, or in-progress 409.
+ * Same worker + same completion_key may retry after markJobSendError.
  */
 export function prepareComplete(
   id: string,
@@ -190,21 +197,34 @@ export function prepareComplete(
   }
   if (job.status !== "claimed") return { ok: false, reason: "not-claimed" };
   if (job.claimed_by !== worker) return { ok: false, reason: "claimed-by-mismatch" };
+  if (job.result_discord_message_id) {
+    return { ok: true, job, alreadyCompleted: true };
+  }
 
   const completionKey = (input.completion_key?.trim() || job.completion_key || `complete:${id}`).slice(0, 200);
-  const github = input.github_issue_url ?? job.github_issue_url;
+  const github = input.github_issue_url ?? job.github_issue_url ?? null;
 
-  getDb()
-    .query(
+  const updated = getDb()
+    .query<JobRow, [string, string, string | null, number, string, string, string]>(
       `UPDATE jobs
        SET reply_text = ?, completion_key = ?, github_issue_url = ?, updated_at = ?, error = NULL
-       WHERE id = ? AND status = 'claimed' AND claimed_by = ?`,
+       WHERE id = ? AND status = 'claimed' AND claimed_by = ?
+         AND result_discord_message_id IS NULL
+         AND (completion_key IS NULL OR (completion_key = ? AND error IS NOT NULL))
+       RETURNING *`,
     )
-    .run(input.reply, completionKey, github, now, id, worker);
+    .get(input.reply, completionKey, github, now, id, worker, completionKey);
 
-  const updated = getJob(id);
-  if (!updated) return { ok: false, reason: "not-found" };
-  return { ok: true, job: updated, alreadyCompleted: false };
+  if (updated) return { ok: true, job: mapJob(updated), alreadyCompleted: false };
+
+  const current = getJob(id);
+  if (!current) return { ok: false, reason: "not-found" };
+  if (current.claimed_by !== worker) return { ok: false, reason: "claimed-by-mismatch" };
+  if (current.status === "completed" || current.result_discord_message_id) {
+    return { ok: true, job: current, alreadyCompleted: true };
+  }
+  if (current.status === "claimed") return { ok: false, reason: "in-progress" };
+  return { ok: false, reason: "not-claimed" };
 }
 
 export function markJobCompleted(
@@ -306,6 +326,7 @@ export interface FirstPassSnippet {
 export function firstPassSnippets(
   job: Pick<JobRow, "namespace" | "discord_channel_id" | "discord_thread_id">,
   limit = 12,
+  resolveChannel: ChannelResolver = getChannel,
 ): FirstPassSnippet[] {
   const cap = Math.min(Math.max(1, limit), 12);
   const channelId = job.discord_thread_id ?? job.discord_channel_id;
@@ -325,7 +346,7 @@ export function firstPassSnippets(
 
   const out: FirstPassSnippet[] = [];
   for (const row of rows) {
-    const ns = namespaceForRow(row);
+    const ns = namespaceForRow(row, resolveChannel);
     if (ns !== job.namespace) continue;
     out.push({
       id: row.id,

@@ -110,6 +110,34 @@ describe("storage/jobs claim / complete / fail", () => {
     expect(after?.error).toContain("5xx");
   });
 
+  test("overlapping prepareComplete: one first-attempt, one in-progress", () => {
+    const { job } = enqueue("m-complete-cas");
+    claimJob(job.id, "w1");
+    const first = prepareComplete(job.id, "w1", { reply: "one", completion_key: "ck-overlap" });
+    const second = prepareComplete(job.id, "w1", { reply: "two", completion_key: "ck-overlap" });
+    expect(first.ok).toBe(true);
+    if (first.ok) expect(first.alreadyCompleted).toBe(false);
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.reason).toBe("in-progress");
+    expect(getJob(job.id)?.reply_text).toBe("one");
+  });
+
+  test("same completion_key can retry after Discord send error", () => {
+    const { job } = enqueue("m-complete-retry");
+    claimJob(job.id, "w1");
+    const first = prepareComplete(job.id, "w1", { reply: "try-1", completion_key: "ck-retry" });
+    expect(first.ok).toBe(true);
+    if (first.ok) expect(first.alreadyCompleted).toBe(false);
+    markJobSendError(job.id, "discord 5xx");
+    const retry = prepareComplete(job.id, "w1", { reply: "try-2", completion_key: "ck-retry" });
+    expect(retry.ok).toBe(true);
+    if (retry.ok) {
+      expect(retry.alreadyCompleted).toBe(false);
+      expect(retry.job.reply_text).toBe("try-2");
+      expect(retry.job.error).toBeNull();
+    }
+  });
+
   test("fail requires claimed_by match", () => {
     const { job } = enqueue("m-fail");
     claimJob(job.id, "w1");
