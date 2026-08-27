@@ -165,12 +165,15 @@ function errText(err: unknown): string {
 
 /**
  * The untrusted job data handed to the agent, as one JSON document. JSON
- * escaping is the embed boundary — there are no delimiters for hostile content
- * to close, and sibling-held secrets are scrubbed before serialization.
+ * escaping is the embed boundary — and because the prompt wraps this document
+ * in a markdown fence, every backtick is re-escaped as `\u0060` (a valid JSON
+ * string escape that round-trips to the same content), so hostile content
+ * cannot close the fence. Sibling-held secrets are scrubbed before
+ * serialization.
  */
 export function buildJobData(payload: SdkJobPayload, redactValues: string[] = []): string {
   const job = payload.job;
-  return JSON.stringify(
+  const json = JSON.stringify(
     {
       job_id: job.id,
       workspace: job.namespace,
@@ -184,6 +187,9 @@ export function buildJobData(payload: SdkJobPayload, redactValues: string[] = []
     null,
     2,
   );
+  // Backticks only ever appear inside JSON string values here, so a global
+  // replace stays valid JSON and JSON.parse restores the original text.
+  return json.replaceAll("`", "\\u0060");
 }
 
 /**

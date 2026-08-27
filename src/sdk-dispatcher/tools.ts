@@ -100,10 +100,16 @@ export function pathInJobScope(rawPath: string, scope: JobAccessScope): boolean 
 }
 
 /**
- * Drop `hits`/`nodes`/`documents`/`links` entries whose path is outside the job
- * scope. Filtering is by entry, never by field — surviving search hits keep
- * their full #50/#51 shape (`match: strict|loose`, `links[]`, permalink, …).
- * Runs on the FULL response body, before any truncation.
+ * Drop `hits`/`nodes`/`links` entries whose path is outside the job scope.
+ * Filtering is by entry, never by field — surviving search hits keep their
+ * full #50/#51 shape (`match: strict|loose`, `links[]`, permalink, …).
+ *
+ * `documents` (and the single `document`) are the /v1/fs/read contract: the
+ * items carry NO per-item path, only the listing's top-level `path`. They are
+ * gated on that parent path instead — in scope keeps them, anything else
+ * empties them. An item that does carry its own out-of-scope path is still
+ * dropped (defense in depth). Runs on the FULL response body, before any
+ * truncation.
  */
 export function filterListingForScope(bodyText: string, scope: JobAccessScope): string {
   if (scope.kind === "workspace") return bodyText;
@@ -116,7 +122,7 @@ export function filterListingForScope(bodyText: string, scope: JobAccessScope): 
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return bodyText;
   const obj = { ...(parsed as Record<string, unknown>) };
-  for (const key of ["hits", "nodes", "documents", "links"]) {
+  for (const key of ["hits", "nodes", "links"]) {
     const list = obj[key];
     if (!Array.isArray(list)) continue;
     obj[key] = list.filter((item) => {
@@ -125,6 +131,23 @@ export function filterListingForScope(bodyText: string, scope: JobAccessScope): 
       // Fail closed: entries without a checkable path never reach the agent.
       return typeof path === "string" && pathInJobScope(path, scope);
     });
+  }
+
+  const parentPath = typeof obj.path === "string" ? obj.path : null;
+  const parentInScope = parentPath != null && pathInJobScope(parentPath, scope);
+  if (Array.isArray(obj.documents)) {
+    obj.documents = !parentInScope
+      ? []
+      : obj.documents.filter((item) => {
+          if (!item || typeof item !== "object") return false;
+          const path = (item as Record<string, unknown>).path;
+          // Pathless documents inherit the (in-scope) parent path.
+          return path === undefined || (typeof path === "string" && pathInJobScope(path, scope));
+        });
+  }
+  if (obj.document !== undefined && !parentInScope) {
+    delete obj.document;
+    obj.error = "document withheld (outside channel scope)";
   }
   return JSON.stringify(obj);
 }
