@@ -22,6 +22,8 @@ export interface MessageRow {
   thread_id: string | null;
   /** Human-readable name of the thread channel. */
   thread_name: string | null;
+  /** Monotonic ingest seq; bumped on insert/edit/delete/reactions. */
+  seq: number;
 }
 
 export interface MessageInput {
@@ -45,18 +47,28 @@ export function effectiveChannelId(row: MessageRow): string {
   return row.parent_channel_id ?? row.channel_id;
 }
 
+function nextSeq(): number {
+  const db = getDb();
+  db.exec(`UPDATE ingest_seq SET value = value + 1 WHERE k = 1`);
+  return db.query<{ value: number }, []>(`SELECT value FROM ingest_seq WHERE k = 1`).get()!.value;
+}
+
 export function upsertMessage(input: MessageInput): { inserted: boolean; edited: boolean } {
   const db = getDb();
   const existing = db
-    .query<Pick<MessageRow, "content" | "edited_at">, [string]>(
-      `SELECT content, edited_at FROM messages WHERE id = ?`,
+    .query<
+      Pick<MessageRow, "content" | "edited_at" | "author_name" | "parent_channel_id" | "thread_id" | "thread_name">,
+      [string]
+    >(
+      `SELECT content, edited_at, author_name, parent_channel_id, thread_id, thread_name FROM messages WHERE id = ?`,
     )
     .get(input.id);
 
   if (!existing) {
+    const seq = nextSeq();
     db.query(
-      `INSERT INTO messages (id, channel_id, parent_channel_id, author_id, author_name, content, created_at, edited_at, thread_id, thread_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (id, channel_id, parent_channel_id, author_id, author_name, content, created_at, edited_at, thread_id, thread_name, seq)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       input.id,
       input.channelId,
@@ -68,23 +80,32 @@ export function upsertMessage(input: MessageInput): { inserted: boolean; edited:
       input.editedAt ?? null,
       input.threadId ?? null,
       input.threadName ?? null,
+      seq,
     );
     return { inserted: true, edited: false };
   }
 
-  // Always refresh metadata: author_name and thread fields may have been populated after
+  const parent = input.parentChannelId ?? null;
+  const threadId = input.threadId ?? null;
+  const threadName = input.threadName ?? null;
+  const contentChanged = existing.content !== input.content;
+  const metaChanged =
+    existing.author_name !== input.authorName ||
+    existing.parent_channel_id !== parent ||
+    existing.thread_id !== threadId ||
+    existing.thread_name !== threadName;
+
+  if (!contentChanged && !metaChanged) {
+    return { inserted: false, edited: false };
+  }
+
+  const seq = nextSeq();
+  // Refresh metadata: author_name and thread fields may have been populated after
   // the initial insert (e.g. refresh-members backfill, or pre-migration rows lacking thread_id).
   db.query(
-    `UPDATE messages SET author_name = ?, parent_channel_id = ?, thread_id = ?, thread_name = ? WHERE id = ?`,
-  ).run(
-    input.authorName,
-    input.parentChannelId ?? null,
-    input.threadId ?? null,
-    input.threadName ?? null,
-    input.id,
-  );
+    `UPDATE messages SET author_name = ?, parent_channel_id = ?, thread_id = ?, thread_name = ?, seq = ? WHERE id = ?`,
+  ).run(input.authorName, parent, threadId, threadName, seq, input.id);
 
-  const contentChanged = existing.content !== input.content;
   if (contentChanged) {
     db.query(
       `UPDATE messages SET content = ?, edited_at = ? WHERE id = ?`,
@@ -95,11 +116,16 @@ export function upsertMessage(input: MessageInput): { inserted: boolean; edited:
 
 export function markDeleted(id: string, at: number = Date.now()): boolean {
   const db = getDb();
+  const existing = db
+    .query<Pick<MessageRow, "deleted_at">, [string]>(`SELECT deleted_at FROM messages WHERE id = ?`)
+    .get(id);
+  if (!existing || existing.deleted_at != null) return false;
+  const seq = nextSeq();
   const res = db
-    .query<MessageRow, [number, string]>(
-      `UPDATE messages SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL RETURNING *`,
+    .query<MessageRow, [number, number, string]>(
+      `UPDATE messages SET deleted_at = ?, seq = ? WHERE id = ? AND deleted_at IS NULL RETURNING *`,
     )
-    .get(at, id);
+    .get(at, seq, id);
   return res !== null;
 }
 
@@ -172,7 +198,13 @@ export function lastMessageAt(): number | null {
 }
 
 export function setReactions(id: string, reactions: Record<string, number>): void {
-  getDb()
-    .query(`UPDATE messages SET reactions = ? WHERE id = ?`)
-    .run(JSON.stringify(reactions), id);
+  const db = getDb();
+  const existing = db.query<{ id: string }, [string]>(`SELECT id FROM messages WHERE id = ?`).get(id);
+  if (!existing) return;
+  const seq = nextSeq();
+  db.query(`UPDATE messages SET reactions = ?, seq = ? WHERE id = ?`).run(
+    JSON.stringify(reactions),
+    seq,
+    id,
+  );
 }

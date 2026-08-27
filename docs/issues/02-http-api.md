@@ -30,7 +30,12 @@ Virtual, POSIX-looking, rooted at `/general` or `/leadership`:
 
 `channelId` on a stored row is the Discord channel **or thread** id (`messages.channel_id`). `parentChannelId` is the parent text channel (`messages.parent_channel_id`). Tree keys on the **parent/allowlisted** channel (same as `messagesForChannelAsc`: `channel_id = ? OR parent_channel_id = ?`). Read of a message uses the row’s own `channelId` in its Discord permalink.
 
-Reject (`404`): `..`, `/Users`, `~`, absolute host paths, any path that is not under the token’s namespace prefix.
+**Path-traversal acceptance (client `path` / `pathPrefix` is the general/leadership boundary):**
+
+1. Decode encodings (including `%2e%2e` and double-encoded `%252e%252e`) before any other check.
+2. POSIX **normalize-then-prefix-check**: collapse `.` / `..`, then require the result to be `/`, `/${tokenNamespace}`, or a descendant of `/${tokenNamespace}`.
+3. Reject encoded `..`, `/Users`, `~`, and absolute host paths (`/home`, `/etc`, Windows drives, `//share`, …). Relative paths that escape `/` are rejected.
+4. A general token on `/general/../leadership` or `/general/%2e%2e/leadership` is **404** after normalize — never a 200 leak of leadership. Do not `readdir` the Mini disk.
 
 ## Routes
 
@@ -39,21 +44,24 @@ Reject (`404`): `..`, `/Users`, `~`, absolute host paths, any path that is not u
 | GET | `/health` | none | — | `{ ok, last_message_at, fts_count }`. No bodies. |
 | GET | `/v1/fs/tree?path=` | Bearer | ls/tree | Children of an index path. Cap 100. |
 | POST | `/v1/fs/search` | Bearer | grep | FTS. Body: `{ query, pathPrefix?, limit? }`. **No** client namespace. **No** `includeDeleted` (default deny; `true` → 400). |
-| GET | `/v1/fs/read?path=` | Bearer | cat | One virtual doc (message or channel window). 404 if missing or other namespace. |
-| GET | `/v1/messages/:id` | Bearer | cat | Same isolation as read. |
-| GET | `/v1/poll?cursor=&limit=` | Bearer | — | Optional catch-up in token namespace. Cursor = monotonic **seq**, not `created_at`. |
+| GET | `/v1/fs/read?path=` | Bearer | cat | One virtual doc (message or channel window). 404 if missing, other namespace, or **deleted**. |
+| GET | `/v1/messages/:id` | Bearer | cat | Same isolation as read. Deleted → **404**. |
+| GET | `/v1/poll?cursor=&limit=` | Bearer | — | Optional catch-up in token namespace. Cursor = monotonic **seq**, not `created_at`. Deleted rows are **tombstones with empty `content`** (catch-up without leaking bodies). |
 
 ## Negative tests (principals, not query params)
 
 - [ ] General token cannot tree/read/search a `/leadership/...` path (even if `namespace=leadership` is sent).
 - [ ] General token + leadership message id → **404**.
 - [ ] `path=/Users/sean` or `path=../` → **404**.
-- [ ] `includeDeleted: true` on HTTP → **400**.
+- [ ] Encoded `..` (`%2e%2e`, `%252e%252e`) and `/general/../leadership` with a general token → **404**.
+- [ ] `~/src`, `/etc/passwd`, and other absolute host paths → **404**.
+- [ ] `includeDeleted: true` on **any** `/v1/*` route (search, read, messages, poll, tree) → **400**. Cat of a deleted message → **404**. Poll may emit the tombstone with empty content.
 - [ ] No token → 401 on every `/v1/*` except `/health`.
 
 ## Implementation notes
 
-- Same `Bun.serve` as `/health`. Listen on Tailscale IP (`HEALTH_HOST` / default Tailscale interface), **not** a public NIC.
+- Same `Bun.serve` as `/health`. Bind `HEALTH_HOST` (zod allowlist: `127.0.0.1`, `::1`, Tailscale `100.64/10` / `fd7a:`). Default `127.0.0.1`. Refuse `0.0.0.0`, `::`, `::0`, LAN/WAN unicasts. Tokens and bind address go through `loadEnv()` / zod (`MORPHEUS_API_TOKEN_GENERAL`, `MORPHEUS_API_TOKEN_LEADERSHIP`, `HEALTH_HOST`).
+- This slice is **#40** (live vfs). Do **not** close [#41](https://github.com/sean-lai-sh/morpheus/issues/41) from this PR.
 - `limit` capped at 50 for search, 100 for tree.
 - Never return SQL errors; 500 internally.
 - CORS default deny.

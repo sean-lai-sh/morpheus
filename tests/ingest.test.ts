@@ -147,3 +147,38 @@ describe("bot/ingest classification routing", () => {
     expect(getMessage("i6")?.classification).toBe("operational");
   });
 });
+
+describe("ingestDeleteById (reconcile path)", () => {
+  test("markDeleted runs before markdown/FTS so the row leaves search", async () => {
+    const { ingestMessage, ingestDeleteById } = await import("../src/bot/ingest.ts");
+    const { getMessage } = await import("../src/storage/messages.ts");
+    const { contextStore } = await import("../src/context/store.ts");
+
+    const id = "900000000000000001";
+    const inserted = await ingestMessage(
+      buildMessage({ id, channelId: "111", content: "reconcile-delete-unique-token snacks" }),
+    );
+    expect(inserted.action).toBe("inserted");
+    const live = getMessage(id)!;
+    expect(live.deleted_at).toBeNull();
+    const beforeSeq = live.seq;
+    expect(
+      contextStore.search({ query: "reconcile-delete-unique-token", namespace: "general" }).some((h) => h.id === id),
+    ).toBe(true);
+
+    const deleted = await ingestDeleteById(id);
+    expect(deleted.action).toBe("edited");
+    const row = getMessage(id)!;
+    expect(row.deleted_at).not.toBeNull();
+    expect(row.seq).toBeGreaterThan(beforeSeq);
+    expect(
+      contextStore.search({ query: "reconcile-delete-unique-token", namespace: "general" }).some((h) => h.id === id),
+    ).toBe(false);
+    expect(contextStore.readMessage(id, "general")).toBeNull();
+
+    const page = contextStore.poll("general", `${beforeSeq}:${id}`, 50);
+    const hit = page.documents.find((d) => d.id === id);
+    expect(hit?.deletedAt).toBeTruthy();
+    expect(hit?.content).toBe("");
+  });
+});

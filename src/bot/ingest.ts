@@ -5,7 +5,7 @@
  *   1. Hard pre-filter (drop bots, drop trivially-small messages, etc.)
  *   2. Upsert into SQLite (source of truth)
  *   3. Extract + persist GDrive links
- *   4. Mark operational and write to local markdown (isolated: true → leadership dir)
+ *   4. Mark operational, write local markdown, index into ContextStore FTS
  *
  * Thread messages: pass parentChannelId when the message is in a thread of an
  * allowed channel that has include_threads:true. The message is stored under its
@@ -24,8 +24,11 @@ import {
   markDeleted,
   setClassification,
   upsertMessage,
+  type MessageRow,
 } from "../storage/messages.ts";
 import { getDisplayName, upsertUser } from "../storage/users.ts";
+import { indexFromRow } from "../context/store.ts";
+import { namespaceForRow } from "../context/namespace.ts";
 
 // Matches a string that is nothing but a bare media URL (gif, image, video).
 // If there's any surrounding text, the message goes through normally.
@@ -88,6 +91,25 @@ function fetchedToInput(
   };
 }
 
+function tryIndex(row: MessageRow): void {
+  if (namespaceForRow(row) == null) {
+    logger.error(
+      {
+        message_id: row.id,
+        channel_id: row.channel_id,
+        parent_channel_id: row.parent_channel_id,
+      },
+      "refusing to index: namespaceForRow returned null",
+    );
+    return;
+  }
+  try {
+    indexFromRow(row);
+  } catch (err) {
+    logger.error({ err, message_id: row.id }, "context index failed");
+  }
+}
+
 export interface IngestResult {
   action: "inserted" | "edited" | "skipped" | "dropped";
   reason?: string;
@@ -143,12 +165,13 @@ export async function ingestMessage(
   const channel = getChannel(configChannelId);
   if (!channel) return { action: "skipped", reason: "channel-config-missing" };
 
-  // All messages are marked operational; NIA handles noise at query time.
+  // All messages are marked operational; ContextStore FTS is the retrieval path.
   setClassification(input.id, "operational", 1.0);
   const guildId = loadEnv().DISCORD_GUILD_ID;
   const fresh = getMessage(input.id);
   if (fresh) {
     appendBlock(channel, guildId, fresh, inserted ? "create" : "edit");
+    tryIndex(fresh);
   }
   return { action: inserted ? "inserted" : "edited" };
 }
@@ -165,12 +188,15 @@ export async function ingestDeleteById(messageId: string): Promise<IngestResult>
     return { action: "skipped", reason: "channel-not-allowlisted" };
   }
 
+  const channel = getChannel(effId);
+  if (!channel) return { action: "skipped", reason: "channel-config-missing" };
+
   const wasNew = markDeleted(messageId);
   if (!wasNew) return { action: "skipped", reason: "already-deleted-or-unknown" };
 
-  const channel = getChannel(effId);
-  if (!channel) return { action: "skipped", reason: "channel-config-missing" };
   appendBlock(channel, loadEnv().DISCORD_GUILD_ID, stored, "delete");
+  const fresh = getMessage(messageId);
+  if (fresh) tryIndex(fresh);
   logger.info({ message_id: stored.id, channel_id: stored.channel_id }, "tombstone written");
   return { action: "edited" };
 }
@@ -198,6 +224,8 @@ export async function ingestDelete(message: Message | PartialMessage): Promise<I
   const channel = getChannel(effId);
   if (!channel) return { action: "skipped", reason: "channel-config-missing" };
   appendBlock(channel, loadEnv().DISCORD_GUILD_ID, stored, "delete");
+  const fresh = getMessage(message.id);
+  if (fresh) tryIndex(fresh);
   logger.info({ message_id: stored.id, channel_id: stored.channel_id }, "tombstone written");
   return { action: "edited" };
 }

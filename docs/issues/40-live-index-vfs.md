@@ -22,7 +22,7 @@ Paths name **indexed club context**, never OS files:
 /leadership/...
 ```
 
-- `..`, `/Users/…`, `~/…`, absolute Unix paths → **404**
+- Client `path` / `pathPrefix` is the general/leadership boundary. Decode encodings (`%2e%2e`, `%252e%252e`) → POSIX **normalize-then-prefix-check** → require `/` or `/${tokenNamespace}/…`. Reject encoded `..`, `/Users`, `~`, absolute host paths. `/general/../leadership` with a general token → **404**.
 - Markdown under `data/discord/` is a local Nia-era export, not the VFS
 - Personal Mini repos stay off this API
 
@@ -40,7 +40,7 @@ Grok holds `MORPHEUS_BASE_URL` (tailnet) + `MORPHEUS_API_TOKEN_GENERAL` or `_LEA
 | grep | `POST /v1/fs/search` | FTS / filters; namespace from token |
 | cat | `GET /v1/fs/read?path=` | read one virtual doc (message or channel window) |
 
-`includeDeleted` default **deny** on HTTP. Namespace from the bearer, not a client field.
+`includeDeleted` default **deny** on HTTP (search, cat, poll). `includeDeleted: true` → **400**. Cat of a deleted message → **404**. Poll may emit tombstones with empty `content` for seq catch-up. Namespace from the bearer, not a client field.
 
 ## Do not build
 
@@ -48,3 +48,5 @@ Grok holds `MORPHEUS_BASE_URL` (tailnet) + `MORPHEUS_API_TOKEN_GENERAL` or `_LEA
 - Homedir / project share
 - Public `MORPHEUS_BASE_URL`
 - One shared token + `namespace=leadership`
+
+This file is the **#40** slice only. Do **not** close [#41](https://github.com/sean-lai-sh/morpheus/issues/41) from the vfs PR.

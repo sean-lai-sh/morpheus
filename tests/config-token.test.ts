@@ -87,6 +87,14 @@ describe("HEALTH_HOST", () => {
     process.env.DISCORD_BOT_TOKEN = "bot-token";
     process.env.DISCORD_GUILD_ID = "123456789012345678";
     process.env.HEALTH_HOST = "0.0.0.0";
-    expect(() => loadEnv()).toThrow(/all interfaces/);
+    expect(() => loadEnv()).toThrow(/loopback|Tailscale/);
+  });
+
+  test("rejects LAN unicast", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.HEALTH_HOST = "192.168.1.5";
+    expect(() => loadEnv()).toThrow(/loopback|Tailscale/);
   });
 });

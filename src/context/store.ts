@@ -1,0 +1,500 @@
+import { getChannel, loadChannels, loadEnv } from "../config.ts";
+import { getDb } from "../storage/db.ts";
+import {
+  getMessage,
+  type MessageRow,
+} from "../storage/messages.ts";
+import { namespaceForRow, requireNamespace } from "./namespace.ts";
+import {
+  channelIdsForNamespace,
+  channelIndexPath,
+  indexPathForRow,
+  messagePath,
+  parseIndexPath,
+  pathPrefixMatches,
+  threadIndexPath,
+} from "./paths.ts";
+import { channelSlug } from "../storage/markdown.ts";
+import type {
+  ContextStore,
+  IndexDocument,
+  IndexNode,
+  Namespace,
+  PollPage,
+  SearchHit,
+  SearchQuery,
+} from "./types.ts";
+
+const SEARCH_LIMIT_MAX = 50;
+const TREE_LIMIT = 100;
+const WINDOW_LIMIT_MAX = 50;
+const POLL_LIMIT_MAX = 50;
+
+function permalinkFor(row: MessageRow): string {
+  const guildId = loadEnv().DISCORD_GUILD_ID;
+  return `https://discord.com/channels/${guildId}/${row.channel_id}/${row.id}`;
+}
+
+export function documentFromRow(row: MessageRow, namespace?: Namespace): IndexDocument {
+  const ns = namespace ?? requireNamespace(row);
+  return {
+    id: row.id,
+    namespace: ns,
+    channelId: row.channel_id,
+    parentChannelId: row.parent_channel_id,
+    threadId: row.thread_id,
+    threadName: row.thread_name,
+    authorId: row.author_id,
+    authorName: row.author_name,
+    content: row.content,
+    createdAt: row.created_at,
+    editedAt: row.edited_at,
+    deletedAt: row.deleted_at,
+    seq: row.seq,
+    permalink: permalinkFor(row),
+  };
+}
+
+function inClause(ids: string[]): { sql: string; params: string[] } {
+  if (ids.length === 0) return { sql: "IN (NULL)", params: [] };
+  return { sql: `IN (${ids.map(() => "?").join(", ")})`, params: ids };
+}
+
+function effectiveChannelSql(): string {
+  return `COALESCE(parent_channel_id, channel_id)`;
+}
+
+function rowInNamespace(row: MessageRow, namespace: Namespace): boolean {
+  return namespaceForRow(row) === namespace;
+}
+
+function syncFtsRow(row: MessageRow): void {
+  const db = getDb();
+  const meta = db
+    .query<{ rowid: number }, [string]>(`SELECT rowid AS rowid FROM messages WHERE id = ?`)
+    .get(row.id);
+  if (!meta) return;
+  try {
+    db.query(
+      `INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', ?, ?)`,
+    ).run(meta.rowid, row.content);
+  } catch {
+    // row may not be in FTS yet
+  }
+  if (row.deleted_at != null) return;
+  db.query(`INSERT INTO messages_fts(rowid, content) VALUES (?, ?)`).run(meta.rowid, row.content);
+}
+
+export function rebuildFts(): void {
+  const db = getDb();
+  db.exec(`INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')`);
+}
+
+export function ftsCount(): number {
+  return (
+    getDb()
+      .query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM messages_fts`)
+      .get()?.n ?? 0
+  );
+}
+
+export function ingestFreshness(): { lastMessageAt: number | null; ftsCount: number } {
+  const last = getDb()
+    .query<{ ts: number | null }, []>(`SELECT MAX(created_at) AS ts FROM messages`)
+    .get()?.ts ?? null;
+  return { lastMessageAt: last, ftsCount: ftsCount() };
+}
+
+export function toFtsQuery(raw: string): string {
+  const tokens = raw
+    .replace(/[^\p{L}\p{N}_]+/gu, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((t) => t.length > 0)
+    .slice(0, 32);
+  if (tokens.length === 0) return "";
+  return tokens.map((t) => `"${t.replace(/"/g, "")}"`).join(" AND ");
+}
+
+function resolveChannelHint(namespace: Namespace, hint: string): string | null {
+  const ids = new Set(channelIdsForNamespace(namespace));
+  const byId = getChannel(hint);
+  if (byId && ids.has(byId.id)) return byId.id;
+  const byName = loadChannels().channels.find(
+    (c) => ids.has(c.id) && c.name.toLowerCase() === hint.toLowerCase(),
+  );
+  return byName?.id ?? null;
+}
+
+function index(doc: IndexDocument): void {
+  const row = getMessage(doc.id);
+  if (!row) {
+    throw new Error(`index: missing messages row ${doc.id}`);
+  }
+  const ns = requireNamespace(row);
+  if (doc.namespace !== ns) {
+    throw new Error(`index: namespace mismatch for ${doc.id} (doc=${doc.namespace} row=${ns})`);
+  }
+  if (doc.channelId !== row.channel_id) {
+    throw new Error(`index: channelId mismatch for ${doc.id}`);
+  }
+  if ((doc.parentChannelId ?? null) !== (row.parent_channel_id ?? null)) {
+    throw new Error(`index: parentChannelId mismatch for ${doc.id}`);
+  }
+  syncFtsRow(row);
+}
+
+interface FtsHitRow extends MessageRow {
+  snippet: string;
+  rank: number;
+}
+
+function search(q: SearchQuery): SearchHit[] {
+  const ftsQuery = toFtsQuery(q.query);
+  if (!ftsQuery) return [];
+  const limit = Math.min(Math.max(q.limit ?? 10, 1), SEARCH_LIMIT_MAX);
+  const nsIds = channelIdsForNamespace(q.namespace);
+  if (nsIds.length === 0) return [];
+
+  let channelFilter: string | null = null;
+  if (q.channelHint) {
+    channelFilter = resolveChannelHint(q.namespace, q.channelHint);
+    if (!channelFilter) return [];
+  }
+
+  const { sql: inSql, params: inParams } = inClause(nsIds);
+  const params: (string | number)[] = [ftsQuery, ...inParams];
+  let sql = `
+    SELECT m.*, snippet(messages_fts, 0, '', '', '…', 12) AS snippet, bm25(messages_fts) AS rank
+    FROM messages_fts
+    JOIN messages m ON m.rowid = messages_fts.rowid
+    WHERE messages_fts MATCH ?
+      AND ${effectiveChannelSql()} ${inSql}
+  `;
+  if (!q.includeDeleted) {
+    sql += ` AND m.deleted_at IS NULL`;
+  }
+  if (channelFilter) {
+    sql += ` AND (m.channel_id = ? OR m.parent_channel_id = ?)`;
+    params.push(channelFilter, channelFilter);
+  }
+  if (q.threadId) {
+    sql += ` AND m.thread_id = ?`;
+    params.push(q.threadId);
+  }
+  if (q.sinceMs != null) {
+    sql += ` AND m.created_at >= ?`;
+    params.push(q.sinceMs);
+  }
+  if (q.untilMs != null) {
+    sql += ` AND m.created_at <= ?`;
+    params.push(q.untilMs);
+  }
+  sql += ` ORDER BY rank ASC, CAST(m.id AS INTEGER) ASC LIMIT ?`;
+  params.push(limit * 4);
+
+  const rows = getDb().query<FtsHitRow, (string | number)[]>(sql).all(...params);
+  const hits: SearchHit[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (seen.has(row.id)) continue;
+    if (!rowInNamespace(row, q.namespace)) continue;
+    const path = indexPathForRow(row);
+    if (!path) continue;
+    if (q.pathPrefix) {
+      const prefix = q.pathPrefix.endsWith("/") && q.pathPrefix.length > 1
+        ? q.pathPrefix.slice(0, -1)
+        : q.pathPrefix;
+      if (!pathPrefixMatches(path, prefix)) continue;
+    }
+    seen.add(row.id);
+    hits.push({
+      id: row.id,
+      score: row.rank,
+      snippet: row.snippet || row.content.slice(0, 160),
+      path,
+      channelId: row.channel_id,
+      parentChannelId: row.parent_channel_id,
+      threadId: row.thread_id,
+      authorName: row.author_name,
+      createdAt: row.created_at,
+      permalink: permalinkFor(row),
+    });
+    if (hits.length >= limit) break;
+  }
+  return hits;
+}
+
+function readMessage(id: string, namespace: Namespace): IndexDocument | null {
+  const row = getMessage(id);
+  if (!row) return null;
+  if (row.deleted_at != null) return null;
+  if (!rowInNamespace(row, namespace)) return null;
+  return documentFromRow(row, namespace);
+}
+
+function redactDeletedContent(doc: IndexDocument): IndexDocument {
+  if (doc.deletedAt == null) return doc;
+  return { ...doc, content: "" };
+}
+
+function capNodes(nodes: IndexNode[]): IndexNode[] {
+  return nodes.slice(0, TREE_LIMIT);
+}
+
+function listThreads(channelId: string): { threadId: string; threadName: string }[] {
+  return getDb()
+    .query<{ thread_id: string; thread_name: string }, [string, string]>(
+      `SELECT thread_id, thread_name
+       FROM messages
+       WHERE (channel_id = ? OR parent_channel_id = ?)
+         AND thread_id IS NOT NULL AND thread_name IS NOT NULL
+       GROUP BY thread_id
+       ORDER BY MIN(created_at) ASC`,
+    )
+    .all(channelId, channelId)
+    .map((r) => ({ threadId: r.thread_id, threadName: r.thread_name }));
+}
+
+function listMainMessages(channelId: string): MessageRow[] {
+  return getDb()
+    .query<MessageRow, [string]>(
+      `SELECT * FROM messages
+       WHERE channel_id = ? AND parent_channel_id IS NULL AND thread_id IS NULL AND deleted_at IS NULL
+       ORDER BY CAST(id AS INTEGER) ASC, created_at ASC
+       LIMIT ${TREE_LIMIT}`,
+    )
+    .all(channelId);
+}
+
+function listThreadMessages(threadId: string): MessageRow[] {
+  return getDb()
+    .query<MessageRow, [string]>(
+      `SELECT * FROM messages
+       WHERE thread_id = ? AND deleted_at IS NULL
+       ORDER BY CAST(id AS INTEGER) ASC, created_at ASC
+       LIMIT ${TREE_LIMIT}`,
+    )
+    .all(threadId);
+}
+
+function tree(path: string, namespace: Namespace): IndexNode[] {
+  const parsed = parseIndexPath(path);
+  if (!parsed) return [];
+  if (parsed.kind === "root") {
+    return capNodes([{ path: `/${namespace}`, kind: "dir", name: namespace }]);
+  }
+  if (parsed.kind === "namespace") {
+    if (parsed.namespace !== namespace) return [];
+    const channels = loadChannels().channels.filter(
+      (c) => (c.isolated ? "leadership" : "general") === namespace,
+    );
+    const nodes: IndexNode[] = [];
+    const seenCats = new Set<string>();
+    for (const c of channels) {
+      if (c.category && !seenCats.has(c.category)) {
+        seenCats.add(c.category);
+        nodes.push({
+          path: `/${namespace}/${c.category}`,
+          kind: "dir",
+          name: c.category,
+        });
+      }
+    }
+    for (const c of channels) {
+      if (c.category) continue;
+      nodes.push({
+        path: channelIndexPath(namespace, c),
+        kind: "dir",
+        name: channelSlug(c.name, c.id),
+      });
+    }
+    return capNodes(nodes);
+  }
+  if (parsed.kind === "category") {
+    if (parsed.namespace !== namespace) return [];
+    const channels = loadChannels().channels.filter(
+      (c) =>
+        (c.isolated ? "leadership" : "general") === namespace && c.category === parsed.category,
+    );
+    return capNodes(
+      channels.map((c) => ({
+        path: channelIndexPath(namespace, c),
+        kind: "dir" as const,
+        name: channelSlug(c.name, c.id),
+      })),
+    );
+  }
+  if (parsed.kind === "channel") {
+    if (parsed.namespace !== namespace) return [];
+    const nodes: IndexNode[] = [];
+    const threads = listThreads(parsed.channel.id);
+    if (threads.length > 0) {
+      nodes.push({
+        path: `${channelIndexPath(namespace, parsed.channel)}/threads`,
+        kind: "dir",
+        name: "threads",
+      });
+    }
+    for (const row of listMainMessages(parsed.channel.id)) {
+      if (!rowInNamespace(row, namespace)) continue;
+      nodes.push({
+        path: messagePath(namespace, parsed.channel, row),
+        kind: "doc",
+        name: row.id,
+      });
+    }
+    return capNodes(nodes);
+  }
+  if (parsed.kind === "threadsDir") {
+    if (parsed.namespace !== namespace) return [];
+    const threads = listThreads(parsed.channel.id);
+    return capNodes(
+      threads.map((t) => ({
+        path: threadIndexPath(namespace, parsed.channel, t.threadName, t.threadId),
+        kind: "dir" as const,
+        name: channelSlug(t.threadName, t.threadId),
+      })),
+    );
+  }
+  if (parsed.kind === "thread") {
+    if (parsed.namespace !== namespace) return [];
+    const nodes: IndexNode[] = [];
+    for (const row of listThreadMessages(parsed.threadId)) {
+      if (!rowInNamespace(row, namespace)) continue;
+      nodes.push({
+        path: messagePath(namespace, parsed.channel, row),
+        kind: "doc",
+        name: row.id,
+      });
+    }
+    return capNodes(nodes);
+  }
+  if (parsed.kind === "message") {
+    if (parsed.namespace !== namespace) return [];
+    const row = getMessage(parsed.messageId);
+    if (!row || !rowInNamespace(row, namespace)) return [];
+    return [
+      {
+        path: messagePath(namespace, parsed.channel, row),
+        kind: "doc",
+        name: row.id,
+      },
+    ];
+  }
+  return [];
+}
+
+function readChannelWindow(opts: {
+  namespace: Namespace;
+  channelId: string;
+  afterId?: string;
+  beforeId?: string;
+  limit?: number;
+}): IndexDocument[] {
+  const nsIds = new Set(channelIdsForNamespace(opts.namespace));
+  if (!nsIds.has(opts.channelId)) return [];
+  const channel = getChannel(opts.channelId);
+  if (!channel) return [];
+  if ((channel.isolated ? "leadership" : "general") !== opts.namespace) return [];
+
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), WINDOW_LIMIT_MAX);
+  const params: string[] = [opts.channelId, opts.channelId];
+  let sql = `
+    SELECT * FROM messages
+    WHERE (channel_id = ? OR parent_channel_id = ?)
+      AND deleted_at IS NULL
+  `;
+  if (opts.afterId) {
+    sql += ` AND CAST(id AS INTEGER) > CAST(? AS INTEGER)`;
+    params.push(opts.afterId);
+  }
+  if (opts.beforeId) {
+    sql += ` AND CAST(id AS INTEGER) < CAST(? AS INTEGER)`;
+    params.push(opts.beforeId);
+  }
+  sql += ` ORDER BY CAST(id AS INTEGER) ASC, created_at ASC LIMIT ?`;
+  const rows = getDb()
+    .query<MessageRow, (string | number)[]>(sql)
+    .all(...params, limit);
+  return rows.filter((r) => rowInNamespace(r, opts.namespace)).map((r) => documentFromRow(r, opts.namespace));
+}
+
+function readPath(
+  path: string,
+  namespace: Namespace,
+): IndexDocument | IndexDocument[] | IndexNode[] | null {
+  const parsed = parseIndexPath(path);
+  if (!parsed) return null;
+  if (parsed.kind === "root" || parsed.kind === "namespace" || parsed.kind === "category" || parsed.kind === "threadsDir") {
+    if (parsed.kind !== "root" && "namespace" in parsed && parsed.namespace !== namespace) return null;
+    if (parsed.kind === "root") return tree(path, namespace);
+    return tree(path, namespace);
+  }
+  if (parsed.namespace !== namespace) return null;
+  if (parsed.kind === "channel") {
+    return readChannelWindow({ namespace, channelId: parsed.channel.id });
+  }
+  if (parsed.kind === "thread") {
+    const rows = listThreadMessages(parsed.threadId).filter((r) => rowInNamespace(r, namespace));
+    return rows.map((r) => documentFromRow(r, namespace));
+  }
+  if (parsed.kind === "message") {
+    return readMessage(parsed.messageId, namespace);
+  }
+  return null;
+}
+
+function parseCursor(cursor: string): { seq: number; id: string } | null {
+  const i = cursor.indexOf(":");
+  if (i <= 0) return null;
+  const seq = Number(cursor.slice(0, i));
+  const id = cursor.slice(i + 1);
+  if (!Number.isInteger(seq) || seq < 0 || id.length === 0) return null;
+  return { seq, id };
+}
+
+function poll(namespace: Namespace, cursor: string | null, limit = 20): PollPage {
+  const cap = Math.min(Math.max(limit, 1), POLL_LIMIT_MAX);
+  const nsIds = channelIdsForNamespace(namespace);
+  if (nsIds.length === 0) return { cursor: cursor ?? "0:0", documents: [] };
+  const { sql: inSql, params: inParams } = inClause(nsIds);
+
+  const params: (string | number)[] = [...inParams];
+  let sql = `
+    SELECT * FROM messages
+    WHERE ${effectiveChannelSql()} ${inSql}
+  `;
+  if (cursor) {
+    const parsed = parseCursor(cursor);
+    if (!parsed) return { cursor, documents: [] };
+    sql += ` AND (seq > ? OR (seq = ? AND CAST(id AS INTEGER) > CAST(? AS INTEGER)))`;
+    params.push(parsed.seq, parsed.seq, parsed.id);
+  }
+  sql += ` ORDER BY seq ASC, CAST(id AS INTEGER) ASC LIMIT ?`;
+  params.push(cap);
+
+  const rows = getDb()
+    .query<MessageRow, (string | number)[]>(sql)
+    .all(...params)
+    .filter((r) => rowInNamespace(r, namespace));
+  const documents = rows.map((r) => redactDeletedContent(documentFromRow(r, namespace)));
+  const last = documents[documents.length - 1];
+  const nextCursor = last ? `${last.seq}:${last.id}` : (cursor ?? "0:0");
+  return { cursor: nextCursor, documents };
+}
+
+export const contextStore: ContextStore = {
+  index,
+  search,
+  readMessage,
+  readPath,
+  tree,
+  readChannelWindow,
+  poll,
+};
+
+export function indexFromRow(row: MessageRow): void {
+  const ns = requireNamespace(row);
+  contextStore.index(documentFromRow(row, ns));
+}
