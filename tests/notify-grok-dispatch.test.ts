@@ -51,8 +51,19 @@ describe("grokDispatchAuthHeaders", () => {
 
 describe("dispatchGrokJob", () => {
   const payload = {
-    job: { id: "j1", namespace: "general" as const, content: "summarize hello@" },
-    snippets: [{ content: "Acme wants to sponsor" }],
+    job: {
+      id: "j1",
+      namespace: "general" as const,
+      discord_channel_id: "111111111111111111",
+      content: "summarize hello@",
+    },
+    snippets: [
+      {
+        content: "Acme wants to sponsor",
+        path: "/general/111111111111111111/m1",
+        channelId: "111111111111111111",
+      },
+    ],
     feed_hint: "sponsors",
     first_pass: true as const,
   };
@@ -125,10 +136,17 @@ describe("dispatchGrokJob", () => {
         id: "j1",
         namespace: "general",
         scope: "channel",
-        channel_ids: [],
+        channel_ids: ["111111111111111111"],
+        discord_channel_id: "111111111111111111",
         content: "summarize hello@",
       },
-      snippets: [{ content: "Acme wants to sponsor" }],
+      snippets: [
+        {
+          content: "Acme wants to sponsor",
+          path: "/general/111111111111111111/m1",
+          channelId: "111111111111111111",
+        },
+      ],
     });
     expect(capturedHeaders?.Authorization).toBe(`Bearer ${SECRET}`);
     expect(JSON.stringify(captured)).not.toContain(SECRET);
@@ -175,7 +193,7 @@ describe("dispatchGrokJob", () => {
     expect((captured as { first_pass?: boolean }).first_pass).toBe(true);
   });
 
-  test("capGrokPayload drops Mini filesystem paths", () => {
+  test("capGrokPayload drops Mini filesystem paths including body", () => {
     const capped = capGrokPayload(
       {
         job: { id: "j-path", namespace: "general", content: "q" },
@@ -184,7 +202,26 @@ describe("dispatchGrokJob", () => {
       },
       envFor(),
     );
-    expect(capped.snippets[0]?.path).toBeUndefined();
+    expect(capped.snippets).toEqual([]);
+  });
+
+  test("capGrokPayload drops pathless general snippets when channel_ids is set", () => {
+    const allowed = "111111111111111111";
+    const capped = capGrokPayload(
+      {
+        job: {
+          id: "j-nopath",
+          namespace: "general",
+          scope: "channel",
+          channel_ids: [allowed],
+          content: "q",
+        },
+        snippets: [{ content: "unscoped body" }, { content: "keep", path: `/general/${allowed}/m1`, channelId: allowed }],
+        first_pass: true,
+      },
+      envFor(),
+    );
+    expect(capped.snippets.map((s) => s.content)).toEqual(["keep"]);
   });
 
   test("capGrokPayload drops paths and feed_hint outside job.channel_ids", () => {
@@ -264,6 +301,7 @@ describe("dispatchGrokJob", () => {
     expect(captured).not.toContain(token);
     expect(captured).toContain("[redacted]");
     expect(captured).not.toContain("/Users/sean");
+    expect(JSON.parse(captured).snippets).toEqual([]);
     expect(capturedHeaders?.Authorization).toBe(`Bearer ${SECRET}`);
     expect(JSON.stringify(capturedHeaders)).not.toContain(token);
   });

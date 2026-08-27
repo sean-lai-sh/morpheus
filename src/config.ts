@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { isAllowedListenHost } from "./http/listen-allowlist.ts";
+import { isDiscordWebhookUrl } from "./notify/webhooks.ts";
 
 const emptyToUndef = (v: unknown) => {
   if (v == null) return undefined;
@@ -38,11 +39,12 @@ const envSchema = z
             const parsed = new URL(u);
             if (parsed.protocol !== "https:") return false;
             if (parsed.port === "1340") return false;
+            if (isDiscordWebhookUrl(parsed.href)) return false;
             return true;
           } catch {
             return false;
           }
-        }, "must be https and must not use port 1340")
+        }, "must be https, must not use port 1340, and must not be a Discord incoming webhook")
         .optional(),
     ),
     GROK_BOT_WEBHOOK_SECRET: z.preprocess(emptyToUndef, z.string().min(1).optional()),

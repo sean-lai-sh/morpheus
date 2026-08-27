@@ -1,7 +1,7 @@
 import { claimJob, getJob, listQueued, type Namespace } from "../storage/jobs.ts";
 import { completeJobWithReply, failJobAsWorker } from "../bot/reply.ts";
 import { peekClient } from "../bot/client.ts";
-import { loadEnv, type Env } from "../config.ts";
+import { discordBotToken, loadEnv, type Env } from "../config.ts";
 import { logger } from "../logger.ts";
 
 export interface TokenScope {
@@ -25,6 +25,14 @@ export function scopeFromRequest(req: Request, env: Env = loadEnv()): TokenScope
   const m = /^Bearer\s+(\S+)$/i.exec(header.trim());
   if (!m?.[1]) return null;
   const token = m[1];
+
+  try {
+    const bot = discordBotToken(env);
+    if (safeEqual(token, bot)) return null;
+  } catch {
+    // bot token unset in some tests — ignore
+  }
+
   const general = env.MORPHEUS_API_TOKEN_GENERAL?.trim() ?? "";
   const leadership = env.MORPHEUS_API_TOKEN_LEADERSHIP?.trim() ?? "";
   const workerGeneral = env.JOB_WORKER_GENERAL?.trim() || "grok-general";

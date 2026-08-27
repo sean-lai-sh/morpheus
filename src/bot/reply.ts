@@ -1,6 +1,7 @@
 import type { Client, Message, TextBasedChannel } from "discord.js";
 import { loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
+import { redactSecrets } from "../notify/grok-dispatch.ts";
 import {
   failJob,
   getJob,
@@ -155,8 +156,7 @@ export async function completeJobWithReply(
     allowLeadershipGithub?: boolean;
   } = {},
 ): Promise<CompleteJobResult> {
-  const reply = input.reply;
-  if (typeof reply !== "string" || reply.trim() === "") {
+  if (typeof input.reply !== "string" || input.reply.trim() === "") {
     return { ok: false, status: 400, error: "reply is required" };
   }
 
@@ -164,6 +164,7 @@ export async function completeJobWithReply(
   let allowLeadershipGithub = opts.allowLeadershipGithub;
   let postReplies = opts.postReplies;
   const env = loadEnv();
+  const reply = redactSecrets(input.reply, env);
   githubRepo ??= env.GITHUB_ISSUE_REPO;
   allowLeadershipGithub ??= env.OPEN_GITHUB_ISSUES_FROM_LEADERSHIP;
   postReplies ??= env.DISCORD_POST_REPLIES;

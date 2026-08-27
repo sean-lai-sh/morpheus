@@ -1,6 +1,7 @@
 import { loadEnv, type Env } from "../config.ts";
 import { logger } from "../logger.ts";
 import { MAX_JOB_CHANNEL_IDS, type JobScope, type Namespace } from "../storage/jobs.ts";
+import { isDiscordWebhookUrl } from "./webhooks.ts";
 
 /** Strip Mini secrets from untrusted Discord text before it leaves the process. */
 export function redactSecrets(text: string, env: Env = loadEnv()): string {
@@ -42,7 +43,10 @@ export interface GrokJobPayload {
 }
 
 export function grokBotWebhookUrl(env: Env = loadEnv()): string | null {
-  return env.GROK_BOT_WEBHOOK_URL?.trim() || null;
+  const url = env.GROK_BOT_WEBHOOK_URL?.trim() || null;
+  if (!url) return null;
+  if (isDiscordWebhookUrl(url)) return null;
+  return url;
 }
 
 /** Mini Doppler sender key. Empty → skip dispatch (not activated). Never log this value. */
@@ -129,12 +133,12 @@ function snippetInJobScope(
 ): boolean {
   if (snippet.path) {
     const indexed = indexOnlyPath(snippet.path);
-    if (!indexed) return true;
+    if (!indexed) return false;
     return Boolean(pathInJobScope(snippet.path, namespace, scope, allowed));
   }
   if (scope === "leadership") return true;
   if (snippet.channelId) return allowed.includes(snippet.channelId);
-  return true;
+  return false;
 }
 
 function capFeedHint(
@@ -203,6 +207,11 @@ export async function dispatchGrokJob(
   if (payload.job.namespace === "leadership" && !env.GROK_DISPATCH_LEADERSHIP) {
     logger.warn("leadership job not dispatched to GROK_BOT_WEBHOOK_URL (GROK_DISPATCH_LEADERSHIP=false)");
     return { dispatched: false, skipped: "leadership-not-dispatchable" };
+  }
+  const rawUrl = env.GROK_BOT_WEBHOOK_URL?.trim() || "";
+  if (rawUrl && isDiscordWebhookUrl(rawUrl)) {
+    logger.error("GROK_BOT_WEBHOOK_URL is a Discord incoming webhook; refusing dispatch");
+    return { dispatched: false, skipped: "refused-discord-incoming-webhook" };
   }
 
   const url = grokBotWebhookUrl(env);

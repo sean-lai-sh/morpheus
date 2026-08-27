@@ -84,6 +84,14 @@ describe("GROK_BOT_WEBHOOK_URL", () => {
     expect(() => loadEnv()).toThrow(/1340/);
   });
 
+  test("rejects Discord incoming webhook URLs", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.GROK_BOT_WEBHOOK_URL = "https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwx";
+    expect(() => loadEnv()).toThrow(/webhook/i);
+  });
+
   test("GROK_BOT_WEBHOOK_SECRET empty is unset (optional)", () => {
     isolateEnv();
     process.env.DISCORD_BOT_TOKEN = "bot-token";

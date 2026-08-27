@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   JOB_ALLOWED_MENTIONS,
   allowlistedGithubIssueUrl,
@@ -7,8 +7,8 @@ import {
   splitDiscordContent,
 } from "../src/bot/reply.ts";
 import { withTempDb } from "./helpers.ts";
-import { afterAll, beforeAll } from "bun:test";
 import { claimJob, enqueueJob, getJob } from "../src/storage/jobs.ts";
+import { resetEnvForTest } from "../src/config.ts";
 
 const db = withTempDb();
 beforeAll(() => {});
@@ -195,6 +195,56 @@ describe("completeJobWithReply", () => {
     expect(second.posted).toBe(false);
     expect(replies).toBe(1);
     expect(sends).toBe(1);
+  });
+
+  test("redacts Mini secrets before message.reply", async () => {
+    const secret = "discord-bot-token-secret-value";
+    const savedBot = process.env.DISCORD_BOT_TOKEN;
+    process.env.DISCORD_BOT_TOKEN = secret;
+    resetEnvForTest();
+    const { job } = enqueueJob({
+      discordMessageId: "c-redact",
+      discordChannelId: "c1",
+      discordThreadId: null,
+      authorId: "u1",
+      namespace: "general",
+      content: "q",
+    });
+    claimJob(job.id, "w1");
+    let posted = "";
+    const stub = {
+      channels: {
+        fetch: async () => ({
+          isTextBased: () => true,
+          messages: {
+            fetch: async () => ({
+              reply: async (opts: { content?: string }) => {
+                posted = opts.content ?? "";
+                return { id: "r-redact" };
+              },
+            }),
+          },
+          send: async () => ({ id: "r2" }),
+        }),
+      },
+    };
+    try {
+      const result = await completeJobWithReply(
+        job.id,
+        "w1",
+        { reply: `hello ${secret}` },
+        { client: stub },
+      );
+      expect(result.ok).toBe(true);
+      expect(posted).not.toContain(secret);
+      expect(posted).toContain("[redacted]");
+      expect(getJob(job.id)?.reply_text).not.toContain(secret);
+      expect(getJob(job.id)?.reply_text).toContain("[redacted]");
+    } finally {
+      if (savedBot === undefined) delete process.env.DISCORD_BOT_TOKEN;
+      else process.env.DISCORD_BOT_TOKEN = savedBot;
+      resetEnvForTest();
+    }
   });
 });
 

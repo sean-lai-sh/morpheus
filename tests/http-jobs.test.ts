@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { withTempDb } from "./helpers.ts";
 import { handleHttpRequest } from "../src/http/health.ts";
 import { claimJob, enqueueJob, getJob } from "../src/storage/jobs.ts";
+import { resetEnvForTest } from "../src/config.ts";
 
 const GENERAL_TOKEN = "test-general-token-aaaaaaaa";
 const LEAD_TOKEN = "test-leadership-token-bbbbbbbb";
@@ -59,6 +60,25 @@ describe("HTTP /v1/jobs auth", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ok: boolean };
     expect(body.ok).toBe(true);
+  });
+
+  test("DISCORD_BOT_TOKEN is not accepted as this bearer", async () => {
+    const res = await handleHttpRequest(req("GET", "/v1/jobs", { token: "test-token" }));
+    expect(res.status).toBe(401);
+  });
+
+  test("DISCORD_BOT_TOKEN matching a Morpheus API token is still refused", async () => {
+    const savedBot = process.env.DISCORD_BOT_TOKEN;
+    process.env.DISCORD_BOT_TOKEN = GENERAL_TOKEN;
+    resetEnvForTest();
+    try {
+      const res = await handleHttpRequest(req("GET", "/v1/jobs", { token: GENERAL_TOKEN }));
+      expect(res.status).toBe(401);
+    } finally {
+      if (savedBot === undefined) delete process.env.DISCORD_BOT_TOKEN;
+      else process.env.DISCORD_BOT_TOKEN = savedBot;
+      resetEnvForTest();
+    }
   });
 });
 
