@@ -317,8 +317,23 @@ Bind to the **Tailscale** address (`tag:morpheus`, Morpheus port only). Grok hol
 | GET | `/v1/fs/tree?path=` | ls / tree |
 | POST | `/v1/fs/search` | grep (no `includeDeleted` on HTTP) |
 | GET | `/v1/fs/read?path=` | cat |
+| GET | `/v1/links?kind=&since=&until=&limit=&channel=` | list shared Google Docs/Drive links in scope |
 | GET | `/v1/messages/:id` | cat by id |
 | GET | `/v1/poll?cursor=` | optional seq catch-up |
+
+### Search semantics (Grok tool wrapper contract) — issue #50
+
+`POST /v1/fs/search` body: `{ query, pathPrefix?, channelHint?, threadId?, sinceMs?, untilMs?, limit? (1..50, default 10) }`.
+
+- **Two passes.** `strict` = every non-stopword term must match (porter-stemmed). If that yields fewer than `limit` hits and the query has ≥3 terms, a `loose` pass adds hits matching **any two** terms, bm25-ranked. Each hit carries `match: "strict" | "loose"` — treat loose hits as leads, not facts.
+- `"quoted phrases"` are matched as phrases. Stopwords (`the, before, is, lol, pls, …`) are dropped unless the query is nothing but stopwords.
+- Hits: `{ id, score, snippet (≈32 tokens), path, channelId, parentChannelId, threadId, authorName, createdAt, permalink, links[], match }`. `links` = Google Docs/Drive URLs extracted from that message.
+- `pathPrefix` is applied in SQL (as a channel filter) before ranking, so a busy sibling channel cannot starve a quiet one.
+- Wrapper guidance for Grok: (1) send the user's question verbatim first; (2) if `strict` hits are empty, retry with the 2–3 rarest words (`f26`, `tracker`, a person's name); (3) call `GET /v1/links?kind=docs` to enumerate shared docs when the question is about "the sheet / the tracker / the doc"; (4) `GET /v1/fs/read?path=<channel path>` for the surrounding conversation before answering "not in the index".
+
+`GET /v1/links` is scoped by the token via the **message's** effective channel (`COALESCE(parent_channel_id, channel_id)`) — never `links.channel_id`, which holds the thread id for thread posts. Deleted messages are excluded; results are newest-first and deduped by Drive `file_id`.
+
+The first-pass snippet pack the Mini POSTs to Grok is now FTS-first (strict → loose on the job text, same channel/workspace filter) and then back-filled by recency, capped at 12.
 
 Poll cursor is monotonic **`seq`**, bumped on every write (`upsertMessage` / `markDeleted` / `setReactions`). Never `created_at` (backfill, edits, and deletes would be silent). Order snowflake ids with `CAST(id AS INTEGER)`.
 

@@ -1,12 +1,18 @@
 import { logger } from "../logger.ts";
 import { authorizeV1 } from "./auth.ts";
 import { contextStore, toFtsQuery } from "../context/store.ts";
-import { constrainIndexPath, parseIndexPath } from "../context/paths.ts";
+import { channelIdsForScope, constrainIndexPath, indexPathForRow, parseIndexPath } from "../context/paths.ts";
+import { rowInScope } from "../context/namespace.ts";
+import { getChannel, loadChannels, loadEnv } from "../config.ts";
+import { isLinkKind, queryLinks } from "../storage/links.ts";
+import type { MessageRow } from "../storage/messages.ts";
 import type { Scope } from "../context/types.ts";
 
 const SEARCH_LIMIT_MAX = 50;
 const TREE_LIMIT = 100;
 const POLL_LIMIT_MAX = 50;
+const LINKS_LIMIT_MAX = 100;
+const LINKS_LIMIT_DEFAULT = 50;
 
 function json(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -82,6 +88,9 @@ export async function handleV1(req: Request): Promise<Response> {
     }
     if (url.pathname === "/v1/poll" && req.method === "GET") {
       return handlePoll(url, namespace);
+    }
+    if (url.pathname === "/v1/links" && req.method === "GET") {
+      return handleLinks(url, namespace);
     }
     return json({ error: "not found" }, 404);
   } catch (err) {
@@ -170,4 +179,85 @@ function handlePoll(url: URL, namespace: Scope): Response {
   }
   const page = contextStore.poll(namespace, cursor && cursor !== "" ? cursor : null, cap);
   return json(page);
+}
+
+function parseMsParam(url: URL, name: string): number | null | undefined {
+  const raw = url.searchParams.get(name);
+  if (raw == null || raw === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+/** Channel id or name → allowlisted channel id within `scope`, else null. */
+function resolveChannelInScope(scope: Scope, hint: string): string | null {
+  const ids = new Set(channelIdsForScope(scope));
+  const byId = getChannel(hint);
+  if (byId && ids.has(byId.id)) return byId.id;
+  const byName = loadChannels().channels.find(
+    (c) => ids.has(c.id) && c.name.toLowerCase() === hint.toLowerCase(),
+  );
+  return byName?.id ?? null;
+}
+
+function permalinkForRow(row: MessageRow): string {
+  return `https://discord.com/channels/${loadEnv().DISCORD_GUILD_ID}/${row.channel_id}/${row.id}`;
+}
+
+function handleLinks(url: URL, namespace: Scope): Response {
+  const kindRaw = url.searchParams.get("kind");
+  if (kindRaw != null && kindRaw !== "" && !isLinkKind(kindRaw)) {
+    return json({ error: "invalid kind" }, 400);
+  }
+  const kind = kindRaw && isLinkKind(kindRaw) ? kindRaw : undefined;
+  const sinceMs = parseMsParam(url, "since");
+  if (sinceMs === null) return json({ error: "invalid since" }, 400);
+  const untilMs = parseMsParam(url, "until");
+  if (untilMs === null) return json({ error: "invalid until" }, 400);
+  const limitRaw = url.searchParams.get("limit");
+  const limitNum = limitRaw ? Number(limitRaw) : Number.NaN;
+  const limit = Number.isFinite(limitNum)
+    ? Math.min(Math.max(Math.trunc(limitNum), 1), LINKS_LIMIT_MAX)
+    : LINKS_LIMIT_DEFAULT;
+
+  const channelHint = url.searchParams.get("channel");
+  let channelId: string | undefined;
+  if (channelHint != null && channelHint !== "") {
+    const resolved = resolveChannelInScope(namespace, channelHint);
+    if (!resolved) return json({ links: [] });
+    channelId = resolved;
+  }
+
+  const channelIds = channelIdsForScope(namespace);
+  if (channelIds.length === 0) return json({ links: [] });
+
+  const rows = queryLinks({ channelIds, kind, sinceMs, untilMs, channelId, limit: limit * 4 });
+  const seenFiles = new Set<string>();
+  const links: Array<Record<string, unknown>> = [];
+  for (const l of rows) {
+    if (links.length >= limit) break;
+    const m = l.message;
+    if (!rowInScope(m, namespace)) continue;
+    const path = indexPathForRow(m);
+    if (!path) continue;
+    if (l.file_id) {
+      if (seenFiles.has(l.file_id)) continue;
+      seenFiles.add(l.file_id);
+    }
+    links.push({
+      url: l.url,
+      kind: l.kind,
+      fileId: l.file_id,
+      messageId: m.id,
+      channelId: m.channel_id,
+      parentChannelId: m.parent_channel_id,
+      threadId: m.thread_id,
+      threadName: m.thread_name,
+      path,
+      authorName: m.author_name,
+      createdAt: m.created_at,
+      firstSeenAt: l.first_seen_at,
+      permalink: permalinkForRow(m),
+    });
+  }
+  return json({ links });
 }

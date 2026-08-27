@@ -1,4 +1,5 @@
 import { getDb } from "./db.ts";
+import type { MessageRow } from "./messages.ts";
 
 export type LinkKind = "drive" | "docs" | "sheets" | "slides" | "forms";
 
@@ -105,4 +106,75 @@ export function linksForMessage(messageId: string): LinkRow[] {
       `SELECT * FROM links WHERE message_id = ? ORDER BY link_id ASC`,
     )
     .all(messageId);
+}
+
+export const LINK_KINDS: readonly LinkKind[] = ["drive", "docs", "sheets", "slides", "forms"];
+
+export function isLinkKind(v: string): v is LinkKind {
+  return (LINK_KINDS as readonly string[]).includes(v);
+}
+
+export interface LinkQuery {
+  /** Allowlisted parent channel ids; matched against COALESCE(parent_channel_id, channel_id). */
+  channelIds: string[];
+  kind?: LinkKind;
+  /** Inclusive bounds on links.first_seen_at (ms epoch). */
+  sinceMs?: number;
+  untilMs?: number;
+  /** Restrict to one parent channel (matches the channel itself or threads under it). */
+  channelId?: string;
+  /** Row cap for the raw query; callers dedupe/filter afterwards. */
+  limit: number;
+}
+
+/** A link joined with its (non-deleted) message row. Ordered newest first by first_seen_at. */
+export type LinkWithMessage = LinkRow & { message: MessageRow };
+
+/**
+ * Links whose message lives in one of `channelIds` (by effective/parent channel,
+ * never `links.channel_id`, which holds the thread id for thread messages).
+ * Deleted messages are always excluded. Callers must still post-filter with
+ * `rowInScope` and map to an index path.
+ */
+export function queryLinks(q: LinkQuery): LinkWithMessage[] {
+  if (q.channelIds.length === 0) return [];
+  const params: (string | number)[] = [...q.channelIds];
+  let sql = `
+    SELECT l.*, m.*, l.channel_id AS link_channel_id
+    FROM links l
+    JOIN messages m ON m.id = l.message_id
+    WHERE COALESCE(m.parent_channel_id, m.channel_id) IN (${q.channelIds.map(() => "?").join(", ")})
+      AND m.deleted_at IS NULL`;
+  if (q.kind) {
+    sql += ` AND l.kind = ?`;
+    params.push(q.kind);
+  }
+  if (q.sinceMs != null) {
+    sql += ` AND l.first_seen_at >= ?`;
+    params.push(q.sinceMs);
+  }
+  if (q.untilMs != null) {
+    sql += ` AND l.first_seen_at <= ?`;
+    params.push(q.untilMs);
+  }
+  if (q.channelId) {
+    sql += ` AND (m.channel_id = ? OR m.parent_channel_id = ?)`;
+    params.push(q.channelId, q.channelId);
+  }
+  sql += ` ORDER BY l.first_seen_at DESC, l.link_id DESC LIMIT ?`;
+  params.push(q.limit);
+  type Raw = MessageRow & {
+    link_id: number;
+    message_id: string;
+    link_channel_id: string;
+    url: string;
+    kind: LinkKind;
+    file_id: string | null;
+    first_seen_at: number;
+  };
+  const rows = getDb().query<Raw, (string | number)[]>(sql).all(...params);
+  return rows.map((r) => {
+    const { link_id, message_id, link_channel_id, url, kind, file_id, first_seen_at, ...message } = r;
+    return { link_id, message_id, channel_id: link_channel_id, url, kind, file_id, first_seen_at, message: message as MessageRow };
+  });
 }

@@ -1,5 +1,6 @@
 import { getChannel, getWorkspace, type Channel } from "../config.ts";
 import { rowInScope, scopeFor, type ChannelResolver } from "../context/namespace.ts";
+import { toFtsQuery, toFtsQueryLoose } from "../context/store.ts";
 import { messagePath } from "../context/paths.ts";
 import type { Namespace, Scope } from "../context/types.ts";
 import { logger } from "../logger.ts";
@@ -23,6 +24,8 @@ export const MAX_JOB_CHANNEL_IDS = 8;
 const FIRST_PASS_LOOKBACK_CHANNEL = 80;
 /** Scan enough recent rows to still find quiet-workspace messages when a sibling is busier. */
 const FIRST_PASS_LOOKBACK_WORKSPACE = 2000;
+/** Candidates prefetched per FTS pass (strict, then loose) before the job-scope filter. */
+const FIRST_PASS_FTS_CANDIDATES = 200;
 
 export interface JobRow {
   id: string;
@@ -393,12 +396,14 @@ export interface FirstPassSnippet {
   channelId?: string;
   path?: string;
   content: string;
+  /** Which pass produced the snippet: relevance (FTS) or the recency window. */
+  source?: "fts" | "recent";
 }
 
 type JobScopeRef = Pick<
   JobRow,
   "namespace" | "scope" | "channel_ids" | "discord_channel_id" | "discord_thread_id"
->;
+> & { content?: string };
 
 type SnippetRow = Pick<
   MessageRow,
@@ -452,7 +457,51 @@ function snippetPath(row: SnippetRow, resolveChannel: ChannelResolver): string |
   return messagePath(channel.workspace, channel, row as MessageRow);
 }
 
-/** Recent SQLite messages in the job's allowed channels. Not a whole workspace tree. Not FTS. */
+/** Drop the leading bot mention(s) so `<@123>` never becomes an FTS term. */
+function stripLeadingMentions(content: string): string {
+  return content.replace(/^(\s*<@!?\d+>\s*)+/, "").trim();
+}
+
+/**
+ * FTS candidates for the job text, best bm25 rank first. Strict (AND) hits come
+ * before loose (OR) hits. Rows are NOT yet filtered by job scope. An empty or
+ * malformed expression yields no rows — never throws.
+ */
+function ftsCandidates(content: string): SnippetRow[] {
+  const cleaned = stripLeadingMentions(content);
+  if (!cleaned) return [];
+  const exprs: string[] = [];
+  const strict = toFtsQuery(cleaned);
+  if (strict) exprs.push(strict);
+  const loose = toFtsQueryLoose(cleaned);
+  if (loose && loose !== strict) exprs.push(loose);
+  const out: SnippetRow[] = [];
+  for (const expr of exprs) {
+    try {
+      const rows = getDb()
+        .query<SnippetRow, [string, number]>(
+          `SELECT m.id, m.channel_id, m.parent_channel_id, m.thread_id, m.thread_name, m.content
+           FROM messages_fts
+           JOIN messages m ON m.rowid = messages_fts.rowid
+           WHERE messages_fts MATCH ?
+             AND m.deleted_at IS NULL
+           ORDER BY bm25(messages_fts)
+           LIMIT ?`,
+        )
+        .all(expr, FIRST_PASS_FTS_CANDIDATES);
+      out.push(...rows);
+    } catch (err) {
+      logger.warn({ err, expr }, "first-pass fts query failed; skipping");
+    }
+  }
+  return out;
+}
+
+/**
+ * Seed snippets for a job: FTS hits for the job text (bm25 order) first, then the
+ * remainder from the recent window of the job's allowed channels. Both passes go
+ * through the same job-scope filter. Not a whole workspace tree.
+ */
 export function firstPassSnippets(
   job: JobScopeRef,
   limit = 12,
@@ -461,6 +510,29 @@ export function firstPassSnippets(
   const cap = Math.min(Math.max(1, limit), 12);
   const wide = job.scope === "workspace";
   const lookback = wide ? FIRST_PASS_LOOKBACK_WORKSPACE : FIRST_PASS_LOOKBACK_CHANNEL;
+
+  const out: FirstPassSnippet[] = [];
+  const seen = new Set<string>();
+  const take = (row: SnippetRow, source: "fts" | "recent"): boolean => {
+    if (seen.has(row.id)) return false;
+    if (!snippetAllowedForJob(job, row, resolveChannel)) return false;
+    seen.add(row.id);
+    const path = snippetPath(row, resolveChannel);
+    out.push({
+      id: row.id,
+      channelId: row.channel_id,
+      ...(path ? { path } : {}),
+      content: row.content,
+      source,
+    });
+    return out.length >= cap;
+  };
+
+  if (job.content) {
+    for (const row of ftsCandidates(job.content)) {
+      if (take(row, "fts")) return out;
+    }
+  }
 
   let rows: SnippetRow[];
 
@@ -497,17 +569,8 @@ export function firstPassSnippets(
     rows = getDb().query(sql).all(...args) as SnippetRow[];
   }
 
-  const out: FirstPassSnippet[] = [];
   for (const row of rows) {
-    if (!snippetAllowedForJob(job, row, resolveChannel)) continue;
-    const path = snippetPath(row, resolveChannel);
-    out.push({
-      id: row.id,
-      channelId: row.channel_id,
-      ...(path ? { path } : {}),
-      content: row.content,
-    });
-    if (out.length >= cap) break;
+    if (take(row, "recent")) break;
   }
   return out;
 }
