@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { resetChannelsForTest, resetEnvForTest } from "../src/config.ts";
 import {
+  CANONICAL_CHANNELS_YML,
   WORKSPACE_TOKENS,
   clearWorkspaceTokenEnv,
   setWorkspaceTokenEnv,
@@ -180,6 +181,31 @@ describe("GET /v1/links", () => {
     expect((await links("?channel=2002", LEADERSHIP)).map((l) => l.url)).toEqual([DRIVE_T, DRIVE_L]);
     // out-of-scope channel resolves to nothing
     expect(await links("?channel=2002", EBOARD)).toEqual([]);
+  });
+
+  test("channel=name shared by two visible channels is rejected; the id still works", async () => {
+    // Add a programs-dev channel named like eboard's general-chat (5005).
+    writeCanonicalChannels(
+      process.cwd(),
+      CANONICAL_CHANNELS_YML.replace(
+        '- { id: "5005", name: general-chat, workspace: eboard }',
+        '- { id: "5005", name: general-chat, workspace: eboard }\n  - { id: "6006", name: general-chat, workspace: programs-dev }',
+      ),
+    );
+    resetChannelsForTest();
+    try {
+      // eboard sees both general-chats: the bare name must not silently pick one.
+      const res = await get("/v1/links?channel=general-chat", EBOARD);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("ambiguous");
+      // A snowflake id is never ambiguous.
+      expect((await get("/v1/links?channel=5005", EBOARD)).status).toBe(200);
+      // programs-dev sees only its own general-chat: the name resolves uniquely.
+      expect((await get("/v1/links?channel=general-chat", PD)).status).toBe(200);
+    } finally {
+      writeCanonicalChannels();
+      resetChannelsForTest();
+    }
   });
 
   test("links on deleted messages are excluded", async () => {

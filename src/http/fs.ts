@@ -188,15 +188,24 @@ function parseMsParam(url: URL, name: string): number | null | undefined {
   return Number.isFinite(n) ? Math.trunc(n) : null;
 }
 
-/** Channel id or name → allowlisted channel id within `scope`, else null. */
-function resolveChannelInScope(scope: Scope, hint: string): string | null {
+type ChannelResolution = { id: string } | "ambiguous" | null;
+
+/**
+ * Channel id or name → allowlisted channel id within `scope`, else null.
+ * When two visible channels share the name, the hint is "ambiguous" — callers
+ * must reject it rather than silently picking whichever comes first in
+ * channels.yml (the caller may be reading the wrong channel without knowing).
+ * A snowflake id is never ambiguous.
+ */
+function resolveChannelInScope(scope: Scope, hint: string): ChannelResolution {
   const ids = new Set(channelIdsForScope(scope));
   const byId = getChannel(hint);
-  if (byId && ids.has(byId.id)) return byId.id;
-  const byName = loadChannels().channels.find(
+  if (byId && ids.has(byId.id)) return { id: byId.id };
+  const byName = loadChannels().channels.filter(
     (c) => ids.has(c.id) && c.name.toLowerCase() === hint.toLowerCase(),
   );
-  return byName?.id ?? null;
+  if (byName.length > 1) return "ambiguous";
+  return byName[0] ? { id: byName[0].id } : null;
 }
 
 function permalinkForRow(row: MessageRow): string {
@@ -223,8 +232,11 @@ function handleLinks(url: URL, namespace: Scope): Response {
   let channelId: string | undefined;
   if (channelHint != null && channelHint !== "") {
     const resolved = resolveChannelInScope(namespace, channelHint);
+    if (resolved === "ambiguous") {
+      return json({ error: "ambiguous channel name; pass the channel id" }, 400);
+    }
     if (!resolved) return json({ links: [] });
-    channelId = resolved;
+    channelId = resolved.id;
   }
 
   const channelIds = channelIdsForScope(namespace);
