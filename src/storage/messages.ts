@@ -179,13 +179,22 @@ export function countMessages(): number {
   );
 }
 
+/**
+ * Live ids in a GuildText channel, matching `messages.fetch` on that channel.
+ * Thread replies live under `channel_id = <thread>` / `parent_channel_id = <parent>`
+ * and are never returned by a parent fetch, so they must not be in this set —
+ * otherwise reconcile tombstones them as Discord deletes.
+ */
 export function nonDeletedMessageIds(channelId: string): string[] {
   return getDb()
-    .query<{ id: string }, [string, string]>(
+    .query<{ id: string }, [string]>(
       `SELECT id FROM messages
-       WHERE (channel_id = ? OR parent_channel_id = ?) AND deleted_at IS NULL`,
+       WHERE channel_id = ?
+         AND parent_channel_id IS NULL
+         AND thread_id IS NULL
+         AND deleted_at IS NULL`,
     )
-    .all(channelId, channelId)
+    .all(channelId)
     .map((r) => r.id);
 }
 
