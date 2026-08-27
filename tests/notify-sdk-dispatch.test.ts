@@ -7,6 +7,7 @@ import {
   type GrokJobPayload,
   type HttpsPoster,
 } from "../src/notify/grok-dispatch.ts";
+import { postToSibling } from "../src/notify/sdk-dispatch.ts";
 import {
   cursorSdkWebhookSecret,
   cursorSdkWebhookUrl,
@@ -116,6 +117,75 @@ describe("cursorSdkWebhookUrl / cursorSdkWebhookSecret", () => {
   test("missing → null", () => {
     expect(cursorSdkWebhookUrl(envFor())).toBeNull();
     expect(cursorSdkWebhookSecret(envFor())).toBeNull();
+  });
+});
+
+describe("postToSibling redirect handling (Sol #3)", () => {
+  test("a 3xx from the sibling is refused; the job body never reaches the redirect target", async () => {
+    let attackerHits = 0;
+    let attackerBody = "";
+    const attacker = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        attackerHits += 1;
+        attackerBody = await req.text();
+        return new Response("ok", { status: 200 });
+      },
+    });
+    let siblingHits = 0;
+    const sibling = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        siblingHits += 1;
+        return new Response(null, {
+          status: 307,
+          headers: { Location: `http://127.0.0.1:${attacker.port}/collect` },
+        });
+      },
+    });
+    try {
+      const res = await postToSibling(
+        `http://127.0.0.1:${sibling.port}/hooks/job`,
+        { job: { id: "j1", content: "private discord content" }, snippets: [] },
+        { Authorization: "Bearer sibling-secret-0123456789", "Content-Type": "application/json" },
+        5_000,
+      );
+      expect(res.ok).toBe(false);
+      expect(siblingHits).toBe(1);
+      // The redirect was NOT followed: the attacker host received nothing.
+      expect(attackerHits).toBe(0);
+      expect(attackerBody).toBe("");
+    } finally {
+      sibling.stop(true);
+      attacker.stop(true);
+    }
+  });
+
+  test("a normal 2xx sibling response is delivered", async () => {
+    let gotBody = "";
+    const sibling = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        gotBody = await req.text();
+        return Response.json({ accepted: true }, { status: 202 });
+      },
+    });
+    try {
+      const res = await postToSibling(
+        `http://127.0.0.1:${sibling.port}/hooks/job`,
+        { job: { id: "j2" } },
+        { "Content-Type": "application/json" },
+        5_000,
+      );
+      expect(res.ok).toBe(true);
+      expect(res.status).toBe(202);
+      expect(JSON.parse(gotBody)).toEqual({ job: { id: "j2" } });
+    } finally {
+      sibling.stop(true);
+    }
   });
 });
 

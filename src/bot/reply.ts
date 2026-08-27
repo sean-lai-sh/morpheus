@@ -161,6 +161,8 @@ export async function completeJobWithReply(
     githubRepo?: string;
     /** Workspace ids allowed to carry a GitHub issue URL. Default: GITHUB_ISSUES_WORKSPACES. */
     githubWorkspaces?: string[];
+    /** Claim generation the caller must still own; gated atomically in prepareComplete. */
+    expectedClaimedAt?: number;
   } = {},
 ): Promise<CompleteJobResult> {
   if (typeof input.reply !== "string" || input.reply.trim() === "") {
@@ -188,6 +190,7 @@ export async function completeJobWithReply(
     claimedBy,
     { reply, github_issue_url: github, completion_key: input.completion_key },
     opts.now,
+    opts.expectedClaimedAt,
   );
   if (!prep.ok) {
     const status = prep.reason === "not-found" ? 404 : 409;
@@ -257,11 +260,22 @@ export function failJobAsWorker(
   claimedBy: string,
   error: string,
   now?: number,
+  expectedClaimedAt?: number,
 ): { ok: boolean; status: number; job?: JobRow; error?: string } {
-  const job = failJob(id, claimedBy, error, now);
+  const job = failJob(id, claimedBy, error, now, expectedClaimedAt);
   if (!job) {
     const existing = getJob(id);
     if (!existing) return { ok: false, status: 404, error: "not-found" };
+    // A live claim we still own by identity but with a stale generation echo →
+    // stale-claim, distinct from a plain claimed_by mismatch (both 409).
+    if (
+      expectedClaimedAt != null &&
+      existing.status === "claimed" &&
+      existing.claimed_by === claimedBy.trim() &&
+      existing.claimed_at !== expectedClaimedAt
+    ) {
+      return { ok: false, status: 409, error: "stale-claim" };
+    }
     return { ok: false, status: 409, error: "claimed-by-mismatch" };
   }
   stopJobTyping(id);

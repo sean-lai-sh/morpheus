@@ -870,6 +870,74 @@ describe("custom tools", () => {
     await h.waitSettled(1);
   });
 
+  test("fan-out at limit 1: a better-ranked hit in the SECOND allowed channel is not starved by the first", async () => {
+    const h = makeHarness({
+      route: (url, init) => {
+        if (!url.endsWith("/v1/fs/search")) return undefined;
+        const body = JSON.parse(init.body ?? "{}") as { pathPrefix?: string };
+        if (body.pathPrefix === SPONSORS_PATH) {
+          // First channel queried: only a weak LOOSE hit.
+          return { status: 200, body: JSON.stringify({ hits: [{ id: "a-loose", path: `${SPONSORS_PATH}/m1`, match: "loose", score: 5, links: [] }] }) };
+        }
+        // Second channel: a strong STRICT hit that must win the single slot.
+        return { status: 200, body: JSON.stringify({ hits: [{ id: "b-strict", path: `${GENERAL_CHAT_PATH}/m9`, match: "strict", score: 1, links: [] }] }) };
+      },
+    });
+    const run = await startJob(h, payloadFor("j1", { channel_ids: ["1001", "5005"] }));
+    const result = (await run.customTools!.morpheus_fs_search!.execute({ query: "q", limit: 1 }, {})) as {
+      content: Array<{ text: string }>;
+    };
+    const parsed = JSON.parse(result.content[0]!.text) as { hits: Array<{ id: string }> };
+    // Global order (strict before loose) wins over per-response request order.
+    expect(parsed.hits.map((hit) => hit.id)).toEqual(["b-strict"]);
+    run.finish({ status: "finished", result: "x" });
+    await h.waitSettled(1);
+  });
+
+  test("fan-out at limit 1: an out-of-scope first-channel item cannot consume the slot and blank the result", async () => {
+    const h = makeHarness({
+      route: (url, init) => {
+        if (!url.endsWith("/v1/fs/search")) return undefined;
+        const body = JSON.parse(init.body ?? "{}") as { pathPrefix?: string };
+        if (body.pathPrefix === SPONSORS_PATH) {
+          // First channel returns ONLY an out-of-scope item (server bug / stale index).
+          return { status: 200, body: JSON.stringify({ hits: [{ id: "leak", path: `${DEV_CHAT_PATH}/m1`, match: "strict", score: 0, links: [] }] }) };
+        }
+        return { status: 200, body: JSON.stringify({ hits: [{ id: "valid", path: `${GENERAL_CHAT_PATH}/m2`, match: "strict", score: 2, links: [] }] }) };
+      },
+    });
+    const run = await startJob(h, payloadFor("j1", { channel_ids: ["1001", "5005"] }));
+    const result = (await run.customTools!.morpheus_fs_search!.execute({ query: "q", limit: 1 }, {})) as {
+      content: Array<{ text: string }>;
+    };
+    const parsed = JSON.parse(result.content[0]!.text) as { hits: Array<{ id: string }> };
+    // The out-of-scope item is filtered BEFORE the cap, so the valid hit survives.
+    expect(parsed.hits.map((hit) => hit.id)).toEqual(["valid"]);
+    run.finish({ status: "finished", result: "x" });
+    await h.waitSettled(1);
+  });
+
+  test("links fan-out at limit 1: the newer link in the second channel wins the slot", async () => {
+    const h = makeHarness({
+      route: (url) => {
+        if (!url.includes("/v1/links")) return undefined;
+        const channel = new URL(url).searchParams.get("channel");
+        if (channel === "1001") {
+          return { status: 200, body: JSON.stringify({ links: [{ url: "u-old", fileId: "old", path: `${SPONSORS_PATH}/m1`, createdAt: 1_000 }] }) };
+        }
+        return { status: 200, body: JSON.stringify({ links: [{ url: "u-new", fileId: "new", path: `${GENERAL_CHAT_PATH}/m2`, createdAt: 9_000 }] }) };
+      },
+    });
+    const run = await startJob(h, payloadFor("j1", { channel_ids: ["1001", "5005"] }));
+    const result = (await run.customTools!.morpheus_fs_links!.execute({ kind: "docs", limit: 1 }, {})) as {
+      content: Array<{ text: string }>;
+    };
+    const parsed = JSON.parse(result.content[0]!.text) as { links: Array<{ fileId: string }> };
+    expect(parsed.links.map((l) => l.fileId)).toEqual(["new"]);
+    run.finish({ status: "finished", result: "x" });
+    await h.waitSettled(1);
+  });
+
   test("search hits keep the #51 shape: match tag and links[] survive scope filtering", async () => {
     const h = makeHarness({
       route: (url) =>

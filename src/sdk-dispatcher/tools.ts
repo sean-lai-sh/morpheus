@@ -225,15 +225,22 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
     return { ok: res.ok, status: res.status, text: await res.text() };
   }
 
-  /** Merge arrays under `key` from several response bodies, deduped by `idOf`, capped. */
-  function mergeListings(
+  /**
+   * Merge fan-out responses correctly (Sol #2): scope-filter EVERY item first,
+   * dedupe, order globally, and only THEN apply the item limit. Per-response
+   * order and the server LIMIT no longer decide who survives, so a quiet
+   * allowed channel cannot be starved by a busier allowed/sibling channel, and
+   * an out-of-scope item can never consume a slot and then be filtered away.
+   */
+  function mergeScopedListings(
     bodies: string[],
     key: "hits" | "links",
     idOf: (item: Record<string, unknown>) => string,
+    compare: (a: Record<string, unknown>, b: Record<string, unknown>) => number,
     limit: number,
   ): string {
     const seen = new Set<string>();
-    const merged: unknown[] = [];
+    const all: Record<string, unknown>[] = [];
     for (const body of bodies) {
       let parsed: unknown;
       try {
@@ -244,16 +251,36 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
       const list = (parsed as Record<string, unknown>)?.[key];
       if (!Array.isArray(list)) continue;
       for (const item of list) {
-        if (merged.length >= limit) break;
         if (!item || typeof item !== "object") continue;
-        const id = idOf(item as Record<string, unknown>);
+        const rec = item as Record<string, unknown>;
+        // Scope-filter BEFORE dedupe/cap so invalid items never hold a slot.
+        if (typeof rec.path !== "string" || !pathInJobScope(rec.path, deps.scope)) continue;
+        const id = idOf(rec);
         if (seen.has(id)) continue;
         seen.add(id);
-        merged.push(item);
+        all.push(rec);
       }
     }
-    return JSON.stringify({ [key]: merged });
+    all.sort(compare);
+    return JSON.stringify({ [key]: all.slice(0, limit) });
   }
+
+  /** strict hits before loose, then bm25 score ascending (lower = more relevant). */
+  const compareHits = (a: Record<string, unknown>, b: Record<string, unknown>): number => {
+    const rank = (m: unknown) => (m === "strict" ? 0 : 1);
+    const byMatch = rank(a.match) - rank(b.match);
+    if (byMatch !== 0) return byMatch;
+    const sa = typeof a.score === "number" ? a.score : Number.POSITIVE_INFINITY;
+    const sb = typeof b.score === "number" ? b.score : Number.POSITIVE_INFINITY;
+    return sa - sb;
+  };
+
+  /** Links newest-first (matches the /v1/links contract). */
+  const compareLinks = (a: Record<string, unknown>, b: Record<string, unknown>): number => {
+    const ta = typeof a.createdAt === "number" ? a.createdAt : Number.NEGATIVE_INFINITY;
+    const tb = typeof b.createdAt === "number" ? b.createdAt : Number.NEGATIVE_INFINITY;
+    return tb - ta;
+  };
 
   return {
     morpheus_fs_tree: {
@@ -313,18 +340,18 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
         } else {
           bodies = [prefix != null ? { ...base, pathPrefix: prefix } : base];
         }
+        const fannedOut = bodies.length > 1;
 
         try {
           const texts: string[] = [];
           for (const body of bodies) {
             const res = await post("/v1/fs/search", body);
-            if (!res.ok && bodies.length === 1) return errorResult(`morpheus api ${res.status}`);
+            if (!res.ok && !fannedOut) return errorResult(`morpheus api ${res.status}`);
             if (res.ok) texts.push(res.text);
           }
-          const merged =
-            texts.length === 1
-              ? texts[0]!
-              : mergeListings(texts, "hits", (h) => String(h.id ?? JSON.stringify(h)), limit);
+          const merged = fannedOut
+            ? mergeScopedListings(texts, "hits", (h) => String(h.id ?? JSON.stringify(h)), compareHits, limit)
+            : (texts[0] ?? JSON.stringify({ hits: [] }));
           return finish(merged);
         } catch {
           logger.error({ job_id: deps.jobId, tool: "morpheus_fs_search" }, "morpheus fs search failed");
@@ -401,19 +428,19 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
           channelParams = [requested ?? null];
         }
 
+        const fannedOut = channelParams.length > 1;
         try {
           const texts: string[] = [];
           for (const channel of channelParams) {
             const qs = new URLSearchParams(params);
             if (channel) qs.set("channel", channel);
             const res = await getRaw(`/v1/links?${qs.toString()}`);
-            if (!res.ok && channelParams.length === 1) return errorResult(`morpheus api ${res.status}`);
+            if (!res.ok && !fannedOut) return errorResult(`morpheus api ${res.status}`);
             if (res.ok) texts.push(res.text);
           }
-          const merged =
-            texts.length === 1
-              ? texts[0]!
-              : mergeListings(texts, "links", (l) => String(l.fileId ?? l.url ?? JSON.stringify(l)), limit);
+          const merged = fannedOut
+            ? mergeScopedListings(texts, "links", (l) => String(l.fileId ?? l.url ?? JSON.stringify(l)), compareLinks, limit)
+            : (texts[0] ?? JSON.stringify({ links: [] }));
           return finish(merged);
         } catch {
           logger.error({ job_id: deps.jobId, tool: "morpheus_fs_links" }, "morpheus links GET failed");

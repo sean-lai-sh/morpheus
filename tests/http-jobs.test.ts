@@ -13,7 +13,7 @@ import {
   withWorkspaceConfig,
 } from "./jobs-fixture.ts";
 import { handleHttpRequest } from "../src/http/health.ts";
-import { claimJob, enqueueJob, getJob, requeueExpiredClaims } from "../src/storage/jobs.ts";
+import { claimJob, enqueueJob, failJob, getJob, prepareComplete, requeueExpiredClaims } from "../src/storage/jobs.ts";
 import { parseEnv, resetEnvForTest } from "../src/config.ts";
 import { isJobTypingActive, startJobTyping, stopAllJobTyping } from "../src/bot/typing.ts";
 
@@ -171,6 +171,55 @@ describe("claim generation (claimed_at echo)", () => {
     );
     expect(stale.status).toBe(409);
     expect(getJob(job.id)?.status).toBe("claimed");
+  });
+
+  // Sol #1: the generation gate must be part of the CAS, not a prior read.
+  // These drive the storage transition directly so the reclaim lands in the
+  // TOCTOU window (after a worker "validated" its generation, before its write).
+  test("prepareComplete is atomic: a reclaim before the write refuses the stale generation", async () => {
+    const job = queue("cas-complete", EBOARD, SPONSORS);
+    const first = claimJob(job.id, "grok-eboard", Date.now() - 100_000)!;
+    // Worker A read t1 and is "about to" complete. Now its lease expires and B reclaims:
+    expect(requeueExpiredClaims(Date.now(), 60_000)).toBe(1);
+    const second = claimJob(job.id, "grok-eboard", Date.now())!;
+    expect(second.claimed_at ?? undefined).not.toBe(first.claimed_at ?? undefined);
+
+    // A resumes with its stale t1 — the CAS predicate refuses it, no write lands.
+    const stale = prepareComplete(job.id, "grok-eboard", { reply: "A's stale answer" }, Date.now(), first.claimed_at ?? undefined);
+    expect(stale.ok).toBe(false);
+    if (!stale.ok) expect(stale.reason).toBe("stale-claim");
+    expect(getJob(job.id)?.reply_text).toBeNull();
+
+    // B's current generation writes cleanly.
+    const fresh = prepareComplete(job.id, "grok-eboard", { reply: "B's answer" }, Date.now(), second.claimed_at ?? undefined);
+    expect(fresh.ok).toBe(true);
+    expect(getJob(job.id)?.reply_text).toBe("B's answer");
+  });
+
+  test("failJob is atomic: a reclaim before the write refuses the stale generation", async () => {
+    const job = queue("cas-fail", EBOARD, SPONSORS);
+    const first = claimJob(job.id, "grok-eboard", Date.now() - 100_000)!;
+    expect(requeueExpiredClaims(Date.now(), 60_000)).toBe(1);
+    const second = claimJob(job.id, "grok-eboard", Date.now())!;
+
+    const staleFail = failJob(job.id, "grok-eboard", "A boom", Date.now(), first.claimed_at ?? undefined);
+    expect(staleFail).toBeNull();
+    expect(getJob(job.id)?.status).toBe("claimed");
+
+    // Current generation may still complete — the stale fail did not terminate it.
+    const ok = prepareComplete(job.id, "grok-eboard", { reply: "B ok" }, Date.now(), second.claimed_at ?? undefined);
+    expect(ok.ok).toBe(true);
+  });
+
+  test("no claimed_at echo keeps the legacy Grok contract even across a reclaim", async () => {
+    const job = queue("cas-legacy", EBOARD, SPONSORS);
+    claimJob(job.id, "grok-eboard", Date.now() - 100_000);
+    requeueExpiredClaims(Date.now(), 60_000);
+    claimJob(job.id, "grok-eboard", Date.now());
+    // Legacy worker sends no claimed_at → ungated CAS, completes on the live claim.
+    const legacy = prepareComplete(job.id, "grok-eboard", { reply: "legacy" }, Date.now());
+    expect(legacy.ok).toBe(true);
+    expect(getJob(job.id)?.reply_text).toBe("legacy");
   });
 });
 

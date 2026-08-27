@@ -41,6 +41,41 @@ export type SdkDispatchResult = {
 };
 
 /**
+ * Default Mini → sibling poster. `CURSOR_SDK_WEBHOOK_URL` is host-allowlisted
+ * at parse time, but a compromised/misconfigured sibling could answer with a
+ * 3xx to an arbitrary host — and the default Fetch redirect mode (`follow`)
+ * would re-send the job body (private Discord content + snippets) there. So:
+ * `redirect: "manual"` and treat every 3xx as a hard failure. No second
+ * request ever leaves for a redirect target.
+ */
+export async function postToSibling(
+  url: string,
+  body: unknown,
+  headers: Record<string, string>,
+  timeoutMs: number,
+): Promise<{ ok: boolean; status: number }> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      redirect: "manual",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    // manual mode surfaces a redirect as an opaqueredirect (status 0) or a raw
+    // 3xx depending on runtime; either way it is NOT a delivery.
+    if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
+      logger.error({ status: res.status }, "SDK dispatcher webhook returned a redirect; refusing to follow");
+      return { ok: false, status: res.status };
+    }
+    return { ok: res.ok, status: res.status };
+  } catch (err) {
+    logger.error({ err }, "SDK dispatcher webhook POST timed out or failed");
+    return { ok: false, status: 0 };
+  }
+}
+
+/**
  * Mini → sibling SDK dispatcher. Same guards as `dispatchGrokJob`, in the same
  * order: flag gate, workspace checks, URL/secret presence (warn + skip), then
  * a bot-token-on-request tripwire before anything leaves the process.
@@ -98,22 +133,7 @@ export async function dispatchSdkJob(
   }
 
   const timeoutMs = env.GROK_DISPATCH_TIMEOUT_MS;
-  const poster =
-    opts.poster ??
-    (async (u, body, hdrs) => {
-      try {
-        const res = await fetch(u, {
-          method: "POST",
-          headers: hdrs ?? headers,
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(timeoutMs),
-        });
-        return { ok: res.ok, status: res.status };
-      } catch (err) {
-        logger.error({ err }, "SDK dispatcher webhook POST timed out or failed");
-        return { ok: false, status: 0 };
-      }
-    });
+  const poster = opts.poster ?? ((u, body, hdrs) => postToSibling(u, body, hdrs ?? headers, timeoutMs));
   let capped: GrokJobPayload;
   try {
     capped = capGrokPayload(payload, env);

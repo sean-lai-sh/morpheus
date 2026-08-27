@@ -244,7 +244,7 @@ export function claimJob(id: string, claimedBy: string, now: number = Date.now()
 
 export type PrepareCompleteResult =
   | { ok: true; job: JobRow; alreadyCompleted: boolean }
-  | { ok: false; reason: "not-found" | "claimed-by-mismatch" | "not-claimed" | "in-progress" };
+  | { ok: false; reason: "not-found" | "claimed-by-mismatch" | "not-claimed" | "in-progress" | "stale-claim" };
 
 export interface CompleteInput {
   reply: string;
@@ -262,6 +262,14 @@ export function prepareComplete(
   claimedBy: string,
   input: CompleteInput,
   now: number = Date.now(),
+  /**
+   * Claim generation (`claimed_at`) the worker was handed on its own claim.
+   * When provided it is part of the CAS predicate below — one atomic SQLite
+   * transition, no read-then-check — so a worker whose lease expired and was
+   * reclaimed cannot write into the new claim. `undefined` keeps the legacy
+   * Grok contract (no generation gate).
+   */
+  expectedClaimedAt?: number,
 ): PrepareCompleteResult {
   const worker = claimedBy.trim();
   const job = getJob(id);
@@ -278,17 +286,19 @@ export function prepareComplete(
 
   const completionKey = (input.completion_key?.trim() || job.completion_key || `complete:${id}`).slice(0, 200);
   const github = input.github_issue_url ?? job.github_issue_url ?? null;
+  const gen = expectedClaimedAt ?? null;
 
   const updated = getDb()
-    .query<JobRow, [string, string, string | null, number, string, string, string]>(
+    .query<JobRow, [string, string, string | null, number, string, string, string, number | null, number | null]>(
       `UPDATE jobs
        SET reply_text = ?, completion_key = ?, github_issue_url = ?, updated_at = ?, error = NULL
        WHERE id = ? AND status = 'claimed' AND claimed_by = ?
          AND result_discord_message_id IS NULL
          AND (completion_key IS NULL OR (completion_key = ? AND error IS NOT NULL))
+         AND (? IS NULL OR claimed_at = ?)
        RETURNING *`,
     )
-    .get(input.reply, completionKey, github, now, id, worker, completionKey);
+    .get(input.reply, completionKey, github, now, id, worker, completionKey, gen, gen);
 
   const mapped = updated ? mapJob(updated) : null;
   if (mapped) return { ok: true, job: mapped, alreadyCompleted: false };
@@ -298,6 +308,10 @@ export function prepareComplete(
   if (current.claimed_by !== worker) return { ok: false, reason: "claimed-by-mismatch" };
   if (current.status === "completed" || current.result_discord_message_id) {
     return { ok: true, job: current, alreadyCompleted: true };
+  }
+  // Distinguish a stale generation (lease expired + reclaimed) from a live retry.
+  if (expectedClaimedAt != null && current.claimed_at !== expectedClaimedAt) {
+    return { ok: false, reason: "stale-claim" };
   }
   if (current.status === "claimed") return { ok: false, reason: "in-progress" };
   return { ok: false, reason: "not-claimed" };
@@ -352,22 +366,31 @@ export function markJobSendError(id: string, error: string, now: number = Date.n
   return row ? mapJob(row) : null;
 }
 
-export function failJob(id: string, claimedBy: string, error: string, now: number = Date.now()): JobRow | null {
+export function failJob(
+  id: string,
+  claimedBy: string,
+  error: string,
+  now: number = Date.now(),
+  /** Claim generation gate — part of the CAS, same contract as prepareComplete. */
+  expectedClaimedAt?: number,
+): JobRow | null {
   const worker = claimedBy.trim();
   const job = getJob(id);
   if (!job) return null;
   if (job.status === "completed") return null;
   if (job.status !== "claimed" || job.claimed_by !== worker) return null;
   if (job.result_discord_message_id) return null;
+  const gen = expectedClaimedAt ?? null;
 
   const row = getDb()
-    .query<JobRow, [string, number, string, string]>(
+    .query<JobRow, [string, number, string, string, number | null, number | null]>(
       `UPDATE jobs
        SET status = 'failed', error = ?, updated_at = ?
        WHERE id = ? AND status = 'claimed' AND claimed_by = ?
+         AND (? IS NULL OR claimed_at = ?)
        RETURNING *`,
     )
-    .get(error.slice(0, 2000), now, id, worker);
+    .get(error.slice(0, 2000), now, id, worker, gen, gen);
   return row ? mapJob(row) : null;
 }
 

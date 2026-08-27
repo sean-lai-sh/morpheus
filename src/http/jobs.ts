@@ -94,14 +94,18 @@ export async function handleJobsRequest(req: Request, url: URL): Promise<Respons
   }
 
   // Claim generation: `claimed_by` alone cannot distinguish two workers using
-  // the same workspace token (both are `grok-<root>`). A worker that echoes the
-  // claimed_at it was handed on claim is refused once its lease expired and the
-  // job was reclaimed (requeue nulls claimed_at; a new claim sets a new one).
-  // Optional so the deployed Grok worker's complete/fail contract is unchanged.
+  // the same workspace token (both are `grok-<root>`). A worker echoes the
+  // claimed_at it was handed on claim; the value is validated INSIDE the
+  // complete/fail CAS (prepareComplete / failJob), so a lease expiry + reclaim
+  // between this handler and the state transition cannot let a stale worker win
+  // (TOCTOU-safe). A non-numeric echo is rejected up front. Optional, so the
+  // deployed Grok worker's complete/fail contract is unchanged.
+  let expectedClaimedAt: number | undefined;
   if (action !== "claim" && body.claimed_at !== undefined) {
-    if (typeof body.claimed_at !== "number" || body.claimed_at !== existing.claimed_at) {
+    if (typeof body.claimed_at !== "number") {
       return json(409, { error: "stale claim", job: existing });
     }
+    expectedClaimedAt = body.claimed_at;
   }
 
   if (action === "claim") {
@@ -113,7 +117,7 @@ export async function handleJobsRequest(req: Request, url: URL): Promise<Respons
   if (action === "fail") {
     const error = typeof body.error === "string" ? body.error : "";
     if (!error.trim()) return json(400, { error: "error is required" });
-    const result = failJobAsWorker(jobId, claimedBy, error);
+    const result = failJobAsWorker(jobId, claimedBy, error, undefined, expectedClaimedAt);
     return json(result.status, result.ok ? { job: result.job } : { error: result.error });
   }
 
@@ -133,6 +137,7 @@ export async function handleJobsRequest(req: Request, url: URL): Promise<Respons
     {
       client: discordClientOrUndefined(),
       postReplies,
+      expectedClaimedAt,
     },
   );
   if (!result.ok) return json(result.status, { error: result.error, job: result.job });
