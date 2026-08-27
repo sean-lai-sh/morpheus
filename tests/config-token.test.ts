@@ -6,6 +6,7 @@ const TOKEN_KEYS = [
   "DISCORD_TOKEN",
   "DISCORD_GUILD_ID",
   "GROK_BOT_WEBHOOK_URL",
+  "GROK_BOT_WEBHOOK_SECRET",
   "HEALTH_HOST",
   "JOB_TRIGGER_ROLE_IDS",
 ] as const;
@@ -72,6 +73,15 @@ describe("GROK_BOT_WEBHOOK_URL", () => {
     process.env.DISCORD_GUILD_ID = "123456789012345678";
     process.env.GROK_BOT_WEBHOOK_URL = "http://example.com/hook";
     expect(() => loadEnv()).toThrow(/https/);
+  });
+
+  test("GROK_BOT_WEBHOOK_SECRET empty is unset (optional)", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.GROK_BOT_WEBHOOK_SECRET = "";
+    const env = loadEnv();
+    expect(env.GROK_BOT_WEBHOOK_SECRET).toBeUndefined();
   });
 });
 

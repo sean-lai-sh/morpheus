@@ -217,6 +217,20 @@ describe("tryEnqueueJob grok dispatch", () => {
     expect(r.dispatched).toBe(false);
   });
 
+  test("missing GROK_BOT_WEBHOOK_SECRET skips with warn and does not throw", async () => {
+    const r = await tryEnqueueJob(candidate({ discordMessageId: "e-nosecret", authorId: "disp-nosecret" }), {
+      ...policy,
+      dispatch: true,
+      env: {
+        ...process.env,
+        GROK_BOT_WEBHOOK_URL: "https://example.com/grok-routine",
+        GROK_BOT_WEBHOOK_SECRET: "",
+      },
+    });
+    expect(r.job?.status).toBe("queued");
+    expect(r.dispatched).toBe(false);
+  });
+
   test("POSTs thin first_pass pack (not the whole index, no tokens)", async () => {
     upsertMessage({
       id: "ctx-1",
@@ -243,15 +257,19 @@ describe("tryEnqueueJob grok dispatch", () => {
         dispatch: true,
         env: {
           GROK_BOT_WEBHOOK_URL: "https://example.com/grok-routine",
+          GROK_BOT_WEBHOOK_SECRET: "grok-sender-key-for-tests",
           DISCORD_BOT_TOKEN: token,
         },
-        poster: async (_url, body) => {
+        poster: async (_url, body, headers) => {
           captured = body as typeof captured;
           const json = JSON.stringify(body);
           expect(json).not.toContain(token);
           expect(json).not.toContain("DISCORD_BOT_TOKEN");
+          expect(json).not.toContain("grok-sender-key-for-tests");
           expect(json).not.toMatch(/api\/webhooks/);
           expect(json).not.toContain("/Users/");
+          expect(headers?.Authorization).toBe("Bearer grok-sender-key-for-tests");
+          expect(JSON.stringify(headers)).not.toContain(token);
           return { ok: true, status: 200 };
         },
       },

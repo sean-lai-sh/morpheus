@@ -12,6 +12,7 @@ const SECRET_ENV_KEYS = [
   "NIA_API_KEY",
   "NVIDIA_API_KEY",
   "GROK_BOT_WEBHOOK_URL",
+  "GROK_BOT_WEBHOOK_SECRET",
 ] as const;
 
 /** Strip Mini secrets from untrusted Discord text before it leaves the process. */
@@ -55,8 +56,23 @@ export function grokBotWebhookUrl(env: NodeJS.ProcessEnv = process.env): string 
   return raw;
 }
 
+/** Mini Doppler sender key. Empty → skip dispatch (not activated). Never log this value. */
+export function grokBotWebhookSecret(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = env.GROK_BOT_WEBHOOK_SECRET?.trim();
+  if (!raw) return null;
+  return raw;
+}
+
+/** Header the Grok Bot webhook routine expects. Sender key is auth, not job content. */
+export function grokDispatchAuthHeaders(secret: string): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${secret}`,
+  };
+}
+
 export interface HttpsPoster {
-  (url: string, body: unknown): Promise<{ ok: boolean; status: number }>;
+  (url: string, body: unknown, headers?: Record<string, string>): Promise<{ ok: boolean; status: number }>;
 }
 
 const MAX_JOB_CONTENT = 4000;
@@ -111,18 +127,29 @@ export async function dispatchGrokJob(
     logger.warn("GROK_BOT_WEBHOOK_URL not set; skip Grok dispatch");
     return { dispatched: false, skipped: "missing-grok-webhook-url" };
   }
+  const secret = grokBotWebhookSecret(env);
+  if (!secret) {
+    logger.warn("GROK_BOT_WEBHOOK_SECRET not set; skip Grok dispatch");
+    return { dispatched: false, skipped: "missing-grok-webhook-secret" };
+  }
+  const headers = grokDispatchAuthHeaders(secret);
+  const discordToken = (env.DISCORD_BOT_TOKEN ?? env.DISCORD_TOKEN)?.trim();
+  if (discordToken && Object.values(headers).some((v) => v.includes(discordToken))) {
+    logger.error("refusing Grok dispatch: Discord bot token leaked into headers");
+    return { dispatched: false, skipped: "refused-discord-token-in-headers" };
+  }
   const poster =
     opts.poster ??
-    (async (u, body) => {
+    (async (u, body, hdrs) => {
       const res = await fetch(u, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: hdrs ?? headers,
         body: JSON.stringify(body),
       });
       return { ok: res.ok, status: res.status };
     });
   const capped = capGrokPayload(payload, env);
-  const result = await poster(url, capped);
+  const result = await poster(url, capped, headers);
   if (!result.ok) {
     logger.error({ status: result.status }, "Grok Bot webhook dispatch failed");
   }

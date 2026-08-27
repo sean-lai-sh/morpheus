@@ -61,6 +61,7 @@ Documented empty in `.env.example`. Inject via Doppler **on the Mini** or the Gr
 | `DISCORD_BOT_TOKEN` | **Mini only** | Official bot token. Legacy alias: `DISCORD_TOKEN`. **Never** on Grok Bot. |
 | `DISCORD_GUILD_ID` | Mini | Guild snowflake |
 | `GROK_BOT_WEBHOOK_URL` | **Mini** | HTTPS URL of the Grok Bot routine. Thin job POST. |
+| `GROK_BOT_WEBHOOK_SECRET` | **Mini** | Sender key. Mini sends `Authorization: Bearer`. Not in the JSON body. Never on Grok as `DISCORD_BOT_TOKEN`. |
 | `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP` | Mini + Grok (matching scope) | Tailscale `/v1/fs` + optional job complete. Namespace from which secret matched. |
 | `MORPHEUS_BASE_URL` | **Grok Bot** | Tailnet URL of Mini Morpheus HTTP. Not a public URL. |
 | `DISCORD_WEBHOOK_SPONSORS` | **Grok Bot** | Incoming webhook for `#sponsors` |

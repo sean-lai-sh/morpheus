@@ -12,7 +12,7 @@ Grok Bot then **live-searches the Morpheus index** over Tailscale (`/v1/fs/searc
 
 - `src/notify/grok-dispatch.ts` (sketched; `first_pass: true`, payload caps)
 - Wire from the mention/job path (#29) after a **small** SQLite first-pass
-- `.env.example` — `GROK_BOT_WEBHOOK_URL=` empty placeholder on the Mini
+- `.env.example` — `GROK_BOT_WEBHOOK_URL=` empty placeholder on the Mini; `GROK_BOT_WEBHOOK_SECRET=` for `Authorization: Bearer <sender key>` (auth header only, not in the JSON body)
 
 ## Payload (first-pass only)
 
@@ -27,6 +27,8 @@ Grok Bot then **live-searches the Morpheus index** over Tailscale (`/v1/fs/searc
 
 `capGrokPayload` already limits snippet count/bytes. Do not include `DISCORD_BOT_TOKEN`, channel webhook URLs, `MORPHEUS_BASE_URL`, or Mini filesystem paths. Grok already has `MORPHEUS_BASE_URL` in **its** secret store.
 
+Auth: Mini sends `Authorization: Bearer <GROK_BOT_WEBHOOK_SECRET>`. The sender key is **not** in the JSON body, query string, or Discord/job content. POST **https** to `GROK_BOT_WEBHOOK_URL` only — no undocumented Grok-box gateway.
+
 ## After Grok receives it
 
 Grok Bot returns `{ reply }` to Mini (job complete). Mini posts the member-facing answer with discord.js `message.reply` as the official bot (#30). Grok Bot never holds `DISCORD_TOKEN` and does **not** post via incoming webhooks on the @-reply path.
@@ -37,6 +39,8 @@ Discord incoming webhooks are **#36 only**: ops feed (`#sponsors` `#opportunitie
 
 - [ ] Mini with outbound HTTPS can dispatch
 - [ ] Missing `GROK_BOT_WEBHOOK_URL` skips (warn), does not crash ingest
+- [ ] Missing `GROK_BOT_WEBHOOK_SECRET` skips (warn), does not crash ingest
+- [ ] POST uses `Authorization: Bearer <GROK_BOT_WEBHOOK_SECRET>`; key is not in the body
 - [ ] Payload is marked `first_pass` and capped
 - [ ] Docs do **not** treat this webhook as “send the whole index”
 - [ ] Docs say missing URL = not activated (#42)

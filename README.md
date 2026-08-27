@@ -65,6 +65,13 @@ doppler setup --project morpheus-bot --config dev
 doppler secrets set DISCORD_BOT_TOKEN=...
 doppler secrets set DISCORD_GUILD_ID=...
 doppler secrets set GROK_BOT_WEBHOOK_URL=...
+<<<<<<< HEAD
+=======
+doppler secrets set GROK_BOT_WEBHOOK_SECRET=...   # Authorization: Bearer; Mini only
+# optional until Nia is deleted:
+doppler secrets set NIA_API_KEY=...
+doppler secrets set NIA_BASE_URL=https://apigcp.trynia.ai/v2
+>>>>>>> e92c815 (feat: Bearer sender key on Mini → Grok webhook POST)
 doppler secrets set LOG_LEVEL=info HEALTH_PORT=8080
 ```
 

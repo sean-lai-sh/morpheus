@@ -23,6 +23,7 @@ A scheduled “poll Mini every N minutes” Automation is **not** the primary co
 
 - [ ] Grok Bot webhook exists and returns 2xx for a capped JSON job pack
 - [ ] Mini `GROK_BOT_WEBHOOK_URL` points at it
+- [ ] Mini `GROK_BOT_WEBHOOK_SECRET` matches the routine’s sender key (`Authorization: Bearer`)
 - [ ] Grok secret store has `MORPHEUS_BASE_URL` (tailnet), scoped `MORPHEUS_API_TOKEN_*`, `DISCORD_WEBHOOK_*`
 - [ ] Grok does **not** have `DISCORD_BOT_TOKEN`
 - [ ] A test mention in an allowlisted channel produces a Grok run (not only a `jobs` row)
