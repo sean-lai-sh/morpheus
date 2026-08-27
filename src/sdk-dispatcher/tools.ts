@@ -1,5 +1,6 @@
 import type { SDKCustomTool } from "@cursor/sdk";
-import { sanitizeIndexPath } from "../context/paths.ts";
+import { getChannel } from "../config.ts";
+import { channelIndexPath, parseIndexPath, sanitizeIndexPath } from "../context/paths.ts";
 import { logger } from "../logger.ts";
 
 /**
@@ -12,8 +13,10 @@ import { logger } from "../logger.ts";
  *
  * On top of the server-side workspace boundary, these tools enforce the JOB's
  * scope client-side: a channel-scoped job may only tree/read paths inside its
- * allowlisted channels (and their threads), and search hits outside them are
- * filtered out. Prompt instructions are not authorization — this is.
+ * allowlisted channels (and their threads), search/links queries are narrowed
+ * to the allowed channels in the request itself (so a busy sibling channel
+ * cannot starve the allowed one out of a limited page), and every listing is
+ * post-filtered. Prompt instructions are not authorization — this is.
  */
 
 export type JobAccessScope =
@@ -36,10 +39,12 @@ export interface JobToolDeps {
   /** Workspace-scoped bearer for this job's namespace. Never echoed anywhere. */
   token: string;
   jobId: string;
-  /** Job scope: `workspace` = token subtree; `channel` = only these channel ids. */
+  /** Job scope from the CLAIMED ROW: `workspace` = token subtree; `channel` = only these ids. */
   scope: JobAccessScope;
   /** claimed_at from our claim, echoed on complete so a stale worker cannot win. */
   claimedAt?: number;
+  /** Secrets this process holds; scrubbed from every tool result before the model sees it. */
+  redactValues?: string[];
   fetcher?: Fetcher;
   timeoutMs?: number;
   /** Called after a 2xx job-complete so the dispatcher knows the reply landed. */
@@ -50,33 +55,55 @@ const MAX_TOOL_RESULT_CHARS = 30_000;
 const MAX_REPLY_CHARS = 4_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_PATH_CHARS = 200;
+const SEARCH_LIMIT_DEFAULT = 10;
+const LINKS_LIMIT_DEFAULT = 50;
 
 /**
- * Index-path segments carry their Discord id as a trailing `-<id>` (channel
- * and thread slugs both come from `channelSlug(name, id)`). A path is inside a
- * channel-scoped job iff at least one segment's REAL trailing id is
- * allowlisted. Root/namespace/category paths carry no ids → rejected (fail
- * closed). The server still owns existence + the workspace boundary; this
- * narrowing can only remove access, never add it.
+ * Authorization by PARSED identity, not by segment shape: the path must parse
+ * against channels.yml (`parseIndexPath`) and the resolved channel id — or the
+ * thread id — must be allowlisted. A category or slug that merely *looks* like
+ * `…-<allowed id>` (e.g. `/eboard/archive-1001/private-5005`) does not parse to
+ * an allowlisted channel and is refused. Root/namespace/category paths carry
+ * no channel identity → refused. The server still owns existence + the
+ * workspace boundary; this narrowing can only remove access, never add it.
  */
 export function pathInJobScope(rawPath: string, scope: JobAccessScope): boolean {
   if (rawPath.length > MAX_PATH_CHARS) return false;
   const sanitized = sanitizeIndexPath(rawPath);
   if (sanitized == null) return false;
   if (scope.kind === "workspace") return true;
-  if (scope.channelIds.length === 0) return false;
-  const trailingIds = sanitized
-    .split("/")
-    .filter(Boolean)
-    .map((segment) => /-(\d+)$/.exec(segment)?.[1])
-    .filter((id): id is string => Boolean(id));
-  return trailingIds.some((id) => scope.channelIds.includes(id));
+  const allowed = scope.channelIds;
+  if (allowed.length === 0) return false;
+  let parsed: ReturnType<typeof parseIndexPath>;
+  try {
+    parsed = parseIndexPath(sanitized);
+  } catch {
+    return false;
+  }
+  if (!parsed) return false;
+  switch (parsed.kind) {
+    case "root":
+    case "namespace":
+    case "category":
+      return false;
+    case "channel":
+    case "threadsDir":
+      return allowed.includes(parsed.channel.id);
+    case "thread":
+      return allowed.includes(parsed.channel.id) || allowed.includes(parsed.threadId);
+    case "message":
+      return (
+        allowed.includes(parsed.channel.id) ||
+        (parsed.threadId != null && allowed.includes(parsed.threadId))
+      );
+  }
 }
 
 /**
  * Drop `hits`/`nodes`/`documents`/`links` entries whose path is outside the job
  * scope. Filtering is by entry, never by field — surviving search hits keep
  * their full #50/#51 shape (`match: strict|loose`, `links[]`, permalink, …).
+ * Runs on the FULL response body, before any truncation.
  */
 export function filterListingForScope(bodyText: string, scope: JobAccessScope): string {
   if (scope.kind === "workspace") return bodyText;
@@ -102,19 +129,32 @@ export function filterListingForScope(bodyText: string, scope: JobAccessScope): 
   return JSON.stringify(obj);
 }
 
+/** Allowed ids that resolve to configured channels — the queryable narrowing set. */
+function allowedChannels(scope: JobAccessScope): Array<{ id: string; path: string }> {
+  if (scope.kind === "workspace") return [];
+  const out: Array<{ id: string; path: string }> = [];
+  for (const id of scope.channelIds) {
+    const channel = getChannel(id);
+    if (channel) out.push({ id, path: channelIndexPath(channel.workspace, channel) });
+  }
+  return out;
+}
+
+function scrubText(text: string, redactValues: string[]): string {
+  let out = text;
+  for (const v of redactValues) {
+    const s = v?.trim();
+    if (s && s.length >= 8) out = out.split(s).join("[redacted]");
+  }
+  return out;
+}
+
 function defaultFetcher(timeoutMs: number): Fetcher {
   return async (url, init) => {
-    const res = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    // No redirect following: a redirecting Morpheus URL must fail, not re-route bearers.
+    const res = await fetch(url, { ...init, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
     return { ok: res.ok, status: res.status, text: () => res.text() };
   };
-}
-
-function textResult(text: string): { content: Array<{ type: "text"; text: string }> } {
-  return { content: [{ type: "text", text: text.slice(0, MAX_TOOL_RESULT_CHARS) }] };
-}
-
-function errorResult(text: string): { content: Array<{ type: "text"; text: string }>; isError: true } {
-  return { content: [{ type: "text", text }], isError: true };
 }
 
 const OUT_OF_SCOPE = "path is outside this job's channel scope";
@@ -123,22 +163,31 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" && v.trim() !== "" ? v : undefined;
 }
 
+function capLimit(v: unknown, fallback: number): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) return fallback;
+  return Math.min(Math.max(Math.trunc(v), 1), 50);
+}
+
 export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> {
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetcher = deps.fetcher ?? defaultFetcher(timeoutMs);
   const headers = { Authorization: `Bearer ${deps.token}` };
   const jsonHeaders = { ...headers, "Content-Type": "application/json" };
+  const scrubList = [...(deps.redactValues ?? []), deps.token];
 
-  async function get(path: string): Promise<ReturnType<typeof textResult> | ReturnType<typeof errorResult>> {
-    try {
-      const res = await fetcher(`${deps.baseUrl}${path}`, { method: "GET", headers });
-      const body = await res.text();
-      if (!res.ok) return errorResult(`morpheus api ${res.status}`);
-      return textResult(body);
-    } catch (err) {
-      logger.error({ err, job_id: deps.jobId }, "morpheus fs GET failed");
-      return errorResult("morpheus api unreachable");
-    }
+  /** Filter (full body) → scrub secrets → cap. Order matters: never truncate before auth filtering. */
+  function finish(bodyText: string): { content: Array<{ type: "text"; text: string }> } {
+    const filtered = filterListingForScope(bodyText, deps.scope);
+    return { content: [{ type: "text", text: scrubText(filtered, scrubList).slice(0, MAX_TOOL_RESULT_CHARS) }] };
+  }
+
+  function errorResult(text: string): { content: Array<{ type: "text"; text: string }>; isError: true } {
+    return { content: [{ type: "text", text: scrubText(text, scrubList).slice(0, MAX_TOOL_RESULT_CHARS) }], isError: true };
+  }
+
+  async function getRaw(path: string): Promise<{ ok: boolean; status: number; text: string }> {
+    const res = await fetcher(`${deps.baseUrl}${path}`, { method: "GET", headers });
+    return { ok: res.ok, status: res.status, text: await res.text() };
   }
 
   async function post(
@@ -153,6 +202,36 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
     return { ok: res.ok, status: res.status, text: await res.text() };
   }
 
+  /** Merge arrays under `key` from several response bodies, deduped by `idOf`, capped. */
+  function mergeListings(
+    bodies: string[],
+    key: "hits" | "links",
+    idOf: (item: Record<string, unknown>) => string,
+    limit: number,
+  ): string {
+    const seen = new Set<string>();
+    const merged: unknown[] = [];
+    for (const body of bodies) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        continue;
+      }
+      const list = (parsed as Record<string, unknown>)?.[key];
+      if (!Array.isArray(list)) continue;
+      for (const item of list) {
+        if (merged.length >= limit) break;
+        if (!item || typeof item !== "object") continue;
+        const id = idOf(item as Record<string, unknown>);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        merged.push(item);
+      }
+    }
+    return JSON.stringify({ [key]: merged });
+  }
+
   return {
     morpheus_fs_tree: {
       description:
@@ -165,9 +244,14 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
       async execute(args) {
         const path = str(args.path) ?? "/";
         if (!pathInJobScope(path, deps.scope)) return errorResult(OUT_OF_SCOPE);
-        const result = await get(`/v1/fs/tree?path=${encodeURIComponent(path)}`);
-        if ("isError" in result) return result;
-        return textResult(filterListingForScope(result.content[0]?.text ?? "", deps.scope));
+        try {
+          const res = await getRaw(`/v1/fs/tree?path=${encodeURIComponent(path)}`);
+          if (!res.ok) return errorResult(`morpheus api ${res.status}`);
+          return finish(res.text);
+        } catch {
+          logger.error({ job_id: deps.jobId, tool: "morpheus_fs_tree" }, "morpheus fs GET failed");
+          return errorResult("morpheus api unreachable");
+        }
       },
     },
     morpheus_fs_search: {
@@ -186,21 +270,41 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
       async execute(args) {
         const query = str(args.query);
         if (!query) return errorResult("query is required");
-        const body: Record<string, unknown> = { query };
+        const limit = capLimit(args.limit, SEARCH_LIMIT_DEFAULT);
+        const base: Record<string, unknown> = { query, limit };
         const prefix = str(args.pathPrefix);
-        if (prefix != null) {
-          if (deps.scope.kind === "channel" && !pathInJobScope(prefix, deps.scope)) {
-            return errorResult(OUT_OF_SCOPE);
-          }
-          body.pathPrefix = prefix;
+        if (prefix != null && deps.scope.kind === "channel" && !pathInJobScope(prefix, deps.scope)) {
+          return errorResult(OUT_OF_SCOPE);
         }
-        if (typeof args.limit === "number") body.limit = args.limit;
+
+        // Channel scope without an explicit prefix: one query PER allowed
+        // channel, each narrowed in SQL via pathPrefix, so a busy sibling
+        // channel can never starve the allowed one out of the limited page.
+        let bodies: Array<Record<string, unknown>>;
+        if (deps.scope.kind === "channel" && prefix == null) {
+          const channels = allowedChannels(deps.scope);
+          bodies =
+            channels.length > 0
+              ? channels.map((c) => ({ ...base, pathPrefix: c.path }))
+              : [base]; // thread-only allowlists: post-filter below is the boundary
+        } else {
+          bodies = [prefix != null ? { ...base, pathPrefix: prefix } : base];
+        }
+
         try {
-          const res = await post("/v1/fs/search", body);
-          if (!res.ok) return errorResult(`morpheus api ${res.status}`);
-          return textResult(filterListingForScope(res.text, deps.scope));
-        } catch (err) {
-          logger.error({ err, job_id: deps.jobId }, "morpheus fs search failed");
+          const texts: string[] = [];
+          for (const body of bodies) {
+            const res = await post("/v1/fs/search", body);
+            if (!res.ok && bodies.length === 1) return errorResult(`morpheus api ${res.status}`);
+            if (res.ok) texts.push(res.text);
+          }
+          const merged =
+            texts.length === 1
+              ? texts[0]!
+              : mergeListings(texts, "hits", (h) => String(h.id ?? JSON.stringify(h)), limit);
+          return finish(merged);
+        } catch {
+          logger.error({ job_id: deps.jobId, tool: "morpheus_fs_search" }, "morpheus fs search failed");
           return errorResult("morpheus api unreachable");
         }
       },
@@ -217,9 +321,14 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
         const path = str(args.path);
         if (!path) return errorResult("path is required");
         if (!pathInJobScope(path, deps.scope)) return errorResult(OUT_OF_SCOPE);
-        const result = await get(`/v1/fs/read?path=${encodeURIComponent(path)}`);
-        if ("isError" in result) return result;
-        return textResult(filterListingForScope(result.content[0]?.text ?? "", deps.scope));
+        try {
+          const res = await getRaw(`/v1/fs/read?path=${encodeURIComponent(path)}`);
+          if (!res.ok) return errorResult(`morpheus api ${res.status}`);
+          return finish(res.text);
+        } catch {
+          logger.error({ job_id: deps.jobId, tool: "morpheus_fs_read" }, "morpheus fs GET failed");
+          return errorResult("morpheus api unreachable");
+        }
       },
     },
     morpheus_fs_links: {
@@ -241,29 +350,52 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
         const params = new URLSearchParams();
         const kind = str(args.kind);
         if (kind) params.set("kind", kind);
-        for (const name of ["since", "until", "limit"] as const) {
+        for (const name of ["since", "until"] as const) {
           const v = args[name];
           if (typeof v === "number" && Number.isFinite(v)) params.set(name, String(Math.trunc(v)));
         }
-        let channel = str(args.channel);
+        const limit = capLimit(args.limit, LINKS_LIMIT_DEFAULT);
+        params.set("limit", String(limit));
+
+        const requested = str(args.channel);
+        // Which channels to query: fan out over every allowed channel so a busy
+        // sibling can never starve the allowed ones out of the limited page.
+        let channelParams: Array<string | null>;
         if (deps.scope.kind === "channel") {
-          if (channel != null) {
+          if (requested != null) {
             // Server-side `channel` also resolves names across the whole token
             // subtree — under channel scope only allowlisted numeric ids pass.
-            if (!/^\d+$/.test(channel) || !deps.scope.channelIds.includes(channel)) {
+            if (!/^\d+$/.test(requested) || !deps.scope.channelIds.includes(requested)) {
               return errorResult(OUT_OF_SCOPE);
             }
-          } else if (deps.scope.channelIds.length === 1) {
-            channel = deps.scope.channelIds[0];
+            channelParams = [requested];
+          } else {
+            const channels = allowedChannels(deps.scope);
+            // Thread-only allowlists: one unrestricted query; post-filter is the boundary.
+            channelParams = channels.length > 0 ? channels.map((c) => c.id) : [null];
           }
-          // Multiple allowed ids without an explicit channel: the response
-          // post-filter below is the boundary (entries carry their index path).
+        } else {
+          channelParams = [requested ?? null];
         }
-        if (channel) params.set("channel", channel);
-        const qs = params.toString();
-        const result = await get(`/v1/links${qs ? `?${qs}` : ""}`);
-        if ("isError" in result) return result;
-        return textResult(filterListingForScope(result.content[0]?.text ?? "", deps.scope));
+
+        try {
+          const texts: string[] = [];
+          for (const channel of channelParams) {
+            const qs = new URLSearchParams(params);
+            if (channel) qs.set("channel", channel);
+            const res = await getRaw(`/v1/links?${qs.toString()}`);
+            if (!res.ok && channelParams.length === 1) return errorResult(`morpheus api ${res.status}`);
+            if (res.ok) texts.push(res.text);
+          }
+          const merged =
+            texts.length === 1
+              ? texts[0]!
+              : mergeListings(texts, "links", (l) => String(l.fileId ?? l.url ?? JSON.stringify(l)), limit);
+          return finish(merged);
+        } catch {
+          logger.error({ job_id: deps.jobId, tool: "morpheus_fs_links" }, "morpheus links GET failed");
+          return errorResult("morpheus api unreachable");
+        }
       },
     },
     morpheus_job_complete: {
@@ -282,14 +414,14 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
         if (!reply) return errorResult("reply is required");
         try {
           const res = await post(`/v1/jobs/${encodeURIComponent(deps.jobId)}/complete`, {
-            reply,
+            reply: scrubText(reply, scrubList),
             ...(deps.claimedAt != null ? { claimed_at: deps.claimedAt } : {}),
           });
           if (!res.ok) return errorResult(`job complete failed (${res.status})`);
           deps.onComplete?.(reply);
-          return textResult("reply delivered to the official bot");
-        } catch (err) {
-          logger.error({ err, job_id: deps.jobId }, "job complete POST failed");
+          return { content: [{ type: "text", text: "reply delivered to the official bot" }] };
+        } catch {
+          logger.error({ job_id: deps.jobId, tool: "morpheus_job_complete" }, "job complete POST failed");
           return errorResult("job complete unreachable");
         }
       },

@@ -48,10 +48,36 @@ describe("parseSdkDispatcherEnv", () => {
     expect(() => parseSdkDispatcherEnv({ CURSOR_SDK_LISTEN_HOST: "192.168.1.10" })).toThrow(/loopback/);
   });
 
-  test("rejects plain-http MORPHEUS_BASE_URL off loopback/Tailscale", () => {
-    expect(() => parseSdkDispatcherEnv({ MORPHEUS_BASE_URL: "http://example.com:8080" })).toThrow(
-      /loopback\/Tailscale/,
-    );
+  test("MORPHEUS_BASE_URL: arbitrary internet hosts are refused for http AND https", () => {
+    for (const url of [
+      "http://example.com:8080",
+      "https://example.com:8080",
+      "https://evil.ts.net.attacker.com:8080",
+    ]) {
+      expect(() => parseSdkDispatcherEnv({ MORPHEUS_BASE_URL: url })).toThrow(/loopback, Tailscale/);
+    }
+  });
+
+  test("MORPHEUS_BASE_URL: credentials, query, and fragments are refused", () => {
+    for (const url of [
+      "http://user:pw@127.0.0.1:8080",
+      "http://token@127.0.0.1:8080",
+      "http://127.0.0.1:8080/?x=1",
+      "http://127.0.0.1:8080/#frag",
+    ]) {
+      expect(() => parseSdkDispatcherEnv({ MORPHEUS_BASE_URL: url })).toThrow(/credentials\/query\/fragment|loopback/);
+    }
+  });
+
+  test("MORPHEUS_BASE_URL: loopback, Tailscale addresses, and *.ts.net pass", () => {
+    for (const url of [
+      "http://127.0.0.1:8080",
+      "http://100.64.1.2:8080",
+      "https://mini.tailnet-1234.ts.net:8080",
+      "http://[fd7a:115c:a1e0::1]:8080",
+    ]) {
+      expect(parseSdkDispatcherEnv({ MORPHEUS_BASE_URL: url }).morpheusBaseUrl).toBe(url);
+    }
   });
 
   test("rejects short webhook secrets", () => {

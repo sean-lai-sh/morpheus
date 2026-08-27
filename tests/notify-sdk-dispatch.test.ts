@@ -128,6 +128,34 @@ describe("redactSecrets / findLeakedSecretEnv (fail-closed tripwire)", () => {
     expect(out).toContain("[redacted]");
   });
 
+  test("scanner init failure fails CLOSED: no channels.yml → dispatch refused, nothing posted", async () => {
+    const { withTempCwd } = await import("./helpers.ts");
+    const { resetChannelsForTest } = await import("../src/config.ts");
+    // chdir to a dir with NO config/channels.yml so loadWorkspaceTokens throws.
+    const bare = withTempCwd();
+    resetChannelsForTest();
+    try {
+      const { poster, posts } = countingPoster();
+      const sdk = await dispatchSdkJob(payload, { env: sdkEnv(), poster });
+      expect(sdk.dispatched).toBe(false);
+      // Workspace membership checks run before the scanner and also fail closed
+      // without config; either way nothing may leave the process.
+      expect(["secrets-unavailable", "namespace-required"]).toContain(sdk.skipped!);
+      const grok = await dispatchGrokJob(payload, {
+        env: sdkEnv({ GROK_BOT_WEBHOOK_URL: GROK_URL, GROK_BOT_WEBHOOK_SECRET: GROK_SECRET }),
+        poster,
+      });
+      expect(grok.dispatched).toBe(false);
+      expect(posts.length).toBe(0);
+      // The scanner itself refuses rather than reporting "no secrets".
+      expect(() => redactSecrets("any text", sdkEnv())).toThrow();
+      expect(() => findLeakedSecretEnv("any text", sdkEnv())).toThrow();
+    } finally {
+      bare.cleanup();
+      resetChannelsForTest();
+    }
+  });
+
   test("findLeakedSecretEnv names the env var of a surviving secret, never its value", () => {
     const env = sdkEnv({ CURSOR_API_KEY: "cur_api_key_shared_doppler_config" });
     const leaked = findLeakedSecretEnv(JSON.stringify({ content: `oops ${SDK_SECRET}` }), env);

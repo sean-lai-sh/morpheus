@@ -148,6 +148,11 @@ export function createWebhookHandler(deps: WebhookDeps): (req: Request) => Promi
       return json(401, { error: "unauthorized" });
     }
 
+    // Refuse oversized bodies from the declared length, before buffering.
+    const declared = Number(req.headers.get("content-length") ?? "");
+    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+      return json(413, { error: "payload too large" });
+    }
     const bodyText = await req.text();
     if (Buffer.byteLength(bodyText) > MAX_BODY_BYTES) {
       return json(413, { error: "payload too large" });

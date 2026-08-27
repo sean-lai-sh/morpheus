@@ -38,7 +38,10 @@ const schema = z.object({
   CURSOR_SDK_CWD: z.preprocess(emptyToUndef, z.string().min(1).optional()),
   /**
    * Morpheus /v1 base (same box: http://127.0.0.1:<HEALTH_PORT>, or the Mini's
-   * Tailscale URL). http is loopback/Tailscale-only; https allowed anywhere.
+   * Tailscale URL). Workspace bearers are sent here on every claim/fs call, so
+   * the host must be loopback, Tailscale, or *.ts.net for http AND https —
+   * never an arbitrary internet host — and the URL may carry no credentials,
+   * query, or fragment. Redirects are never followed by the sibling's fetchers.
    */
   MORPHEUS_BASE_URL: z.preprocess(
     emptyToUndef,
@@ -49,13 +52,14 @@ const schema = z.object({
       .refine((u) => {
         try {
           const parsed = new URL(u);
-          if (parsed.protocol === "https:") return true;
-          if (parsed.protocol === "http:") return isAllowedListenHost(parsed.hostname);
-          return false;
+          if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+          if (parsed.username || parsed.password || parsed.search || parsed.hash) return false;
+          const host = parsed.hostname.toLowerCase();
+          return isAllowedListenHost(host) || host.endsWith(".ts.net");
         } catch {
           return false;
         }
-      }, "must be https, or http on loopback/Tailscale"),
+      }, "host must be loopback, Tailscale (100.64/10, fd7a:115c:a1e0::/48), or *.ts.net, with no credentials/query/fragment"),
   ),
 });
 

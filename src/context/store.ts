@@ -296,12 +296,19 @@ function search(q: SearchQuery): SearchHit[] {
     q.pathPrefix && q.pathPrefix.endsWith("/") && q.pathPrefix.length > 1
       ? q.pathPrefix.slice(0, -1)
       : q.pathPrefix;
+  let effQ = q;
   if (prefix) {
     const prefixIds = channelIdsForPathPrefix(prefix, q.scope);
     if (prefixIds) {
       const allowed = new Set(prefixIds);
       nsIds = nsIds.filter((id) => allowed.has(id));
       if (nsIds.length === 0) return [];
+    }
+    // A thread prefix narrows in SQL too (thread_id filter), so a busy parent
+    // channel cannot starve its own thread out of the limited candidate page.
+    const parsedPrefix = parseIndexPath(prefix);
+    if (parsedPrefix?.kind === "thread" && !q.threadId) {
+      effQ = { ...q, threadId: parsedPrefix.threadId };
     }
   }
 
@@ -333,10 +340,10 @@ function search(q: SearchQuery): SearchHit[] {
     }
   };
 
-  collect(ftsRows(q, strict, nsIds, channelFilter, limit * 4), "strict");
+  collect(ftsRows(effQ, strict, nsIds, channelFilter, limit * 4), "strict");
   const loose = toFtsQueryLoose(q.query);
   if (hits.length < limit && loose && loose !== strict) {
-    collect(ftsRows(q, loose, nsIds, channelFilter, limit * 4), "loose");
+    collect(ftsRows(effQ, loose, nsIds, channelFilter, limit * 4), "loose");
   }
 
   const links = linksForHits(hits.map((h) => h.id));

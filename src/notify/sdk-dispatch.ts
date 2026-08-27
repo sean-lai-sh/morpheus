@@ -114,11 +114,17 @@ export async function dispatchSdkJob(
         return { ok: false, status: 0 };
       }
     });
-  const capped = capGrokPayload(payload, env);
-  const leaked = findLeakedSecretEnv(JSON.stringify(capped), env);
-  if (leaked) {
-    logger.error({ leaked_env: leaked, job_id: payload.job.id }, "refusing SDK dispatch: a Mini secret survived redaction (fail closed)");
-    return { dispatched: false, skipped: "refused-secret-in-payload" };
+  let capped: GrokJobPayload;
+  try {
+    capped = capGrokPayload(payload, env);
+    const leaked = findLeakedSecretEnv(JSON.stringify(capped), env);
+    if (leaked) {
+      logger.error({ leaked_env: leaked, job_id: payload.job.id }, "refusing SDK dispatch: a Mini secret survived redaction (fail closed)");
+      return { dispatched: false, skipped: "refused-secret-in-payload" };
+    }
+  } catch (err) {
+    logger.error({ err, job_id: payload.job.id }, "refusing SDK dispatch: secret scanner unavailable (fail closed)");
+    return { dispatched: false, skipped: "secrets-unavailable" };
   }
   const result = await poster(url, capped, headers);
   if (!result.ok) {

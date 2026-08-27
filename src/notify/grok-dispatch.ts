@@ -21,12 +21,13 @@ function knownSecrets(env: Env): Array<{ name: string; value: string | undefined
   ];
 }
 
+/**
+ * No try/catch: if the configured workspace bearers cannot be enumerated, the
+ * secret scanner must fail CLOSED (callers refuse to dispatch), never behave
+ * as if there were no secrets to strip.
+ */
 function loadWorkspaceTokenEntries(): Array<{ name: string; value: string }> {
-  try {
-    return loadWorkspaceTokens().map((t) => ({ name: t.envName, value: t.token }));
-  } catch {
-    return [];
-  }
+  return loadWorkspaceTokens().map((t) => ({ name: t.envName, value: t.token }));
 }
 
 /** Strip Mini secrets from untrusted Discord text before it leaves the process. */
@@ -313,11 +314,19 @@ export async function dispatchGrokJob(
         return { ok: false, status: 0 };
       }
     });
-  const capped = capGrokPayload(payload, env);
-  const leaked = findLeakedSecretEnv(JSON.stringify(capped), env);
-  if (leaked) {
-    logger.error({ leaked_env: leaked, job_id: payload.job.id }, "refusing Grok dispatch: a Mini secret survived redaction (fail closed)");
-    return { dispatched: false, skipped: "refused-secret-in-payload" };
+  let capped: GrokJobPayload;
+  try {
+    capped = capGrokPayload(payload, env);
+    const leaked = findLeakedSecretEnv(JSON.stringify(capped), env);
+    if (leaked) {
+      logger.error({ leaked_env: leaked, job_id: payload.job.id }, "refusing Grok dispatch: a Mini secret survived redaction (fail closed)");
+      return { dispatched: false, skipped: "refused-secret-in-payload" };
+    }
+  } catch (err) {
+    // The redactor/scanner could not enumerate the Mini's secrets — that is a
+    // refusal to dispatch, never "no secrets to strip".
+    logger.error({ err, job_id: payload.job.id }, "refusing Grok dispatch: secret scanner unavailable (fail closed)");
+    return { dispatched: false, skipped: "secrets-unavailable" };
   }
   const result = await poster(url, capped, headers);
   if (!result.ok) {

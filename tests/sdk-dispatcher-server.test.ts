@@ -106,6 +106,23 @@ describe("routing and limits", () => {
     expect(enqueued.length).toBe(0);
   });
 
+  test("oversized declared Content-Length → 413 without buffering the body", async () => {
+    const { handler, enqueued } = makeDeps();
+    const res = await handler(
+      new Request(`${BASE}${WEBHOOK_PATH}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": "9999999",
+          Authorization: `Bearer ${SECRET}`,
+        },
+        body: JSON.stringify(pack),
+      }),
+    );
+    expect(res.status).toBe(413);
+    expect(enqueued.length).toBe(0);
+  });
+
   test("full per-key queue → 429, not 202", async () => {
     const { handler, enqueued } = makeDeps({ full: true });
     const res = await handler(post(pack, `Bearer ${SECRET}`));
