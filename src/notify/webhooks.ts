@@ -19,15 +19,18 @@ function isDiscordHost(hostname: string): boolean {
  * Percent-decode then lowercase path segments. WHATWG `URL` leaves encodings
  * of unreserved characters in `pathname` (`%77` stays `%77`), but Discord's
  * router decodes once — `/api/%77ebhooks/{id}/{token}` executes as a webhook.
- * One decode matches Discord (double-encoded forms are a generic 404 there).
+ * Discord also treats a decoded `%2F` as a path separator, so decoded segments
+ * are re-split on `/` (`/api/webhooks%2F{id}%2F{token}` executes too). One
+ * decode matches Discord (double-encoded `%252F`/`%2577…` forms are a generic
+ * 404 there, so they are intentionally NOT separators/matches here).
  * Malformed encoding → null; Discord-host callers must fail closed on it.
  */
 function decodedPathSegments(pathname: string): string[] | null {
   try {
     return pathname
       .split("/")
-      .filter(Boolean)
-      .map((seg) => decodeURIComponent(seg).toLowerCase());
+      .flatMap((seg) => decodeURIComponent(seg).toLowerCase().split("/"))
+      .filter(Boolean);
   } catch {
     return null;
   }

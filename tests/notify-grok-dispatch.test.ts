@@ -134,6 +134,53 @@ describe("GROK_BOT_WEBHOOK_URL refuses Discord incoming webhooks on every Discor
     expect(grokBotWebhookUrl({ ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: doubleEncoded })).toBe(doubleEncoded);
   });
 
+  test("encoded-slash (%2F) webhook paths are refused at both layers (Discord splits on the decoded separator)", () => {
+    // All live-verified as execute paths on Discord (code 10015).
+    const hooks = [
+      "https://discord.com/api/webhooks%2F123456789012345678/tok-tok-tok",
+      "https://discord.com/api/webhooks%2F123456789012345678%2Ftok-tok-tok",
+      "https://discord.com/api/%2fwebhooks/123456789012345678/tok-tok-tok",
+      "https://discord.com/api/v10%2Fwebhooks/123456789012345678/tok-tok-tok",
+      "https://discord.com/api/v10/webhooks%2F123456789012345678%2Ftok-tok-tok",
+      "https://discord.com/api/webhooks/123456789012345678%2Ftok-tok-tok",
+      "https://discord.com/api/%2fwebhooks%2F123456789012345678%2Ftok-tok-tok",
+    ];
+    for (const hook of hooks) {
+      expect(() => envFor({ GROK_BOT_WEBHOOK_URL: hook })).toThrow(/Discord incoming webhook/);
+      const env: Env = { ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: hook };
+      expect(grokBotWebhookUrl(env)).toBeNull();
+    }
+    // One-decode control: double-encoded %252F is a generic 404 on Discord —
+    // it must not become a separator after the single decode.
+    const doubleEncoded = "https://discord.com/api/webhooks%252F123456789012345678%252Ftok-tok-tok";
+    expect(grokBotWebhookUrl({ ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: doubleEncoded })).toBe(doubleEncoded);
+  });
+
+  test("dispatchGrokJob refuses an encoded-slash webhook path; the poster is never called", async () => {
+    const env: Env = {
+      ...liveEnv(EBOARD),
+      GROK_BOT_WEBHOOK_URL: "https://discord.com/api/webhooks%2F123456789012345678%2Ftok-tok-tok",
+    };
+    let posted = 0;
+    const result = await dispatchGrokJob(
+      {
+        job: { id: "j-encslash", namespace: EBOARD, discord_channel_id: SPONSORS, content: "hi there friends" },
+        snippets: [],
+        first_pass: true,
+      },
+      {
+        env,
+        poster: async () => {
+          posted += 1;
+          return { ok: true, status: 204 };
+        },
+      },
+    );
+    expect(result.dispatched).toBe(false);
+    expect(result.skipped).toBe("refused-discord-incoming-webhook");
+    expect(posted).toBe(0);
+  });
+
   test("dispatchGrokJob refuses a percent-encoded webhook path; the poster is never called", async () => {
     const env: Env = {
       ...liveEnv(EBOARD),
