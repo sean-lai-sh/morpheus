@@ -2,6 +2,7 @@ import type { Client, Message, TextBasedChannel } from "discord.js";
 import { loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 import { redactSecrets } from "../notify/grok-dispatch.ts";
+import { stopJobTyping } from "./typing.ts";
 import {
   failJob,
   getJob,
@@ -192,6 +193,8 @@ export async function completeJobWithReply(
     const status = prep.reason === "not-found" ? 404 : 409;
     return { ok: false, status, error: prep.reason };
   }
+  // Stop the typing loop once complete is accepted so a pulse cannot land after the reply.
+  stopJobTyping(id);
   if (prep.alreadyCompleted) {
     if (prep.job.status === "claimed" && prep.job.result_discord_message_id) {
       const done = markJobCompleted(id, prep.job.result_discord_message_id, opts.now);
@@ -254,5 +257,6 @@ export function failJobAsWorker(
     if (!existing) return { ok: false, status: 404, error: "not-found" };
     return { ok: false, status: 409, error: "claimed-by-mismatch" };
   }
+  stopJobTyping(id);
   return { ok: true, status: 200, job };
 }

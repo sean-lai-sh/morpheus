@@ -47,7 +47,7 @@ Auth: Mini sends `Authorization: Bearer <GROK_BOT_WEBHOOK_SECRET>` from `loadEnv
 
 ## After Grok receives it
 
-Grok Bot returns `{ reply }` to Mini (job complete). Mini posts the member-facing answer with discord.js `message.reply` as the official bot (#30). Grok Bot never holds `DISCORD_TOKEN` and does **not** post via incoming webhooks on the @-reply path.
+Grok Bot returns `{ reply }` to Mini (job complete). Mini posts the member-facing answer with discord.js `message.reply` as the official bot (#30). After the wakeup POST returns 2xx, Mini also pulses `channel.sendTyping()` on that official client in the job's Discord channel (thread if the job has one) until reply/fail/`DISCORD_TYPING_MAX_MS`. Optional: `DISCORD_TYPING_ON_DISPATCH=false`. Grok Bot never holds `DISCORD_TOKEN` and does **not** post via incoming webhooks on the @-reply path. There is no Grok→Mini typing HTTP route — an extra Tailscale round-trip is worse than typing immediately on 2xx.
 
 Discord incoming webhooks are **#36 only**: ops feed (`#sponsors` `#opportunities` `#speakers` / hello@ inbound), not conversational replies. GitHub issues remain implementation-only (#31).
 

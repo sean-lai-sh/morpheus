@@ -12,6 +12,12 @@ import {
   type JobRow,
 } from "../storage/jobs.ts";
 import { mentionChannelIds, resolveJobChannelScope } from "./job-scope.ts";
+import {
+  startJobTyping,
+  type StartJobTypingOpts,
+  type TypingClient,
+  type TypingScheduler,
+} from "./typing.ts";
 import { isMentionTrigger, isReplyToBot, memberRoleIds, mentionUserIds, threadParentId } from "./triggers.ts";
 
 export type { ChannelResolver };
@@ -66,12 +72,17 @@ export interface TryEnqueueOpts {
   resolveWorkspace?: (id: string) => { parent?: string } | undefined;
   /** Injectable workspace-subtree lookup for mentioned channels. Default: channels.yml. */
   visibleWorkspaces?: (root: string) => ReadonlySet<string>;
+  /** Tests inject sendTyping so dispatch tests never touch Discord. */
+  typingClient?: TypingClient;
+  sendTyping?: (channelId: string) => Promise<void>;
+  typingScheduler?: TypingScheduler;
 }
 
 export interface TryEnqueueResult {
   job: JobRow | null;
   skipped?: EnqueueSkipReason;
   dispatched?: boolean;
+  typingStarted?: boolean;
 }
 
 export function candidateFromMessage(message: Message, botUserId: string): JobCandidate {
@@ -219,14 +230,24 @@ export async function tryEnqueueJob(
     poster: opts.poster,
     env: loaded,
     resolveChannel,
+    typingClient: opts.typingClient,
+    sendTyping: opts.sendTyping,
+    typingScheduler: opts.typingScheduler,
   });
-  return { job, dispatched };
+  return { job, dispatched: dispatched.dispatched, typingStarted: dispatched.typingStarted };
 }
 
 export async function dispatchEnqueuedJob(
   job: JobRow,
-  opts: { poster?: HttpsPoster; env?: Env; resolveChannel?: ChannelResolver } = {},
-): Promise<boolean> {
+  opts: {
+    poster?: HttpsPoster;
+    env?: Env;
+    resolveChannel?: ChannelResolver;
+    typingClient?: TypingClient;
+    sendTyping?: (channelId: string) => Promise<void>;
+    typingScheduler?: TypingScheduler;
+  } = {},
+): Promise<{ dispatched: boolean; typingStarted?: boolean }> {
   try {
     const snippets = firstPassSnippets(job, 12, opts.resolveChannel ?? getChannel);
     const result = await dispatchGrokJob(
@@ -247,9 +268,30 @@ export async function dispatchEnqueuedJob(
       },
       { env: opts.env, poster: opts.poster },
     );
-    return result.dispatched;
+    if (!result.dispatched) return { dispatched: false };
+    const typing = await startTypingAfterDispatch(job, opts);
+    return { dispatched: true, typingStarted: typing };
   } catch (err) {
     logger.error({ err, job_id: job.id }, "Grok dispatch failed; job remains queued");
+    return { dispatched: false };
+  }
+}
+
+async function startTypingAfterDispatch(
+  job: JobRow,
+  opts: Pick<TryEnqueueOpts, "env" | "typingClient" | "sendTyping" | "typingScheduler">,
+): Promise<boolean> {
+  const typingOpts: StartJobTypingOpts = {
+    env: opts.env,
+    client: opts.typingClient,
+    sendTyping: opts.sendTyping,
+    scheduler: opts.typingScheduler,
+  };
+  try {
+    const started = await startJobTyping(job, typingOpts);
+    return started.started;
+  } catch (err) {
+    logger.warn({ err, job_id: job.id }, "job typing failed to start; dispatch still succeeded");
     return false;
   }
 }

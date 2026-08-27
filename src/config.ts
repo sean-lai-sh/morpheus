@@ -98,6 +98,17 @@ const envSchema = z
       z.coerce.number().int().min(1_000).max(86_400_000).default(600_000),
     ),
     DISCORD_POST_REPLIES: z.preprocess(parseBoolish, z.boolean().default(true)),
+    /**
+     * After GROK_BOT_WEBHOOK_URL returns 2xx, official-bot sendTyping in the
+     * job's Discord channel (thread if the job has one). Mini-side only — Grok
+     * never holds DISCORD_BOT_TOKEN. Set false to disable the indicator.
+     */
+    DISCORD_TYPING_ON_DISPATCH: z.preprocess(parseBoolish, z.boolean().default(true)),
+    /** Stop refreshing typing even if the job is still queued/claimed. Discord pulses last ~10s. */
+    DISCORD_TYPING_MAX_MS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(10_000).max(600_000).default(180_000),
+    ),
     GITHUB_ISSUE_REPO: z.preprocess(emptyToUndef, z.string().min(1).optional()),
     /** Workspace ids whose jobs may carry a GitHub issue URL. Empty = none (default deny). */
     GITHUB_ISSUES_WORKSPACES: z.preprocess(parseIdList, z.array(z.string().regex(WORKSPACE_ID)).default([])),

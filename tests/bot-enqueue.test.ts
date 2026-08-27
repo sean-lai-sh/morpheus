@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { withTempDb } from "./helpers.ts";
 import {
   DEV_CHAT,
@@ -21,6 +21,7 @@ import { parseEnv } from "../src/config.ts";
 import type { ChannelResolver } from "../src/context/namespace.ts";
 import { upsertMessage } from "../src/storage/messages.ts";
 import { getJobByDiscordMessageId } from "../src/storage/jobs.ts";
+import { stopAllJobTyping } from "../src/bot/typing.ts";
 
 const ROLE = "role-eboard";
 const BOT = "bot-1";
@@ -60,6 +61,9 @@ const db = withTempDb();
 let cfg: ReturnType<typeof withWorkspaceConfig>;
 beforeAll(() => {
   cfg = withWorkspaceConfig();
+});
+afterEach(() => {
+  stopAllJobTyping();
 });
 afterAll(() => {
   cfg.cleanup();
@@ -386,6 +390,105 @@ describe("tryEnqueueJob grok dispatch", () => {
     expect(captured.job?.channel_ids).toEqual([SPONSORS]);
     expect(captured.snippets?.length ?? 0).toBeGreaterThan(0);
     expect(captured.snippets?.every((s) => !s.path || s.path.startsWith(`${SPONSORS_PATH}/`))).toBe(true);
+  });
+
+  test("successful 2xx dispatch starts typing in the job channel", async () => {
+    const typed: string[] = [];
+    const r = await tryEnqueueJob(candidate({ discordMessageId: "e-typing-on", authorId: "disp-type" }), {
+      ...policy,
+      dispatch: true,
+      env: parseEnv({
+        ...process.env,
+        GROK_BOT_WEBHOOK_URL: "https://example.com/grok-routine",
+        GROK_BOT_WEBHOOK_SECRET: "grok-sender-key-for-tests",
+        GROK_DISPATCH_WORKSPACES: DISPATCHABLE,
+        DISCORD_TYPING_ON_DISPATCH: "true",
+      }),
+      poster: async () => ({ ok: true, status: 200 }),
+      sendTyping: async (id) => {
+        typed.push(id);
+      },
+    });
+    expect(r.dispatched).toBe(true);
+    expect(r.typingStarted).toBe(true);
+    expect(typed).toEqual([SPONSORS]);
+  });
+
+  test("DISCORD_TYPING_ON_DISPATCH=false skips typing after 2xx", async () => {
+    const typed: string[] = [];
+    const r = await tryEnqueueJob(candidate({ discordMessageId: "e-typing-off", authorId: "disp-type-off" }), {
+      ...policy,
+      dispatch: true,
+      env: parseEnv({
+        ...process.env,
+        GROK_BOT_WEBHOOK_URL: "https://example.com/grok-routine",
+        GROK_BOT_WEBHOOK_SECRET: "grok-sender-key-for-tests",
+        GROK_DISPATCH_WORKSPACES: DISPATCHABLE,
+        DISCORD_TYPING_ON_DISPATCH: "false",
+      }),
+      poster: async () => ({ ok: true, status: 200 }),
+      sendTyping: async (id) => {
+        typed.push(id);
+      },
+    });
+    expect(r.dispatched).toBe(true);
+    expect(r.typingStarted).toBe(false);
+    expect(typed).toEqual([]);
+  });
+
+  test("failed webhook does not start typing", async () => {
+    const typed: string[] = [];
+    const r = await tryEnqueueJob(candidate({ discordMessageId: "e-typing-fail", authorId: "disp-type-fail" }), {
+      ...policy,
+      dispatch: true,
+      env: parseEnv({
+        ...process.env,
+        GROK_BOT_WEBHOOK_URL: "https://example.com/grok-routine",
+        GROK_BOT_WEBHOOK_SECRET: "grok-sender-key-for-tests",
+        GROK_DISPATCH_WORKSPACES: DISPATCHABLE,
+      }),
+      poster: async () => ({ ok: false, status: 500 }),
+      sendTyping: async (id) => {
+        typed.push(id);
+      },
+    });
+    expect(r.dispatched).toBe(false);
+    expect(r.typingStarted).toBeUndefined();
+    expect(typed).toEqual([]);
+  });
+
+  test("thread dispatch types in the thread id, not the parent", async () => {
+    const threadId = "555555555555555555";
+    const typed: string[] = [];
+    const r = await tryEnqueueJob(
+      candidate({
+        discordMessageId: "e-typing-thread",
+        authorId: "disp-type-thread",
+        discordChannelId: threadId,
+        discordThreadId: threadId,
+        parentChannelId: SPONSORS,
+        content: `<@${BOT}> in a thread`,
+      }),
+      {
+        ...policy,
+        dispatch: true,
+        env: parseEnv({
+          ...process.env,
+          GROK_BOT_WEBHOOK_URL: "https://example.com/grok-routine",
+          GROK_BOT_WEBHOOK_SECRET: "grok-sender-key-for-tests",
+          GROK_DISPATCH_WORKSPACES: DISPATCHABLE,
+        }),
+        poster: async () => ({ ok: true, status: 200 }),
+        sendTyping: async (id) => {
+          typed.push(id);
+        },
+      },
+    );
+    expect(r.dispatched).toBe(true);
+    expect(r.typingStarted).toBe(true);
+    expect(typed).toEqual([threadId]);
+    expect(typed).not.toContain(SPONSORS);
+    expect(typed).not.toContain(LEADERSHIP_TEAM);
   });
 });
 
