@@ -1,4 +1,4 @@
-import { loadEnv } from "../config.ts";
+import { loadEnv, loadWorkspaceTokens, workspaceIds } from "../config.ts";
 import { logger } from "../logger.ts";
 import { ingestFreshness } from "../context/store.ts";
 import { handleV1 } from "./fs.ts";
@@ -50,6 +50,14 @@ export function startHealthServer(): void {
     },
   });
   logger.info({ port, hostname }, "health server listening");
+  const tokens = loadWorkspaceTokens();
+  const withAccess = new Set(tokens.map((t) => t.workspace));
+  const withoutAccess = workspaceIds().filter((id) => !withAccess.has(id));
+  if (tokens.length === 0) {
+    logger.error("no workspace tokens loaded: every /v1/* request will be 401 (set the token_env vars from channels.yml)");
+  } else if (withoutAccess.length > 0) {
+    logger.warn({ workspaces: withoutAccess }, "workspaces without an HTTP token (no /v1 access)");
+  }
 }
 
 export function stopHealthServer(): void {

@@ -1,90 +1,91 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { resetChannelsForTest, resetEnvForTest } from "../src/config.ts";
-import { withTempCwd, withTempDb } from "./helpers.ts";
+import { reloadChannels, resetChannelsForTest, resetEnvForTest } from "../src/config.ts";
+import {
+  CANONICAL_CHANNELS_YML,
+  WORKSPACE_TOKENS,
+  clearWorkspaceTokenEnv,
+  setWorkspaceTokenEnv,
+  withTempCwd,
+  withTempDb,
+  writeCanonicalChannels,
+} from "./helpers.ts";
 import { handleRequest } from "../src/http/health.ts";
 import { indexFromRow } from "../src/context/store.ts";
 import { indexPathForRow } from "../src/context/paths.ts";
 import { getMessage, markDeleted, upsertMessage } from "../src/storage/messages.ts";
 
-function writeChannelsFixture(): void {
-  mkdirSync(resolve(process.cwd(), "config"), { recursive: true });
-  writeFileSync(
-    resolve(process.cwd(), "config/channels.yml"),
-    `
-guild_id: "987654321098765432"
-channels:
-  - id: "1001"
-    name: "sponsors"
-    category: "eboard-teams"
-    classify: true
-    include_threads: true
-  - id: "2002"
-    name: "leadership-team"
-    category: "eboard-teams"
-    classify: true
-    include_threads: true
-    isolated: true
-defaults:
-  confidence_threshold: 0.5
-  reconcile_lookback: 200
-  reconcile_interval_hours: 6
-`,
-    "utf8",
-  );
-}
-
 const cwd = withTempCwd();
-writeChannelsFixture();
+writeCanonicalChannels();
 const db = withTempDb();
-process.env.MORPHEUS_API_TOKEN_GENERAL = "tok-general";
-process.env.MORPHEUS_API_TOKEN_LEADERSHIP = "tok-leadership";
+setWorkspaceTokenEnv();
 resetEnvForTest();
 
-const GENERAL_MSG = "100000000000000001";
-const LEADER_MSG = "200000000000000002";
-const LEADER_THREAD_MSG = "200000000000000099";
-const LEADER_THREAD_ID = "200000000000000050";
+const LEADERSHIP = WORKSPACE_TOKENS.leadership;
+const EBOARD = WORKSPACE_TOKENS.eboard;
+const PD = WORKSPACE_TOKENS["programs-dev"];
+
+const E_MSG = "100000000000000001";
+const L_MSG = "200000000000000002";
+const L_THREAD_MSG = "200000000000000099";
+const L_THREAD_ID = "200000000000000050";
+const PM_MSG = "300000000000000003";
+const PD_MSG = "400000000000000004";
 
 beforeAll(() => {
   resetChannelsForTest();
   upsertMessage({
-    id: GENERAL_MSG,
+    id: E_MSG,
     channelId: "1001",
     authorId: "u1",
     authorName: "alice",
     content: "sponsors budget for startup week snacks",
     createdAt: 1_000,
   });
-  indexFromRow(getMessage(GENERAL_MSG)!);
+  indexFromRow(getMessage(E_MSG)!);
   upsertMessage({
-    id: LEADER_MSG,
+    id: L_MSG,
     channelId: "2002",
     authorId: "u2",
     authorName: "bob",
-    content: "leadership only secret retreat plan",
+    content: "leadership only secret retreat plan zebra-unique-9",
     createdAt: 1_100,
   });
-  indexFromRow(getMessage(LEADER_MSG)!);
+  indexFromRow(getMessage(L_MSG)!);
   upsertMessage({
-    id: LEADER_THREAD_MSG,
-    channelId: LEADER_THREAD_ID,
+    id: L_THREAD_MSG,
+    channelId: L_THREAD_ID,
     parentChannelId: "2002",
     authorId: "u2",
     authorName: "bob",
-    content: "thread of isolated parent about retreat seating",
+    content: "thread of a leadership parent about retreat seating",
     createdAt: 1_200,
-    threadId: LEADER_THREAD_ID,
+    threadId: L_THREAD_ID,
     threadName: "Retreat seating",
   });
-  indexFromRow(getMessage(LEADER_THREAD_MSG)!);
+  indexFromRow(getMessage(L_THREAD_MSG)!);
+  upsertMessage({
+    id: PM_MSG,
+    channelId: "3003",
+    authorId: "u3",
+    authorName: "carol",
+    content: "mentorship pairing round two",
+    createdAt: 1_300,
+  });
+  indexFromRow(getMessage(PM_MSG)!);
+  upsertMessage({
+    id: PD_MSG,
+    channelId: "4004",
+    authorId: "u4",
+    authorName: "dave",
+    content: "dev-chat-unique deploy notes",
+    createdAt: 1_400,
+  });
+  indexFromRow(getMessage(PD_MSG)!);
 });
 
 afterAll(() => {
   resetChannelsForTest();
-  delete process.env.MORPHEUS_API_TOKEN_GENERAL;
-  delete process.env.MORPHEUS_API_TOKEN_LEADERSHIP;
+  clearWorkspaceTokenEnv();
   resetEnvForTest();
   db.cleanup();
   cwd.cleanup();
@@ -116,6 +117,41 @@ async function post(path: string, body: unknown, token?: string): Promise<Respon
   );
 }
 
+/** GET /v1/fs/tree with `raw` passed through verbatim (never pre-normalized by URL). */
+async function tree(raw: string, token: string): Promise<Response> {
+  return get(`/v1/fs/tree?path=${encodeURIComponent(raw)}`, token);
+}
+
+async function read(raw: string, token: string): Promise<Response> {
+  return get(`/v1/fs/read?path=${encodeURIComponent(raw)}`, token);
+}
+
+async function nodesOf(res: Response): Promise<string[]> {
+  const body = (await res.json()) as { nodes: Array<{ path: string }> };
+  return body.nodes.map((n) => n.path);
+}
+
+async function hitsOf(res: Response): Promise<Array<{ id: string; path: string }>> {
+  const body = (await res.json()) as { hits: Array<{ id: string; path: string }> };
+  return body.hits;
+}
+
+/** Walk the poll cursor to exhaustion and return every document id seen. */
+async function pollAll(token: string): Promise<string[]> {
+  const ids: string[] = [];
+  let cursor: string | null = null;
+  for (let i = 0; i < 20; i++) {
+    const qs = cursor ? `?limit=50&cursor=${encodeURIComponent(cursor)}` : "?limit=50";
+    const res = await get(`/v1/poll${qs}`, token);
+    expect(res.status).toBe(200);
+    const page = (await res.json()) as { cursor: string; documents: Array<{ id: string }> };
+    if (page.documents.length === 0) break;
+    ids.push(...page.documents.map((d) => d.id));
+    cursor = page.cursor;
+  }
+  return ids;
+}
+
 describe("GET /health", () => {
   test("no auth; includes fts_count; no message bodies or tokens", async () => {
     const res = await get("/health");
@@ -124,11 +160,8 @@ describe("GET /health", () => {
     expect(body.ok).toBe(true);
     expect(typeof body.fts_count).toBe("number");
     expect(body.fts_count).toBeGreaterThan(0);
-    expect(body.nia_dirty).toBeUndefined();
-    expect(body.nia_last_sync_at).toBeUndefined();
-    expect(body.nia_consecutive_failures).toBeUndefined();
     const dumped = JSON.stringify(body);
-    expect(dumped).not.toContain("tok-general");
+    for (const tok of Object.values(WORKSPACE_TOKENS)) expect(dumped).not.toContain(tok);
     expect(dumped).not.toContain("test-token");
     expect(dumped).not.toContain("secret retreat");
     expect(dumped).not.toContain("sponsors budget");
@@ -137,156 +170,253 @@ describe("GET /health", () => {
 
 describe("auth", () => {
   test("no token → 401 on every /v1/*", async () => {
-    expect((await get("/v1/fs/tree?path=/general")).status).toBe(401);
+    expect((await get("/v1/fs/tree?path=/eboard")).status).toBe(401);
     expect((await post("/v1/fs/search", { query: "sponsors" })).status).toBe(401);
-    expect((await get("/v1/fs/read?path=/general")).status).toBe(401);
-    expect((await get(`/v1/messages/${GENERAL_MSG}`)).status).toBe(401);
+    expect((await get("/v1/fs/read?path=/eboard")).status).toBe(401);
+    expect((await get(`/v1/messages/${E_MSG}`)).status).toBe(401);
     expect((await get("/v1/poll")).status).toBe(401);
     expect((await get("/v1/jobs")).status).toBe(401);
   });
 
-  test("DISCORD_BOT_TOKEN is not accepted as this bearer", async () => {
-    const res = await get("/v1/fs/tree?path=/general", "test-token");
-    expect(res.status).toBe(401);
+  test("the Discord bot token is never a /v1 bearer", async () => {
+    expect((await get("/v1/fs/tree?path=/eboard", "test-token")).status).toBe(401);
+    expect((await post("/v1/fs/search", { query: "sponsors" }, "test-token")).status).toBe(401);
+    expect((await get(`/v1/messages/${E_MSG}`, "test-token")).status).toBe(401);
+    expect((await get("/v1/poll", "test-token")).status).toBe(401);
   });
 
-  test("client-supplied namespace=leadership with general token → 403", async () => {
-    const q = await get("/v1/fs/tree?path=/general&namespace=leadership", "tok-general");
-    expect(q.status).toBe(403);
-    const s = await post(
-      "/v1/fs/search",
-      { query: "sponsors", namespace: "leadership" },
-      "tok-general",
-    );
-    expect(s.status).toBe(403);
+  test("an unknown bearer is 401", async () => {
+    expect((await get("/v1/poll", "tok-nobody-0123456789")).status).toBe(401);
+  });
+
+  test("responses are never cached", async () => {
+    const res = await tree("/", PD);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const denied = await tree("/eboard", PD);
+    expect(denied.headers.get("cache-control")).toBe("no-store");
   });
 });
 
-describe("path isolation", () => {
-  test("general token cannot tree/read a /leadership path", async () => {
-    const tree = await get("/v1/fs/tree?path=/leadership/eboard-teams", "tok-general");
-    expect(tree.status).toBe(404);
-    const read = await get(
-      "/v1/fs/read?path=/leadership/eboard-teams/leadership-team-2002",
-      "tok-general",
-    );
-    expect(read.status).toBe(404);
+describe("tree root shows exactly the token's subtree", () => {
+  test("programs-dev sees only itself", async () => {
+    const res = await tree("/", PD);
+    expect(res.status).toBe(200);
+    expect(await nodesOf(res)).toEqual(["/programs-dev"]);
   });
 
-  test("general token + leadership message id → 404", async () => {
-    const res = await get(`/v1/messages/${LEADER_MSG}`, "tok-general");
-    expect(res.status).toBe(404);
-    const thread = await get(`/v1/messages/${LEADER_THREAD_MSG}`, "tok-general");
-    expect(thread.status).toBe(404);
+  test("eboard sees itself and its two children, never leadership", async () => {
+    const res = await tree("/", EBOARD);
+    expect(res.status).toBe(200);
+    expect(await nodesOf(res)).toEqual(["/eboard", "/programs-dev", "/programs-mentorship"]);
   });
 
-  test("path=/Users/sean or path=../ → 404", async () => {
-    expect((await get("/v1/fs/tree?path=/Users/sean", "tok-general")).status).toBe(404);
-    expect((await get("/v1/fs/read?path=/Users/sean", "tok-general")).status).toBe(404);
-    expect((await get("/v1/fs/tree?path=../", "tok-general")).status).toBe(404);
-    expect((await get("/v1/fs/read?path=../", "tok-general")).status).toBe(404);
-    const search = await post(
-      "/v1/fs/search",
-      { query: "sponsors", pathPrefix: "/Users/sean" },
-      "tok-general",
-    );
-    expect(search.status).toBe(404);
+  test("leadership sees all four", async () => {
+    const res = await tree("/", LEADERSHIP);
+    expect(res.status).toBe(200);
+    expect(await nodesOf(res)).toEqual([
+      "/eboard",
+      "/leadership",
+      "/programs-dev",
+      "/programs-mentorship",
+    ]);
+  });
+});
+
+describe("path isolation: sideways and upward are both 404", () => {
+  test("programs-dev cannot tree a sibling workspace", async () => {
+    expect((await tree("/programs-mentorship", PD)).status).toBe(404);
+    expect((await tree("/programs-mentorship/programs/mentorship-chat-3003", PD)).status).toBe(404);
   });
 
-  test("encoded .., ~, and host paths → 404", async () => {
-    expect((await get("/v1/fs/tree?path=%2e%2e", "tok-general")).status).toBe(404);
-    expect((await get("/v1/fs/tree?path=%252e%252e", "tok-general")).status).toBe(404);
+  test("programs-dev cannot read a sibling's message", async () => {
+    expect((await get(`/v1/messages/${PM_MSG}`, PD)).status).toBe(404);
     expect(
-      (await get("/v1/fs/tree?path=/general/%2e%2e/%2e%2e/Users/sean", "tok-general")).status,
+      (await read("/programs-mentorship/programs/mentorship-chat-3003", PD)).status,
     ).toBe(404);
-    expect((await get("/v1/fs/tree?path=/general/../leadership", "tok-general")).status).toBe(404);
-    expect((await get("/v1/fs/read?path=~/src", "tok-general")).status).toBe(404);
-    expect((await get("/v1/fs/read?path=/etc/passwd", "tok-general")).status).toBe(404);
-    expect((await get("/v1/fs/tree?path=//Users/sean", "tok-general")).status).toBe(404);
+  });
+
+  test("eboard cannot tree its parent workspace", async () => {
+    expect((await tree("/leadership", EBOARD)).status).toBe(404);
+    expect((await tree("/leadership/eboard-teams", EBOARD)).status).toBe(404);
+    expect((await read("/leadership/eboard-teams/leadership-team-2002", EBOARD)).status).toBe(404);
+  });
+
+  test("eboard cannot read a leadership message or its thread", async () => {
+    expect((await get(`/v1/messages/${L_MSG}`, EBOARD)).status).toBe(404);
+    expect((await get(`/v1/messages/${L_THREAD_MSG}`, EBOARD)).status).toBe(404);
+  });
+
+  test("traversal out of programs-dev is 404 on tree, read and search", async () => {
+    const escapes = [
+      "/programs-dev/../eboard",
+      "/programs-dev/%2e%2e/eboard",
+      "/programs-dev/%252e%252e/leadership",
+    ];
+    for (const raw of escapes) {
+      expect((await tree(raw, PD)).status).toBe(404);
+      expect((await read(raw, PD)).status).toBe(404);
+      expect(
+        (await post("/v1/fs/search", { query: "sponsors", pathPrefix: raw }, PD)).status,
+      ).toBe(404);
+    }
+  });
+
+  test("pre-workspace names and bare categories are 404 even for leadership", async () => {
+    for (const raw of ["/_legacy", "/general", "/programs", "/eboard-teams"]) {
+      expect((await tree(raw, LEADERSHIP)).status).toBe(404);
+      expect((await read(raw, LEADERSHIP)).status).toBe(404);
+    }
+  });
+
+  test("OS paths, ~, encoded .. and host paths → 404", async () => {
+    for (const raw of ["/Users/sean", "../", "~/src", "/etc/passwd", "//Users/sean", "%2e%2e", "%252e%252e"]) {
+      expect((await tree(raw, EBOARD)).status).toBe(404);
+      expect((await read(raw, EBOARD)).status).toBe(404);
+    }
     expect(
-      (await post("/v1/fs/search", { query: "sponsors", pathPrefix: "%2e%2e" }, "tok-general")).status,
+      (await post("/v1/fs/search", { query: "sponsors", pathPrefix: "/Users/sean" }, EBOARD)).status,
     ).toBe(404);
     expect(
-      (await post(
-        "/v1/fs/search",
-        { query: "sponsors", pathPrefix: "/general/../leadership" },
-        "tok-general",
-      )).status,
+      (await post("/v1/fs/search", { query: "sponsors", pathPrefix: "%2e%2e" }, EBOARD)).status,
     ).toBe(404);
+  });
+
+  test("a client-supplied namespace is not authorization", async () => {
+    // Matching the token root is fine, but the path is still checked: 404.
+    expect(
+      (await get(`/v1/fs/tree?path=${encodeURIComponent("/eboard")}&namespace=programs-dev`, PD)).status,
+    ).toBe(404);
+    // Claiming a different workspace than the token's root is 403.
+    expect(
+      (await get(`/v1/fs/tree?path=${encodeURIComponent("/programs-dev")}&namespace=eboard`, PD)).status,
+    ).toBe(403);
+    expect(
+      (await post("/v1/fs/search", { query: "sponsors", namespace: "leadership" }, EBOARD)).status,
+    ).toBe(403);
+  });
+
+  test("`..` that lands inside the scope is allowed", async () => {
+    // constrainIndexPath normalizes first: this resolves to /programs-dev/... which
+    // IS visible from an eboard token, so it is served rather than refused.
+    const res = await read("/eboard/../programs-dev/programs/dev-chat-4004", EBOARD);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { path: string; documents: Array<{ id: string }> };
+    expect(body.path).toBe("/programs-dev/programs/dev-chat-4004");
+    expect(body.documents.map((d) => d.id)).toContain(PD_MSG);
   });
 });
 
 describe("search HTTP", () => {
-  test("includeDeleted true → 400", async () => {
+  test("includeDeleted true → 400 everywhere", async () => {
+    expect((await post("/v1/fs/search", { query: "sponsors", includeDeleted: true }, EBOARD)).status).toBe(400);
+    expect((await get(`/v1/messages/${E_MSG}?includeDeleted=true`, EBOARD)).status).toBe(400);
+    expect((await get("/v1/fs/read?path=/eboard&includeDeleted=true", EBOARD)).status).toBe(400);
+    expect((await get("/v1/poll?includeDeleted=true", EBOARD)).status).toBe(400);
+    expect((await get("/v1/fs/tree?path=/&includeDeleted=true", PD)).status).toBe(400);
+  });
+
+  test("eboard cannot reach leadership content by exact token", async () => {
+    const zebra = await post("/v1/fs/search", { query: "zebra-unique-9" }, EBOARD);
+    expect(zebra.status).toBe(200);
+    expect(await hitsOf(zebra)).toEqual([]);
+    const retreat = await post("/v1/fs/search", { query: "retreat seating" }, EBOARD);
+    expect(retreat.status).toBe(200);
+    expect(await hitsOf(retreat)).toEqual([]);
+  });
+
+  test("leadership finds its own unique token", async () => {
+    const res = await post("/v1/fs/search", { query: "zebra-unique-9" }, LEADERSHIP);
+    expect(res.status).toBe(200);
+    const hits = await hitsOf(res);
+    expect(hits.length).toBe(1);
+    expect(hits[0]!.id).toBe(L_MSG);
+    expect(hits[0]!.path.startsWith("/leadership/")).toBe(true);
+  });
+
+  test("leadership finds the thread under an isolated parent", async () => {
+    const res = await post("/v1/fs/search", { query: "retreat seating" }, LEADERSHIP);
+    const body = (await res.json()) as {
+      hits: Array<{ id: string; channelId: string; parentChannelId: string | null }>;
+    };
+    const hit = body.hits.find((h) => h.id === L_THREAD_MSG);
+    expect(hit).toBeDefined();
+    expect(hit!.channelId).toBe(L_THREAD_ID);
+    expect(hit!.parentChannelId).toBe("2002");
+  });
+
+  test("programs-dev sees nothing from its parent", async () => {
+    const res = await post("/v1/fs/search", { query: "sponsors" }, PD);
+    expect(res.status).toBe(200);
+    expect(await hitsOf(res)).toEqual([]);
+  });
+
+  test("eboard can search a descendant via pathPrefix", async () => {
     const res = await post(
       "/v1/fs/search",
-      { query: "sponsors", includeDeleted: true },
-      "tok-general",
+      { query: "mentorship", pathPrefix: "/programs-mentorship" },
+      EBOARD,
     );
-    expect(res.status).toBe(400);
-    expect((await get(`/v1/messages/${GENERAL_MSG}?includeDeleted=true`, "tok-general")).status).toBe(400);
-    expect((await get("/v1/fs/read?path=/general&includeDeleted=true", "tok-general")).status).toBe(400);
-    expect((await get("/v1/poll?includeDeleted=true", "tok-general")).status).toBe(400);
-  });
-
-  test("leadership thread is not in general search", async () => {
-    const res = await post("/v1/fs/search", { query: "retreat seating" }, "tok-general");
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { hits: Array<{ id: string; path: string }> };
-    expect(body.hits.map((h) => h.id)).not.toContain(LEADER_THREAD_MSG);
-    expect(body.hits.map((h) => h.id)).not.toContain(LEADER_MSG);
+    const hits = await hitsOf(res);
+    expect(hits.map((h) => h.id)).toEqual([PM_MSG]);
+    expect(hits[0]!.path.startsWith("/programs-mentorship/programs/")).toBe(true);
   });
 
-  test("general token can grep general content", async () => {
-    const res = await post("/v1/fs/search", { query: "sponsors budget" }, "tok-general");
+  test("eboard grep of its own content returns workspace-rooted paths", async () => {
+    const res = await post("/v1/fs/search", { query: "sponsors budget" }, EBOARD);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { hits: Array<{ id: string; path: string; permalink: string }> };
-    expect(body.hits.map((h) => h.id)).toContain(GENERAL_MSG);
-    expect(body.hits[0]?.path.startsWith("/general/")).toBe(true);
-    expect(body.hits[0]?.permalink).toContain(`/${GENERAL_MSG}`);
-  });
-
-  test("leadership token finds isolated thread", async () => {
-    const res = await post("/v1/fs/search", { query: "retreat seating" }, "tok-leadership");
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { hits: Array<{ id: string; channelId: string; parentChannelId: string | null }> };
-    expect(body.hits.map((h) => h.id)).toContain(LEADER_THREAD_MSG);
-    const hit = body.hits.find((h) => h.id === LEADER_THREAD_MSG);
-    expect(hit?.channelId).toBe(LEADER_THREAD_ID);
-    expect(hit?.parentChannelId).toBe("2002");
+    expect(body.hits.map((h) => h.id)).toContain(E_MSG);
+    expect(body.hits[0]!.path.startsWith("/eboard/")).toBe(true);
+    expect(body.hits[0]!.permalink).toContain(`/${E_MSG}`);
   });
 });
 
 describe("tree / read / poll", () => {
   test("tree lists virtual index children, capped", async () => {
-    const res = await get("/v1/fs/tree?path=/general", "tok-general");
+    const res = await tree("/eboard", EBOARD);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { nodes: Array<{ path: string; kind: string }> };
-    expect(body.nodes.some((n) => n.path === "/general/eboard-teams")).toBe(true);
-    expect(body.nodes.length).toBeLessThanOrEqual(100);
+    const nodes = await nodesOf(res);
+    expect(nodes).toContain("/eboard/eboard-teams");
+    expect(nodes).toContain("/eboard/general-chat-5005");
+    expect(nodes.length).toBeLessThanOrEqual(100);
   });
 
-  test("read a general message path", async () => {
-    const search = await post("/v1/fs/search", { query: "sponsors budget" }, "tok-general");
-    const { hits } = (await search.json()) as { hits: Array<{ path: string; id: string }> };
+  test("read an eboard message path", async () => {
+    const search = await post("/v1/fs/search", { query: "sponsors budget" }, EBOARD);
+    const hits = await hitsOf(search);
     const path = hits[0]?.path;
     expect(path).toBeTruthy();
-    const res = await get(`/v1/fs/read?path=${encodeURIComponent(path!)}`, "tok-general");
+    const res = await read(path!, EBOARD);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { document: { id: string; channelId: string; permalink: string } };
-    expect(body.document.id).toBe(GENERAL_MSG);
+    expect(body.document.id).toBe(E_MSG);
     expect(body.document.channelId).toBe("1001");
     expect(body.document.permalink).toContain("/1001/");
   });
 
-  test("GET /v1/messages/:id as leadership token", async () => {
-    const res = await get(`/v1/messages/${LEADER_THREAD_MSG}`, "tok-leadership");
+  test("GET /v1/messages/:id as the leadership token", async () => {
+    const res = await get(`/v1/messages/${L_THREAD_MSG}`, LEADERSHIP);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       document: { channelId: string; parentChannelId: string | null };
     };
-    expect(body.document.channelId).toBe(LEADER_THREAD_ID);
+    expect(body.document.channelId).toBe(L_THREAD_ID);
     expect(body.document.parentChannelId).toBe("2002");
+  });
+
+  test("programs-dev's poll stream is only its own workspace", async () => {
+    const ids = await pollAll(PD);
+    expect([...new Set(ids)]).toEqual([PD_MSG]);
+  });
+
+  test("eboard's poll stream covers the subtree but never leadership", async () => {
+    const ids = new Set(await pollAll(EBOARD));
+    expect(ids.has(E_MSG)).toBe(true);
+    expect(ids.has(PM_MSG)).toBe(true);
+    expect(ids.has(PD_MSG)).toBe(true);
+    expect(ids.has(L_MSG)).toBe(false);
+    expect(ids.has(L_THREAD_MSG)).toBe(false);
   });
 
   test("poll uses seq and sees an edit", async () => {
@@ -300,7 +430,7 @@ describe("tree / read / poll", () => {
       createdAt: 8_000,
     });
     indexFromRow(getMessage(id)!);
-    const before = await get("/v1/poll?limit=50", "tok-general");
+    const before = await get("/v1/poll?limit=50", EBOARD);
     const page = (await before.json()) as { cursor: string; documents: Array<{ id: string; seq: number }> };
     const row = page.documents.find((d) => d.id === id);
     expect(row).toBeDefined();
@@ -317,7 +447,7 @@ describe("tree / read / poll", () => {
     });
     indexFromRow(getMessage(id)!);
 
-    const after = await get(`/v1/poll?cursor=${encodeURIComponent(cursor)}&limit=50`, "tok-general");
+    const after = await get(`/v1/poll?cursor=${encodeURIComponent(cursor)}&limit=50`, EBOARD);
     expect(after.status).toBe(200);
     const page2 = (await after.json()) as { documents: Array<{ id: string; content: string }> };
     expect(page2.documents.find((d) => d.id === id)?.content).toContain("edited");
@@ -335,7 +465,7 @@ describe("tree / read / poll", () => {
     });
     indexFromRow(getMessage(id)!);
     const path = indexPathForRow(getMessage(id)!)!;
-    const live = await get(`/v1/messages/${id}`, "tok-general");
+    const live = await get(`/v1/messages/${id}`, EBOARD);
     expect(live.status).toBe(200);
     expect(((await live.json()) as { document: { content: string } }).document.content).toContain(
       "http-deleted-body-secret",
@@ -345,10 +475,10 @@ describe("tree / read / poll", () => {
     markDeleted(id, 9_500);
     indexFromRow(getMessage(id)!);
 
-    expect((await get(`/v1/messages/${id}`, "tok-general")).status).toBe(404);
-    expect((await get(`/v1/fs/read?path=${encodeURIComponent(path)}`, "tok-general")).status).toBe(404);
+    expect((await get(`/v1/messages/${id}`, EBOARD)).status).toBe(404);
+    expect((await read(path, EBOARD)).status).toBe(404);
 
-    const poll = await get(`/v1/poll?cursor=${encodeURIComponent(`${before}:${id}`)}&limit=50`, "tok-general");
+    const poll = await get(`/v1/poll?cursor=${encodeURIComponent(`${before}:${id}`)}&limit=50`, EBOARD);
     expect(poll.status).toBe(200);
     const page = (await poll.json()) as {
       documents: Array<{ id: string; content: string; deletedAt: number | null }>;
@@ -356,5 +486,31 @@ describe("tree / read / poll", () => {
     const hit = page.documents.find((d) => d.id === id);
     expect(hit?.deletedAt).toBe(9_500);
     expect(hit?.content).toBe("");
+  });
+});
+
+describe("config reload is fail-closed", () => {
+  test("dropping a channel from channels.yml hides it immediately", async () => {
+    const withoutPdChannel = CANONICAL_CHANNELS_YML.replace(
+      /^\s*- \{ id: "4004".*$\n/m,
+      "",
+    );
+    expect(withoutPdChannel).not.toContain("4004");
+    writeCanonicalChannels(process.cwd(), withoutPdChannel);
+    reloadChannels();
+    try {
+      expect((await tree("/programs-dev/programs/dev-chat-4004", PD)).status).toBe(404);
+      expect((await read("/programs-dev/programs/dev-chat-4004", PD)).status).toBe(404);
+      expect((await get(`/v1/messages/${PD_MSG}`, PD)).status).toBe(404);
+      expect(await pollAll(PD)).toEqual([]);
+      const search = await post("/v1/fs/search", { query: "dev-chat-unique" }, PD);
+      expect(search.status).toBe(200);
+      expect(await hitsOf(search)).toEqual([]);
+    } finally {
+      writeCanonicalChannels();
+      reloadChannels();
+    }
+    // Restored.
+    expect((await tree("/programs-dev/programs/dev-chat-4004", PD)).status).toBe(200);
   });
 });

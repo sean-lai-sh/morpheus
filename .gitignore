@@ -27,3 +27,4 @@ config/channels.yml
 # Build output (we don't compile, but just in case)
 dist/
 build/
+config/channels*.bak

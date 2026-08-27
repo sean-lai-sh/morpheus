@@ -7,12 +7,19 @@ import {
   splitDiscordContent,
 } from "../src/bot/reply.ts";
 import { withTempDb } from "./helpers.ts";
+import { EBOARD, LEADERSHIP, SPONSORS, withWorkspaceConfig } from "./jobs-fixture.ts";
 import { claimJob, enqueueJob, getJob } from "../src/storage/jobs.ts";
 import { resetEnvForTest } from "../src/config.ts";
 
 const db = withTempDb();
-beforeAll(() => {});
-afterAll(() => db.cleanup());
+let cfg: ReturnType<typeof withWorkspaceConfig>;
+beforeAll(() => {
+  cfg = withWorkspaceConfig();
+});
+afterAll(() => {
+  cfg.cleanup();
+  db.cleanup();
+});
 
 describe("JOB_ALLOWED_MENTIONS", () => {
   test("parse/users/roles empty; repliedUser false (no substring @everyone scan)", () => {
@@ -68,10 +75,10 @@ describe("completeJobWithReply", () => {
   test("already-completed does not invoke Discord again", async () => {
     const { job } = enqueueJob({
       discordMessageId: "c-idemp",
-      discordChannelId: "c1",
+      discordChannelId: SPONSORS,
       discordThreadId: null,
       authorId: "u1",
-      namespace: "general",
+      namespace: EBOARD,
       content: "q",
     });
     claimJob(job.id, "w1");
@@ -106,10 +113,10 @@ describe("completeJobWithReply", () => {
   test("overlapping completes: second is in-progress and does not post", async () => {
     const { job } = enqueueJob({
       discordMessageId: "c-overlap",
-      discordChannelId: "c1",
+      discordChannelId: SPONSORS,
       discordThreadId: null,
       authorId: "u1",
-      namespace: "general",
+      namespace: EBOARD,
       content: "q",
     });
     claimJob(job.id, "w1");
@@ -155,10 +162,10 @@ describe("completeJobWithReply", () => {
   test("partial multi-chunk send records first message id and retry does not re-post", async () => {
     const { job } = enqueueJob({
       discordMessageId: "c-partial",
-      discordChannelId: "c1",
+      discordChannelId: SPONSORS,
       discordThreadId: null,
       authorId: "u1",
-      namespace: "general",
+      namespace: EBOARD,
       content: "q",
     });
     claimJob(job.id, "w1");
@@ -204,10 +211,10 @@ describe("completeJobWithReply", () => {
     resetEnvForTest();
     const { job } = enqueueJob({
       discordMessageId: "c-redact",
-      discordChannelId: "c1",
+      discordChannelId: SPONSORS,
       discordThreadId: null,
       authorId: "u1",
-      namespace: "general",
+      namespace: EBOARD,
       content: "q",
     });
     claimJob(job.id, "w1");
@@ -249,22 +256,88 @@ describe("completeJobWithReply", () => {
 });
 
 describe("allowlistedGithubIssueUrl", () => {
+  const ISSUE = "https://github.com/sean-lai-sh/morpheus/issues/1";
+  const REPO = "sean-lai-sh/morpheus";
+
   test("rejects off-repo URLs", () => {
     expect(
       allowlistedGithubIssueUrl("https://github.com/evil/repo/issues/1", {
-        repo: "sean-lai-sh/morpheus",
-        namespace: "general",
+        repo: REPO,
+        namespace: EBOARD,
+        allowedWorkspaces: [EBOARD],
       }),
     ).toBeNull();
   });
 
-  test("drops leadership GitHub URLs by default", () => {
+  test("empty GITHUB_ISSUES_WORKSPACES drops every workspace (default deny)", () => {
     expect(
-      allowlistedGithubIssueUrl("https://github.com/sean-lai-sh/morpheus/issues/1", {
-        repo: "sean-lai-sh/morpheus",
-        namespace: "leadership",
-        allowLeadershipGithub: false,
+      allowlistedGithubIssueUrl(ISSUE, { repo: REPO, namespace: LEADERSHIP, allowedWorkspaces: [] }),
+    ).toBeNull();
+  });
+
+  test("an allowlisted workspace keeps the URL", () => {
+    expect(
+      allowlistedGithubIssueUrl(ISSUE, {
+        repo: REPO,
+        namespace: LEADERSHIP,
+        allowedWorkspaces: [LEADERSHIP],
+      }),
+    ).toBe(ISSUE);
+  });
+
+  test("membership is exact, not hierarchical", () => {
+    expect(
+      allowlistedGithubIssueUrl(ISSUE, {
+        repo: REPO,
+        namespace: EBOARD,
+        allowedWorkspaces: [LEADERSHIP],
       }),
     ).toBeNull();
+  });
+
+  test("a job with no workspace never carries a URL", () => {
+    expect(
+      allowlistedGithubIssueUrl(ISSUE, { repo: REPO, allowedWorkspaces: [EBOARD] }),
+    ).toBeNull();
+  });
+});
+
+describe("completeJobWithReply github gate", () => {
+  const ISSUE = "https://github.com/sean-lai-sh/morpheus/issues/7";
+
+  test("githubWorkspaces gates the stored github_issue_url", async () => {
+    const dropped = enqueueJob({
+      discordMessageId: "c-github-drop",
+      discordChannelId: SPONSORS,
+      discordThreadId: null,
+      authorId: "u1",
+      namespace: EBOARD,
+      content: "q",
+    }).job;
+    claimJob(dropped.id, "w1");
+    await completeJobWithReply(
+      dropped.id,
+      "w1",
+      { reply: "done", github_issue_url: ISSUE },
+      { postReplies: false, githubRepo: "sean-lai-sh/morpheus", githubWorkspaces: [] },
+    );
+    expect(getJob(dropped.id)?.github_issue_url).toBeNull();
+
+    const kept = enqueueJob({
+      discordMessageId: "c-github-keep",
+      discordChannelId: SPONSORS,
+      discordThreadId: null,
+      authorId: "u1",
+      namespace: EBOARD,
+      content: "q",
+    }).job;
+    claimJob(kept.id, "w1");
+    await completeJobWithReply(
+      kept.id,
+      "w1",
+      { reply: "done", github_issue_url: ISSUE },
+      { postReplies: false, githubRepo: "sean-lai-sh/morpheus", githubWorkspaces: [EBOARD] },
+    );
+    expect(getJob(kept.id)?.github_issue_url).toBe(ISSUE);
   });
 });

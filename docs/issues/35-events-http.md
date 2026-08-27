@@ -14,7 +14,7 @@ HTTP writes use `source_type=grok_bot` and `is_manual=1`. `source_type=backfill_
 
 ## Auth (same as #27)
 
-Namespace is **not** a client field. Scoped tokens; derive namespace server-side. If `channel_id` is set on an event, reject writes when the token’s namespace cannot see that channel (leadership events must not be patched with a general token). Negative cross-scope test required.
+Namespace is **not** a client field. Scoped tokens; derive scope server-side (`scopeFor`). If `channel_id` is set on an event, reject writes when the token's scope cannot see that channel's workspace (e.g. an `eboard`-scoped event must not be patched with a `programs-dev` token). Negative cross-scope test required.
 
 ## Why this waits
 
@@ -40,7 +40,7 @@ PATCH /v1/events/:id            → body includes expectedVersion; source_type=g
 ## Acceptance
 
 - [ ] `grok_bot` is in `EVENT_SOURCE_TYPES` (from PR #23 `177279e` or added here) and tested
-- [ ] General token cannot PATCH a leadership-scoped event
+- [ ] A `programs-dev`-scoped token cannot PATCH an `eboard`-scoped event (sideways/upward blocked)
 - [ ] On-box `/v1/events` (Mini Tailscale bind) can list/get
 - [ ] Version conflict returns 409 JSON, not a 500
 - [ ] No `DISCORD_BOT_TOKEN` or Nia env required for these routes

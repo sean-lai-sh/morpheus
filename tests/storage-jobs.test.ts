@@ -1,10 +1,26 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { withTempDb } from "./helpers.ts";
 import {
+  DEV_CHAT,
+  EBOARD,
+  GENERAL_CHAT,
+  LEADERSHIP,
+  LEADERSHIP_TEAM,
+  PROGRAMS_DEV,
+  SPONSORS,
+  withWorkspaceConfig,
+} from "./jobs-fixture.ts";
+import { scopeFor } from "../src/context/namespace.ts";
+import { parseIndexPath } from "../src/context/paths.ts";
+import type { Scope } from "../src/context/types.ts";
+import { getDb } from "../src/storage/db.ts";
+import { upsertMessage } from "../src/storage/messages.ts";
+import {
   claimJob,
   countOutstandingJobs,
   enqueueJob,
   failJob,
+  firstPassSnippets,
   getJob,
   getJobByDiscordMessageId,
   listQueued,
@@ -16,13 +32,26 @@ import {
 } from "../src/storage/jobs.ts";
 
 const t = withTempDb();
-beforeAll(() => {});
-afterAll(() => t.cleanup());
+let cfg: ReturnType<typeof withWorkspaceConfig>;
 
-function enqueue(id: string, author = "u1", ns: "general" | "leadership" = "general") {
+beforeAll(() => {
+  cfg = withWorkspaceConfig();
+});
+afterAll(() => {
+  cfg.cleanup();
+  t.cleanup();
+});
+
+function scope(root: string): Scope {
+  const s = scopeFor(root);
+  if (!s) throw new Error(`no scope for ${root}`);
+  return s;
+}
+
+function enqueue(id: string, author = "u1", ns = EBOARD, channelId = SPONSORS) {
   return enqueueJob({
     discordMessageId: id,
-    discordChannelId: "c1",
+    discordChannelId: channelId,
     discordThreadId: null,
     authorId: author,
     namespace: ns,
@@ -35,7 +64,7 @@ describe("storage/jobs enqueue", () => {
     const { job, duplicate } = enqueue("m-enq-1");
     expect(duplicate).toBe(false);
     expect(job.status).toBe("queued");
-    expect(job.namespace).toBe("general");
+    expect(job.namespace).toBe(EBOARD);
     expect(getJob(job.id)?.content).toContain("m-enq-1");
   });
 
@@ -56,22 +85,73 @@ describe("storage/jobs enqueue", () => {
     expect(getJob(b.job.id)?.status).toBe("queued");
   });
 
-  test("listQueued is namespace-scoped, oldest first", () => {
-    enqueue("m-lead-1", "u-lead", "leadership");
-    const general = listQueued("general", 20);
-    const leadership = listQueued("leadership", 20);
-    expect(general.every((j) => j.namespace === "general")).toBe(true);
-    expect(leadership.every((j) => j.namespace === "leadership")).toBe(true);
-    expect(leadership.some((j) => j.discord_message_id === "m-lead-1")).toBe(true);
+  test("an unknown workspace is refused at insert", () => {
+    expect(() =>
+      enqueue("m-unknown-ws", "u-unknown", "general", SPONSORS),
+    ).toThrow(/unknown workspace/);
   });
 
-  test("defaults scope + channel_ids from namespace", () => {
-    const { job } = enqueue("m-scope-gen");
+  test("listQueued is workspace-subtree scoped, oldest first", () => {
+    enqueue("m-lead-1", "u-lead", LEADERSHIP, LEADERSHIP_TEAM);
+    enqueue("m-dev-1", "u-dev", PROGRAMS_DEV, DEV_CHAT);
+
+    const fromEboard = listQueued(scope(EBOARD), 20);
+    expect(fromEboard.every((j) => j.namespace !== LEADERSHIP)).toBe(true);
+    expect(fromEboard.some((j) => j.discord_message_id === "m-dev-1")).toBe(true);
+    expect(fromEboard.some((j) => j.discord_message_id === "m-enq-1")).toBe(true);
+
+    const fromLeadership = listQueued(scope(LEADERSHIP), 20);
+    expect(fromLeadership.some((j) => j.discord_message_id === "m-lead-1")).toBe(true);
+
+    const fromDev = listQueued(scope(PROGRAMS_DEV), 20);
+    expect(fromDev.every((j) => j.namespace === PROGRAMS_DEV)).toBe(true);
+
+    const created = fromEboard.map((j) => j.created_at);
+    expect([...created].sort((a, b) => a - b)).toEqual(created);
+  });
+
+  test("defaults scope + channel_ids from the workspace's place in the tree", () => {
+    const { job } = enqueue("m-scope-eboard");
     expect(job.scope).toBe("channel");
-    expect(job.channel_ids).toEqual(["c1"]);
-    const lead = enqueue("m-scope-lead", "u-scope-lead", "leadership");
-    expect(lead.job.scope).toBe("leadership");
+    expect(job.channel_ids).toEqual([SPONSORS]);
+    const lead = enqueue("m-scope-lead", "u-scope-lead", LEADERSHIP, LEADERSHIP_TEAM);
+    expect(lead.job.scope).toBe("workspace");
     expect(lead.job.channel_ids).toEqual([]);
+  });
+});
+
+describe("storage/jobs unknown-workspace rows", () => {
+  test("a row stored under the legacy 'general' namespace is invisible everywhere", () => {
+    const id = "legacy-general-job";
+    getDb()
+      .query(
+        `INSERT INTO jobs (
+           id, discord_message_id, discord_channel_id, discord_thread_id,
+           author_id, namespace, scope, channel_ids, content, status, created_at, updated_at
+         ) VALUES (?, ?, ?, NULL, ?, 'general', 'channel', ?, ?, 'queued', ?, ?)`,
+      )
+      .run(id, "m-legacy-general", SPONSORS, "u-legacy", JSON.stringify([SPONSORS]), "legacy", 1, 1);
+
+    expect(getJob(id)).toBeNull();
+    expect(getJobByDiscordMessageId("m-legacy-general")).toBeNull();
+    for (const root of [LEADERSHIP, EBOARD, PROGRAMS_DEV]) {
+      expect(listQueued(scope(root), 20).some((j) => j.id === id)).toBe(false);
+    }
+  });
+
+  test("a legacy 'leadership' scope string maps to workspace scope", () => {
+    const id = "legacy-scope-job";
+    getDb()
+      .query(
+        `INSERT INTO jobs (
+           id, discord_message_id, discord_channel_id, discord_thread_id,
+           author_id, namespace, scope, channel_ids, content, status, created_at, updated_at
+         ) VALUES (?, ?, ?, NULL, ?, 'leadership', 'leadership', '[]', ?, 'queued', ?, ?)`,
+      )
+      .run(id, "m-legacy-scope", LEADERSHIP_TEAM, "u-legacy", "legacy scope", 2, 2);
+
+    expect(getJob(id)?.scope).toBe("workspace");
+    expect(getJob(id)?.channel_ids).toEqual([]);
   });
 });
 
@@ -171,10 +251,9 @@ describe("storage/jobs lease sweeper", () => {
     const t0 = 2_000_000;
     claimJob(job.id, "w1", t0);
     prepareComplete(job.id, "w1", { reply: "pending", completion_key: "inflight" }, t0);
-    const n = requeueExpiredClaims(t0 + 700_000, 600_000);
+    requeueExpiredClaims(t0 + 700_000, 600_000);
     expect(getJob(job.id)?.status).toBe("claimed");
     expect(getJob(job.id)?.completion_key).toBe("inflight");
-    void n;
   });
 
   test("does not requeue if result_discord_message_id is set", () => {
@@ -183,7 +262,6 @@ describe("storage/jobs lease sweeper", () => {
     claimJob(job.id, "w1", t0);
     prepareComplete(job.id, "w1", { reply: "done", completion_key: "sent" }, t0);
     markJobCompleted(job.id, "mid-1", t0);
-    // Force claimed with a result id shouldn't happen, but sweeper SQL also guards claimed+result id.
     expect(getJob(job.id)?.status).toBe("completed");
     requeueExpiredClaims(t0 + 700_000, 600_000);
     expect(getJob(job.id)?.status).toBe("completed");
@@ -214,5 +292,97 @@ describe("storage/jobs outstanding count", () => {
       failJob(j.id, "w1", "x");
     }
     expect(countOutstandingJobs(author)).toBe(1);
+  });
+});
+
+describe("firstPassSnippets", () => {
+  beforeAll(() => {
+    upsertMessage({
+      id: "fps-sponsors",
+      channelId: SPONSORS,
+      authorId: "u2",
+      authorName: "bob",
+      content: "Acme wants to sponsor",
+      createdAt: 500,
+    });
+    upsertMessage({
+      id: "fps-general",
+      channelId: GENERAL_CHAT,
+      authorId: "u2",
+      authorName: "bob",
+      content: "general chatter",
+      createdAt: 501,
+    });
+    upsertMessage({
+      id: "fps-dev-thread",
+      channelId: "9999",
+      parentChannelId: DEV_CHAT,
+      threadId: "9999",
+      threadName: "Deploy plan",
+      authorId: "u2",
+      authorName: "bob",
+      content: "dev thread notes",
+      createdAt: 502,
+    });
+    upsertMessage({
+      id: "fps-leadership",
+      channelId: LEADERSHIP_TEAM,
+      authorId: "u2",
+      authorName: "bob",
+      content: "leadership budget confidential",
+      createdAt: 503,
+    });
+  });
+
+  test("channel scope stays inside channel_ids and paths parse", () => {
+    const snippets = firstPassSnippets({
+      namespace: EBOARD,
+      scope: "channel",
+      channel_ids: [SPONSORS],
+      discord_channel_id: SPONSORS,
+      discord_thread_id: null,
+    });
+    expect(snippets.map((s) => s.id)).toEqual(["fps-sponsors"]);
+    for (const s of snippets) {
+      expect(s.path).toBeDefined();
+      expect(parseIndexPath(s.path!)?.kind).toBe("message");
+    }
+  });
+
+  test("workspace scope spans the subtree but never a parent workspace", () => {
+    const snippets = firstPassSnippets(
+      {
+        namespace: EBOARD,
+        scope: "workspace",
+        channel_ids: [],
+        discord_channel_id: SPONSORS,
+        discord_thread_id: null,
+      },
+      12,
+    );
+    const ids = snippets.map((s) => s.id);
+    expect(ids).toContain("fps-sponsors");
+    expect(ids).toContain("fps-general");
+    expect(ids).toContain("fps-dev-thread");
+    expect(ids).not.toContain("fps-leadership");
+    for (const s of snippets) {
+      expect(s.path).toBeDefined();
+      const parsed = parseIndexPath(s.path!);
+      expect(parsed).not.toBeNull();
+      expect(parsed?.kind).toBe("message");
+    }
+  });
+
+  test("a root workspace job reaches every descendant", () => {
+    const snippets = firstPassSnippets({
+      namespace: LEADERSHIP,
+      scope: "workspace",
+      channel_ids: [],
+      discord_channel_id: LEADERSHIP_TEAM,
+      discord_thread_id: null,
+    });
+    const ids = snippets.map((s) => s.id);
+    expect(ids).toContain("fps-leadership");
+    expect(ids).toContain("fps-sponsors");
   });
 });

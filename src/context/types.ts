@@ -1,4 +1,14 @@
-export type Namespace = "general" | "leadership";
+/** Workspace id from `channels.yml` (`workspaces:`). Plain string: the access boundary is `Scope.visible`. */
+export type Namespace = string;
+
+/**
+ * Access scope derived from a token or a job's originating channel.
+ * `visible` = root workspace plus every transitive descendant. Produce only via `scopeFor()`.
+ */
+export interface Scope {
+  root: Namespace;
+  visible: ReadonlySet<Namespace>;
+}
 
 export interface IndexDocument {
   id: string;
@@ -24,7 +34,7 @@ export interface IndexDocument {
 export interface SearchQuery {
   query: string;
   /** REQUIRED in-process. HTTP derives this from the token. */
-  namespace: Namespace;
+  scope: Scope;
   pathPrefix?: string;
   channelHint?: string;
   threadId?: string;
@@ -64,16 +74,16 @@ export interface IndexNode {
 export interface ContextStore {
   index(doc: IndexDocument): void;
   search(q: SearchQuery): SearchHit[];
-  readMessage(id: string, namespace: Namespace): IndexDocument | null;
-  readPath(path: string, namespace: Namespace): IndexDocument | IndexDocument[] | IndexNode[] | null;
-  tree(path: string, namespace: Namespace): IndexNode[];
+  readMessage(id: string, scope: Scope): IndexDocument | null;
+  readPath(path: string, scope: Scope): IndexDocument | IndexDocument[] | IndexNode[] | null;
+  tree(path: string, scope: Scope): IndexNode[];
   readChannelWindow(opts: {
-    namespace: Namespace;
+    scope: Scope;
     /** Parent/allowlisted text channel id (effectiveChannelId). Includes threads. */
     channelId: string;
     afterId?: string;
     beforeId?: string;
     limit?: number;
   }): IndexDocument[];
-  poll(namespace: Namespace, cursor: string | null, limit?: number): PollPage;
+  poll(scope: Scope, cursor: string | null, limit?: number): PollPage;
 }

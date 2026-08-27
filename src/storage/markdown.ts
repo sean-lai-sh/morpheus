@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { LinkRow } from "./links.ts";
 import { linksForMessage } from "./links.ts";
@@ -6,16 +6,30 @@ import type { MessageRow } from "./messages.ts";
 import { messagesForChannelAsc } from "./messages.ts";
 import { markDirty } from "./sync-state.ts";
 
-export const DISCORD_DIR = resolve(process.cwd(), "data/discord");
-export const GENERAL_DIR = resolve(DISCORD_DIR, "general");
-export const LEADERSHIP_DIR = resolve(DISCORD_DIR, "leadership");
+/**
+ * Markdown export root. Resolved per call, not at import time, so a test that
+ * chdirs into a sandbox actually redirects its writes.
+ */
+export function discordDir(): string {
+  return resolve(process.cwd(), "data/discord");
+}
+
+/** Pre-workspace exports (`general/`, `leadership/`) are moved here by reindex, never deleted. */
+export function legacyDir(): string {
+  return resolve(discordDir(), "_legacy");
+}
 
 /** Minimal channel shape needed for path resolution. */
 export interface ChannelKey {
   id: string;
   name: string;
   category?: string | undefined;
-  isolated?: boolean | undefined;
+  workspace: string;
+}
+
+/** On-disk root for a workspace: data/discord/{workspace}. */
+export function workspaceDir(workspace: string): string {
+  return resolve(discordDir(), workspace);
 }
 
 /** Slugify channel or thread name for use in filesystem paths. */
@@ -25,7 +39,7 @@ export function channelSlug(name: string, id: string): string {
 }
 
 function rootDir(channel: ChannelKey): string {
-  return channel.isolated ? LEADERSHIP_DIR : GENERAL_DIR;
+  return workspaceDir(channel.workspace);
 }
 
 function channelDirPath(channel: ChannelKey): string {
@@ -218,13 +232,36 @@ export function rerenderChannel(channel: ChannelKey, guildId: string): number {
   return written;
 }
 
+/**
+ * Move pre-workspace namespace dirs (`general/`, `leadership/`) that are not a
+ * configured workspace id into `_legacy/<name>-<yyyymmdd>`. Moved, not deleted:
+ * the EDIT history in those files cannot be re-rendered from SQLite.
+ */
+export function removeLegacyNamespaceDirs(workspaceIds: readonly string[], now: Date = new Date()): string[] {
+  const moved: string[] = [];
+  const stamp = now.toISOString().slice(0, 10).replace(/-/g, "");
+  for (const name of ["general", "leadership"]) {
+    if (workspaceIds.includes(name)) continue;
+    const src = resolve(discordDir(), name);
+    if (!existsSync(src)) continue;
+    const legacy = legacyDir();
+    mkdirSync(legacy, { recursive: true });
+    let dest = resolve(legacy, `${name}-${stamp}`);
+    for (let i = 2; existsSync(dest); i++) dest = resolve(legacy, `${name}-${stamp}-${i}`);
+    renameSync(src, dest);
+    moved.push(dest);
+  }
+  return moved;
+}
+
 /** Remove legacy flat .md files at the root of data/discord/ (left over from pre-hierarchy runs). */
 export function removeLegacyFlatFiles(): void {
   try {
-    const entries = readdirSync(DISCORD_DIR, { withFileTypes: true });
+    const root = discordDir();
+    const entries = readdirSync(root, { withFileTypes: true });
     for (const e of entries) {
       if (e.isFile() && e.name.endsWith(".md")) {
-        rmSync(resolve(DISCORD_DIR, e.name));
+        rmSync(resolve(root, e.name));
       }
     }
   } catch {

@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
-import { discordBotToken, loadEnv } from "../config.ts";
-import type { Namespace } from "../context/types.ts";
+import { discordBotToken, loadEnv, loadWorkspaceTokens } from "../config.ts";
+import { scopeFor } from "../context/namespace.ts";
+import type { Scope } from "../context/types.ts";
 
 function safeEqual(a: string, b: string): boolean {
   const ba = Buffer.from(a);
@@ -19,22 +20,22 @@ function bearerToken(req: Request): string | null {
   return m?.[1] ?? null;
 }
 
-export type AuthOk = { ok: true; namespace: Namespace };
+export type AuthOk = { ok: true; scope: Scope };
 export type AuthErr = { ok: false; status: 401 | 403; error: string };
 export type AuthResult = AuthOk | AuthErr;
 
 /**
- * Derive namespace from which scoped API token matched.
- * A client-supplied namespace is not authorization: mismatch → 403.
- * DISCORD_BOT_TOKEN is never accepted as this bearer.
+ * Derive the access scope from which workspace token matched
+ * (`workspaces.<id>.token_env` in channels.yml). The scope is that workspace
+ * plus all descendants. A client-supplied namespace is not authorization:
+ * mismatch with the token's root → 403. DISCORD_BOT_TOKEN is never accepted.
  */
 export function authorizeV1(req: Request, clientNamespace?: string | null): AuthResult {
   const token = bearerToken(req);
   if (!token) return { ok: false, status: 401, error: "unauthorized" };
 
-  const env = loadEnv();
   try {
-    const bot = discordBotToken(env);
+    const bot = discordBotToken(loadEnv());
     if (safeEqual(token, bot)) {
       return { ok: false, status: 401, error: "unauthorized" };
     }
@@ -42,16 +43,18 @@ export function authorizeV1(req: Request, clientNamespace?: string | null): Auth
     // bot token unset in some tests — ignore
   }
 
-  let namespace: Namespace | null = null;
-  if (env.MORPHEUS_API_TOKEN_GENERAL && safeEqual(token, env.MORPHEUS_API_TOKEN_GENERAL)) {
-    namespace = "general";
-  } else if (env.MORPHEUS_API_TOKEN_LEADERSHIP && safeEqual(token, env.MORPHEUS_API_TOKEN_LEADERSHIP)) {
-    namespace = "leadership";
+  // Compare against every configured token (no early return) so timing is uniform.
+  let matched: string | null = null;
+  for (const t of loadWorkspaceTokens()) {
+    if (safeEqual(token, t.token)) matched = t.workspace;
   }
-  if (!namespace) return { ok: false, status: 401, error: "unauthorized" };
+  if (!matched) return { ok: false, status: 401, error: "unauthorized" };
 
-  if (clientNamespace != null && clientNamespace !== "" && clientNamespace !== namespace) {
+  const scope = scopeFor(matched);
+  if (!scope) return { ok: false, status: 401, error: "unauthorized" };
+
+  if (clientNamespace != null && clientNamespace !== "" && clientNamespace !== scope.root) {
     return { ok: false, status: 403, error: "namespace mismatch" };
   }
-  return { ok: true, namespace };
+  return { ok: true, scope };
 }

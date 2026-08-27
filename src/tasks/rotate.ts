@@ -2,7 +2,7 @@ import { mkdirSync, readdirSync, renameSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { logger } from "../logger.ts";
 import { loadEnv } from "../config.ts";
-import { DISCORD_DIR } from "../storage/markdown.ts";
+import { discordDir } from "../storage/markdown.ts";
 
 const ARCHIVE_DIR = resolve(process.cwd(), "data/discord-archive");
 
@@ -29,9 +29,10 @@ export function rotate(): void {
   const cutoffMs = Date.now() - env.RETENTION_MONTHS * 30 * 24 * 60 * 60 * 1000;
   const cutoff = new Date(cutoffMs).toISOString();
   let rotated = 0;
-  for (const entry of readdirSync(DISCORD_DIR, { withFileTypes: true })) {
+  const root = discordDir();
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
-    const src = resolve(DISCORD_DIR, entry.name);
+    const src = resolve(root, entry.name);
     const stat = statSync(src);
     if (stat.mtimeMs >= cutoffMs) continue;
     const dest = resolve(ARCHIVE_DIR, entry.name);

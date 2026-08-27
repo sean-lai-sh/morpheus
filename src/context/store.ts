@@ -4,9 +4,9 @@ import {
   getMessage,
   type MessageRow,
 } from "../storage/messages.ts";
-import { namespaceForRow, requireNamespace } from "./namespace.ts";
+import { requireNamespace, rowInScope } from "./namespace.ts";
 import {
-  channelIdsForNamespace,
+  channelIdsForScope,
   channelIndexPath,
   indexPathForRow,
   messagePath,
@@ -21,6 +21,7 @@ import type {
   IndexNode,
   Namespace,
   PollPage,
+  Scope,
   SearchHit,
   SearchQuery,
 } from "./types.ts";
@@ -62,10 +63,6 @@ function inClause(ids: string[]): { sql: string; params: string[] } {
 
 function effectiveChannelSql(): string {
   return `COALESCE(parent_channel_id, channel_id)`;
-}
-
-function rowInNamespace(row: MessageRow, namespace: Namespace): boolean {
-  return namespaceForRow(row) === namespace;
 }
 
 function syncFtsRow(row: MessageRow): void {
@@ -116,8 +113,8 @@ export function toFtsQuery(raw: string): string {
   return tokens.map((t) => `"${t.replace(/"/g, "")}"`).join(" AND ");
 }
 
-function resolveChannelHint(namespace: Namespace, hint: string): string | null {
-  const ids = new Set(channelIdsForNamespace(namespace));
+function resolveChannelHint(scope: Scope, hint: string): string | null {
+  const ids = new Set(channelIdsForScope(scope));
   const byId = getChannel(hint);
   if (byId && ids.has(byId.id)) return byId.id;
   const byName = loadChannels().channels.find(
@@ -153,12 +150,12 @@ function search(q: SearchQuery): SearchHit[] {
   const ftsQuery = toFtsQuery(q.query);
   if (!ftsQuery) return [];
   const limit = Math.min(Math.max(q.limit ?? 10, 1), SEARCH_LIMIT_MAX);
-  const nsIds = channelIdsForNamespace(q.namespace);
+  const nsIds = channelIdsForScope(q.scope);
   if (nsIds.length === 0) return [];
 
   let channelFilter: string | null = null;
   if (q.channelHint) {
-    channelFilter = resolveChannelHint(q.namespace, q.channelHint);
+    channelFilter = resolveChannelHint(q.scope, q.channelHint);
     if (!channelFilter) return [];
   }
 
@@ -198,7 +195,7 @@ function search(q: SearchQuery): SearchHit[] {
   const seen = new Set<string>();
   for (const row of rows) {
     if (seen.has(row.id)) continue;
-    if (!rowInNamespace(row, q.namespace)) continue;
+    if (!rowInScope(row, q.scope)) continue;
     const path = indexPathForRow(row);
     if (!path) continue;
     if (q.pathPrefix) {
@@ -225,12 +222,12 @@ function search(q: SearchQuery): SearchHit[] {
   return hits;
 }
 
-function readMessage(id: string, namespace: Namespace): IndexDocument | null {
+function readMessage(id: string, scope: Scope): IndexDocument | null {
   const row = getMessage(id);
   if (!row) return null;
   if (row.deleted_at != null) return null;
-  if (!rowInNamespace(row, namespace)) return null;
-  return documentFromRow(row, namespace);
+  if (!rowInScope(row, scope)) return null;
+  return documentFromRow(row);
 }
 
 function redactDeletedContent(doc: IndexDocument): IndexDocument {
@@ -278,17 +275,18 @@ function listThreadMessages(threadId: string): MessageRow[] {
     .all(threadId);
 }
 
-function tree(path: string, namespace: Namespace): IndexNode[] {
+function tree(path: string, scope: Scope): IndexNode[] {
   const parsed = parseIndexPath(path);
   if (!parsed) return [];
   if (parsed.kind === "root") {
-    return capNodes([{ path: `/${namespace}`, kind: "dir", name: namespace }]);
-  }
-  if (parsed.kind === "namespace") {
-    if (parsed.namespace !== namespace) return [];
-    const channels = loadChannels().channels.filter(
-      (c) => (c.isolated ? "leadership" : "general") === namespace,
+    return capNodes(
+      [...scope.visible].sort().map((ns) => ({ path: `/${ns}`, kind: "dir" as const, name: ns })),
     );
+  }
+  if (!scope.visible.has(parsed.namespace)) return [];
+  const namespace = parsed.namespace;
+  if (parsed.kind === "namespace") {
+    const channels = loadChannels().channels.filter((c) => c.workspace === namespace);
     const nodes: IndexNode[] = [];
     const seenCats = new Set<string>();
     for (const c of channels) {
@@ -312,10 +310,8 @@ function tree(path: string, namespace: Namespace): IndexNode[] {
     return capNodes(nodes);
   }
   if (parsed.kind === "category") {
-    if (parsed.namespace !== namespace) return [];
     const channels = loadChannels().channels.filter(
-      (c) =>
-        (c.isolated ? "leadership" : "general") === namespace && c.category === parsed.category,
+      (c) => c.workspace === namespace && c.category === parsed.category,
     );
     return capNodes(
       channels.map((c) => ({
@@ -326,7 +322,6 @@ function tree(path: string, namespace: Namespace): IndexNode[] {
     );
   }
   if (parsed.kind === "channel") {
-    if (parsed.namespace !== namespace) return [];
     const nodes: IndexNode[] = [];
     const threads = listThreads(parsed.channel.id);
     if (threads.length > 0) {
@@ -337,7 +332,7 @@ function tree(path: string, namespace: Namespace): IndexNode[] {
       });
     }
     for (const row of listMainMessages(parsed.channel.id)) {
-      if (!rowInNamespace(row, namespace)) continue;
+      if (!rowInScope(row, scope)) continue;
       nodes.push({
         path: messagePath(namespace, parsed.channel, row),
         kind: "doc",
@@ -347,7 +342,6 @@ function tree(path: string, namespace: Namespace): IndexNode[] {
     return capNodes(nodes);
   }
   if (parsed.kind === "threadsDir") {
-    if (parsed.namespace !== namespace) return [];
     const threads = listThreads(parsed.channel.id);
     return capNodes(
       threads.map((t) => ({
@@ -358,10 +352,9 @@ function tree(path: string, namespace: Namespace): IndexNode[] {
     );
   }
   if (parsed.kind === "thread") {
-    if (parsed.namespace !== namespace) return [];
     const nodes: IndexNode[] = [];
     for (const row of listThreadMessages(parsed.threadId)) {
-      if (!rowInNamespace(row, namespace)) continue;
+      if (!rowInScope(row, scope)) continue;
       nodes.push({
         path: messagePath(namespace, parsed.channel, row),
         kind: "doc",
@@ -371,9 +364,8 @@ function tree(path: string, namespace: Namespace): IndexNode[] {
     return capNodes(nodes);
   }
   if (parsed.kind === "message") {
-    if (parsed.namespace !== namespace) return [];
     const row = getMessage(parsed.messageId);
-    if (!row || !rowInNamespace(row, namespace)) return [];
+    if (!row || !rowInScope(row, scope)) return [];
     return [
       {
         path: messagePath(namespace, parsed.channel, row),
@@ -386,17 +378,15 @@ function tree(path: string, namespace: Namespace): IndexNode[] {
 }
 
 function readChannelWindow(opts: {
-  namespace: Namespace;
+  scope: Scope;
   channelId: string;
   afterId?: string;
   beforeId?: string;
   limit?: number;
 }): IndexDocument[] {
-  const nsIds = new Set(channelIdsForNamespace(opts.namespace));
-  if (!nsIds.has(opts.channelId)) return [];
   const channel = getChannel(opts.channelId);
   if (!channel) return [];
-  if ((channel.isolated ? "leadership" : "general") !== opts.namespace) return [];
+  if (!opts.scope.visible.has(channel.workspace)) return [];
 
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), WINDOW_LIMIT_MAX);
   const params: string[] = [opts.channelId, opts.channelId];
@@ -417,30 +407,29 @@ function readChannelWindow(opts: {
   const rows = getDb()
     .query<MessageRow, (string | number)[]>(sql)
     .all(...params, limit);
-  return rows.filter((r) => rowInNamespace(r, opts.namespace)).map((r) => documentFromRow(r, opts.namespace));
+  return rows.filter((r) => rowInScope(r, opts.scope)).map((r) => documentFromRow(r));
 }
 
 function readPath(
   path: string,
-  namespace: Namespace,
+  scope: Scope,
 ): IndexDocument | IndexDocument[] | IndexNode[] | null {
   const parsed = parseIndexPath(path);
   if (!parsed) return null;
-  if (parsed.kind === "root" || parsed.kind === "namespace" || parsed.kind === "category" || parsed.kind === "threadsDir") {
-    if (parsed.kind !== "root" && "namespace" in parsed && parsed.namespace !== namespace) return null;
-    if (parsed.kind === "root") return tree(path, namespace);
-    return tree(path, namespace);
+  if (parsed.kind === "root") return tree(path, scope);
+  if (!scope.visible.has(parsed.namespace)) return null;
+  if (parsed.kind === "namespace" || parsed.kind === "category" || parsed.kind === "threadsDir") {
+    return tree(path, scope);
   }
-  if (parsed.namespace !== namespace) return null;
   if (parsed.kind === "channel") {
-    return readChannelWindow({ namespace, channelId: parsed.channel.id });
+    return readChannelWindow({ scope, channelId: parsed.channel.id });
   }
   if (parsed.kind === "thread") {
-    const rows = listThreadMessages(parsed.threadId).filter((r) => rowInNamespace(r, namespace));
-    return rows.map((r) => documentFromRow(r, namespace));
+    const rows = listThreadMessages(parsed.threadId).filter((r) => rowInScope(r, scope));
+    return rows.map((r) => documentFromRow(r));
   }
   if (parsed.kind === "message") {
-    return readMessage(parsed.messageId, namespace);
+    return readMessage(parsed.messageId, scope);
   }
   return null;
 }
@@ -454,9 +443,9 @@ function parseCursor(cursor: string): { seq: number; id: string } | null {
   return { seq, id };
 }
 
-function poll(namespace: Namespace, cursor: string | null, limit = 20): PollPage {
+function poll(scope: Scope, cursor: string | null, limit = 20): PollPage {
   const cap = Math.min(Math.max(limit, 1), POLL_LIMIT_MAX);
-  const nsIds = channelIdsForNamespace(namespace);
+  const nsIds = channelIdsForScope(scope);
   if (nsIds.length === 0) return { cursor: cursor ?? "0:0", documents: [] };
   const { sql: inSql, params: inParams } = inClause(nsIds);
 
@@ -477,8 +466,8 @@ function poll(namespace: Namespace, cursor: string | null, limit = 20): PollPage
   const rows = getDb()
     .query<MessageRow, (string | number)[]>(sql)
     .all(...params)
-    .filter((r) => rowInNamespace(r, namespace));
-  const documents = rows.map((r) => redactDeletedContent(documentFromRow(r, namespace)));
+    .filter((r) => rowInScope(r, scope));
+  const documents = rows.map((r) => redactDeletedContent(documentFromRow(r)));
   const last = documents[documents.length - 1];
   const nextCursor = last ? `${last.seq}:${last.id}` : (cursor ?? "0:0");
   return { cursor: nextCursor, documents };
