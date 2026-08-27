@@ -2,6 +2,9 @@ import { ChannelType, Events, type Client, type Message, type PartialMessage } f
 import { logger } from "../logger.ts";
 import { ingestDelete, ingestMessage } from "./ingest.ts";
 import { handleReactionChange } from "./reactions.ts";
+import { candidateFromMessage, tryEnqueueJob } from "./enqueue.ts";
+import { authorCanViewChannel } from "./job-scope.ts";
+import { handleAskInteraction, registerAskOnReady } from "./commands.ts";
 
 async function fetchIfPartial(
   message: Message | PartialMessage,
@@ -48,12 +51,25 @@ export function registerLiveHandlers(client: Client): void {
     try {
       const full = await fetchIfPartial(m);
       if (!full) return;
-      const r = await ingestMessage(full, threadParentId(full), threadChannelName(full));
-      if (r.action === "inserted" || r.action === "edited") {
-        logger.debug(
-          { message_id: full.id, channel_id: full.channelId, op: "live", action: r.action },
-          "ingested",
-        );
+      try {
+        const r = await ingestMessage(full, threadParentId(full), threadChannelName(full));
+        if (r.action === "inserted" || r.action === "edited") {
+          logger.debug(
+            { message_id: full.id, channel_id: full.channelId, op: "live", action: r.action },
+            "ingested",
+          );
+        }
+      } catch (err) {
+        logger.error({ err, id: m.id }, "MessageCreate ingest error");
+      }
+      try {
+        const botId = client.user?.id;
+        if (!botId) return;
+        await tryEnqueueJob(candidateFromMessage(full, botId), {
+          canViewChannel: (id) => authorCanViewChannel(full, id),
+        });
+      } catch (err) {
+        logger.error({ err, id: m.id }, "MessageCreate job enqueue error");
       }
     } catch (err) {
       logger.error({ err, id: m.id }, "MessageCreate handler error");
@@ -101,4 +117,18 @@ export function registerLiveHandlers(client: Client): void {
       logger.error({ err, id: reaction.message.id }, "ReactionRemove handler error");
     }
   });
+
+  client.on(Events.InteractionCreate, async (interaction) => {
+    try {
+      await handleAskInteraction(interaction);
+    } catch (err) {
+      logger.error({ err }, "InteractionCreate handler error");
+    }
+  });
+
+  const registerAsk = () => {
+    void registerAskOnReady(client);
+  };
+  if (client.isReady()) registerAsk();
+  else client.once(Events.ClientReady, registerAsk);
 }

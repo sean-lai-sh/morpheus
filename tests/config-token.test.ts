@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { discordBotToken, loadEnv, resetEnvForTest } from "../src/config.ts";
+import { discordBotToken, httpBindHostname, jobTriggerRoleIds, loadEnv, resetEnvForTest } from "../src/config.ts";
 
 const TOKEN_KEYS = [
   "DISCORD_BOT_TOKEN",
   "DISCORD_TOKEN",
   "DISCORD_GUILD_ID",
   "GROK_BOT_WEBHOOK_URL",
+  "GROK_BOT_WEBHOOK_SECRET",
+  "GROK_DISPATCH_LEADERSHIP",
   "HEALTH_HOST",
+  "JOB_TRIGGER_ROLE_IDS",
 ] as const;
 const saved: Record<string, string | undefined> = {};
 
@@ -72,6 +75,31 @@ describe("GROK_BOT_WEBHOOK_URL", () => {
     process.env.GROK_BOT_WEBHOOK_URL = "http://example.com/hook";
     expect(() => loadEnv()).toThrow(/https/);
   });
+
+  test("rejects :1340 gateway URLs", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.GROK_BOT_WEBHOOK_URL = "https://example.com:1340/hook";
+    expect(() => loadEnv()).toThrow(/1340/);
+  });
+
+  test("rejects Discord incoming webhook URLs", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.GROK_BOT_WEBHOOK_URL = "https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwx";
+    expect(() => loadEnv()).toThrow(/webhook/i);
+  });
+
+  test("GROK_BOT_WEBHOOK_SECRET empty is unset (optional)", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.GROK_BOT_WEBHOOK_SECRET = "";
+    const env = loadEnv();
+    expect(env.GROK_BOT_WEBHOOK_SECRET).toBeUndefined();
+  });
 });
 
 describe("HEALTH_HOST", () => {
@@ -96,5 +124,29 @@ describe("HEALTH_HOST", () => {
     process.env.DISCORD_GUILD_ID = "123456789012345678";
     process.env.HEALTH_HOST = "192.168.1.5";
     expect(() => loadEnv()).toThrow(/loopback|Tailscale/);
+  });
+
+  test("blank HEALTH_HOST binds loopback", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    expect(httpBindHostname(loadEnv())).toBe("127.0.0.1");
+  });
+});
+
+describe("job roles", () => {
+  test("empty JOB_TRIGGER_ROLE_IDS is an empty set (fail closed)", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.JOB_TRIGGER_ROLE_IDS = "";
+    expect(jobTriggerRoleIds(loadEnv()).size).toBe(0);
+  });
+
+  test("GROK_DISPATCH_LEADERSHIP defaults on", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    expect(loadEnv().GROK_DISPATCH_LEADERSHIP).toBe(true);
   });
 });

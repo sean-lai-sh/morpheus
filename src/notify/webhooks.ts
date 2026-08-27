@@ -1,7 +1,7 @@
 import { FEED_WEBHOOK_ENV, type FeedChannelKey } from "./channels.ts";
 import { logger } from "../logger.ts";
 
-function isDiscordWebhookUrl(raw: string): boolean {
+export function isDiscordWebhookUrl(raw: string): boolean {
   try {
     const u = new URL(raw);
     if (u.protocol !== "https:") return false;

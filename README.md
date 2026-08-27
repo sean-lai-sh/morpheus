@@ -65,6 +65,7 @@ doppler setup --project morpheus-bot --config dev
 doppler secrets set DISCORD_BOT_TOKEN=...
 doppler secrets set DISCORD_GUILD_ID=...
 doppler secrets set GROK_BOT_WEBHOOK_URL=...
+doppler secrets set GROK_BOT_WEBHOOK_SECRET=...   # Authorization: Bearer; Mini only
 doppler secrets set LOG_LEVEL=info HEALTH_PORT=8080
 ```
 
@@ -89,6 +90,7 @@ bun src/index.ts live
 3. Copy token to Doppler as `DISCORD_BOT_TOKEN`
 4. OAuth2 scopes: `bot` + `applications.commands`, permissions: `View Channels` + `Read Message History`. **For mention replies (#30) also grant Send Messages and Send Messages in Threads.**
 5. Invite to the guild and restrict to the desired channels at the channel-permission level
+6. Set `JOB_TRIGGER_ROLE_IDS` (eboard role snowflakes). Empty list fail-closes enqueue. Mentions (`@bot` / reply-to-bot) and `/ask` enqueue the same SQLite `jobs` table; Mini POSTs a thin first-pass pack to `GROK_BOT_WEBHOOK_URL`. Replies post via `message.reply` as this bot — Grok never holds `DISCORD_BOT_TOKEN`.
 
 ### 4. Configure channels
 

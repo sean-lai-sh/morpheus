@@ -91,6 +91,35 @@ function migrate(db: Database): void {
       folder_path TEXT PRIMARY KEY,
       dirty INTEGER NOT NULL DEFAULT 0
     );
+
+    -- Additive jobs table (#29/#30). Do not fold FTS/seq into this migration.
+    CREATE TABLE IF NOT EXISTS jobs (
+      id TEXT PRIMARY KEY,
+      discord_message_id TEXT NOT NULL UNIQUE,
+      discord_channel_id TEXT NOT NULL,
+      discord_thread_id TEXT,
+      author_id TEXT NOT NULL,
+      namespace TEXT NOT NULL,
+      content TEXT NOT NULL,
+      status TEXT NOT NULL,
+      claimed_by TEXT,
+      claimed_at INTEGER,
+      result_discord_message_id TEXT,
+      reply_text TEXT,
+      completion_key TEXT UNIQUE,
+      github_issue_url TEXT,
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      scope TEXT,
+      channel_ids TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_jobs_status_namespace_created
+      ON jobs(status, namespace, created_at);
+    CREATE INDEX IF NOT EXISTS idx_jobs_author_status
+      ON jobs(author_id, status);
+    CREATE INDEX IF NOT EXISTS idx_jobs_author_created
+      ON jobs(author_id, created_at);
   `);
 }
 
@@ -118,6 +147,8 @@ function migrateAlter(db: Database): void {
     )
   `);
   try { db.exec(`DROP TABLE IF EXISTS nia_sync_state`); } catch { /* ignore */ }
+  try { db.exec(`ALTER TABLE jobs ADD COLUMN scope TEXT`); } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE jobs ADD COLUMN channel_ids TEXT`); } catch { /* already exists */ }
   migrateSeqAndFts(db);
 }
 
