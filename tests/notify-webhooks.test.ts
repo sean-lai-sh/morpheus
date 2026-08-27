@@ -22,6 +22,9 @@ describe("webhookUrlFor", () => {
       const url = `https://${host}/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwx`;
       expect(webhookUrlFor("sponsors", { DISCORD_WEBHOOK_SPONSORS: url })).toBe(url);
     }
+    // The documented versioned execute path is a Discord webhook too.
+    const versioned = "https://discord.com/api/v10/webhooks/123456789012345678/abcdefghijklmnopqrstuvwx";
+    expect(webhookUrlFor("sponsors", { DISCORD_WEBHOOK_SPONSORS: versioned })).toBe(versioned);
     // A lookalike host is NOT Discord.
     expect(() =>
       webhookUrlFor("sponsors", {

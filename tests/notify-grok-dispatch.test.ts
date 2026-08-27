@@ -93,6 +93,48 @@ describe("GROK_BOT_WEBHOOK_URL refuses Discord incoming webhooks on every Discor
     }
   });
 
+  test("versioned (/api/v10, /api/v9) and case-variant webhook paths are refused at both layers", () => {
+    const paths = [
+      "/api/v10/webhooks/123456789012345678/tok-tok-tok",
+      "/api/v9/webhooks/123456789012345678/tok-tok-tok",
+      "/API/webhooks/123456789012345678/tok-tok-tok",
+      "/api/V10/Webhooks/123456789012345678/tok-tok-tok",
+    ];
+    for (const host of ["discord.com", "ptb.discord.com"]) {
+      for (const p of paths) {
+        const hook = `https://${host}${p}`;
+        expect(() => envFor({ GROK_BOT_WEBHOOK_URL: hook })).toThrow(/Discord incoming webhook/);
+        const env: Env = { ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: hook };
+        expect(grokBotWebhookUrl(env)).toBeNull();
+      }
+    }
+  });
+
+  test("dispatchGrokJob refuses a versioned v10 Discord webhook; the poster is never called", async () => {
+    const env: Env = {
+      ...liveEnv(EBOARD),
+      GROK_BOT_WEBHOOK_URL: "https://discord.com/api/v10/webhooks/123456789012345678/tok-tok-tok",
+    };
+    let posted = 0;
+    const result = await dispatchGrokJob(
+      {
+        job: { id: "j-v10", namespace: EBOARD, discord_channel_id: SPONSORS, content: "hi there friends" },
+        snippets: [],
+        first_pass: true,
+      },
+      {
+        env,
+        poster: async () => {
+          posted += 1;
+          return { ok: true, status: 204 };
+        },
+      },
+    );
+    expect(result.dispatched).toBe(false);
+    expect(result.skipped).toBe("refused-discord-incoming-webhook");
+    expect(posted).toBe(0);
+  });
+
   test("dispatch-time guard refuses a ptb webhook even if env validation were bypassed", async () => {
     // Forge the Env to exercise the runtime guard directly (defense in depth).
     const env: Env = { ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: "https://ptb.discord.com./api/webhooks/123456789012345678/tok-tok-tok" };

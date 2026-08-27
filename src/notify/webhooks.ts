@@ -20,8 +20,14 @@ export function isDiscordWebhookUrl(raw: string): boolean {
     const u = new URL(raw);
     if (u.protocol !== "https:") return false;
     if (!isDiscordHost(u.hostname)) return false;
-    const parts = u.pathname.split("/").filter(Boolean);
-    return parts[0] === "api" && parts[1] === "webhooks" && parts.length >= 4;
+    // Execute path is /webhooks/{id}/{token} on the API base — either the
+    // unversioned default alias (/api/webhooks/…) or the documented versioned
+    // base (/api/v10/webhooks/…). Compare case-insensitively: this is a
+    // denylist, so an uppercased path must not slip past it.
+    const parts = u.pathname.split("/").filter(Boolean).map((p) => p.toLowerCase());
+    if (parts[0] !== "api") return false;
+    const rest = /^v\d+$/.test(parts[1] ?? "") ? parts.slice(2) : parts.slice(1);
+    return rest[0] === "webhooks" && rest.length >= 3;
   } catch {
     return false;
   }
