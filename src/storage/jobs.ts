@@ -423,7 +423,7 @@ export function firstPassSnippets(
         : [job.discord_thread_id ?? job.discord_channel_id];
     const threadParents = allowed.filter((id) => resolveChannel(id)?.include_threads);
     const idPh = allowed.map(() => "?").join(",");
-    const args: unknown[] = [...allowed];
+    const args: Array<string | number> = [...allowed];
     let sql = `SELECT id, channel_id, parent_channel_id, content
        FROM messages
        WHERE deleted_at IS NULL
@@ -434,7 +434,7 @@ export function firstPassSnippets(
     }
     sql += `) ORDER BY created_at DESC LIMIT ?`;
     args.push(lookback);
-    rows = getDb().query<SnippetRow, unknown[]>(sql).all(...args);
+    rows = getDb().query(sql).all(...args) as SnippetRow[];
   }
 
   const out: FirstPassSnippet[] = [];
