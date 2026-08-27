@@ -63,6 +63,41 @@ describe("grokBotWebhookUrl", () => {
   });
 });
 
+describe("GROK_BOT_WEBHOOK_URL refuses Discord incoming webhooks on every Discord host", () => {
+  const HOSTS = ["discord.com", "ptb.discord.com", "canary.discord.com", "discordapp.com", "canary.discordapp.com"];
+
+  test("parseEnv rejects a Discord webhook URL on any Discord host (first layer)", () => {
+    for (const host of HOSTS) {
+      const hook = `https://${host}/api/webhooks/123456789012345678/tok-tok-tok`;
+      expect(() => envFor({ GROK_BOT_WEBHOOK_URL: hook })).toThrow(/Discord incoming webhook/);
+    }
+  });
+
+  test("dispatch-time guard refuses a ptb webhook even if env validation were bypassed", async () => {
+    // Forge the Env to exercise the runtime guard directly (defense in depth).
+    const env: Env = { ...liveEnv(EBOARD), GROK_BOT_WEBHOOK_URL: "https://ptb.discord.com/api/webhooks/123456789012345678/tok-tok-tok" };
+    expect(grokBotWebhookUrl(env)).toBeNull();
+    let posted = 0;
+    const result = await dispatchGrokJob(
+      {
+        job: { id: "j-ptb", namespace: EBOARD, discord_channel_id: SPONSORS, content: "hi there friends" },
+        snippets: [],
+        first_pass: true,
+      },
+      {
+        env,
+        poster: async () => {
+          posted += 1;
+          return { ok: true, status: 200 };
+        },
+      },
+    );
+    expect(result.dispatched).toBe(false);
+    expect(result.skipped).toBe("refused-discord-incoming-webhook");
+    expect(posted).toBe(0);
+  });
+});
+
 describe("grokBotWebhookSecret", () => {
   test("missing → null", () => {
     expect(grokBotWebhookSecret(envFor())).toBeNull();

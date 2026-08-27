@@ -1,11 +1,19 @@
 import { FEED_WEBHOOK_ENV, type FeedChannelKey } from "./channels.ts";
 import { logger } from "../logger.ts";
 
+/** discord.com/discordapp.com and any subdomain (ptb., canary. serve the same webhook API). */
+function isDiscordHost(hostname: string): boolean {
+  for (const root of ["discord.com", "discordapp.com"]) {
+    if (hostname === root || hostname.endsWith(`.${root}`)) return true;
+  }
+  return false;
+}
+
 export function isDiscordWebhookUrl(raw: string): boolean {
   try {
     const u = new URL(raw);
     if (u.protocol !== "https:") return false;
-    if (u.hostname !== "discord.com" && u.hostname !== "discordapp.com") return false;
+    if (!isDiscordHost(u.hostname)) return false;
     const parts = u.pathname.split("/").filter(Boolean);
     return parts[0] === "api" && parts[1] === "webhooks" && parts.length >= 4;
   } catch {
