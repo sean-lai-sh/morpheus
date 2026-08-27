@@ -340,10 +340,12 @@ function search(q: SearchQuery): SearchHit[] {
     if (!channelFilter) return [];
   }
 
-  const prefix =
+  const rawPrefix =
     q.pathPrefix && q.pathPrefix.endsWith("/") && q.pathPrefix.length > 1
       ? q.pathPrefix.slice(0, -1)
       : q.pathPrefix;
+  // Sanitized `/` is a no-op prefix (every index path is under `/`); same as omitting it.
+  const prefix = rawPrefix && rawPrefix !== "/" ? rawPrefix : undefined;
   let prefixFilter: PrefixSqlFilter | null = null;
   if (prefix) {
     prefixFilter = sqlFilterForPathPrefix(prefix, q.scope);
@@ -363,7 +365,10 @@ function search(q: SearchQuery): SearchHit[] {
       if (!rowInScope(row, q.scope)) continue;
       const path = indexPathForRow(row);
       if (!path) continue;
-      if (prefix && !pathPrefixMatches(path, prefix)) continue;
+      // SQL already pins `m.thread_id` for a thread (or in-thread message) prefix.
+      // Do not re-drop on `thread_name` in the path: Discord rename leaves mixed
+      // old/new names on the same id, and the other name would fill limit*4 (#65).
+      if (prefix && !prefixFilter?.threadId && !pathPrefixMatches(path, prefix)) continue;
       seen.add(row.id);
       hits.push({
         id: row.id,

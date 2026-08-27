@@ -137,6 +137,11 @@ function handleSearch(namespace: Scope, body: Record<string, unknown>): Response
   }
   const pathPrefix = stringFromBody(body, "pathPrefix");
   if (pathPrefix === null) return json({ error: "invalid pathPrefix" }, 400);
+  // Whitespace-only (and anything that trims to empty) must 400, not collapse to
+  // `/` via sanitizeIndexPath and silently drop every hit.
+  if (pathPrefix != null && pathPrefix.trim() === "") {
+    return json({ error: "invalid pathPrefix" }, 400);
+  }
   if (pathPrefix != null) {
     const bad = rejectPath(pathPrefix, namespace);
     if (bad) return bad;

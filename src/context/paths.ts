@@ -148,6 +148,9 @@ export function channelIdsForScope(scope: Scope): string[] {
 }
 
 export function pathPrefixMatches(path: string, prefix: string): boolean {
+  // `/` is the index root: every document path is under it. `path.startsWith("//")`
+  // would drop every hit (the #64 bug).
+  if (prefix === "/") return path.startsWith("/");
   return path === prefix || path.startsWith(`${prefix}/`);
 }
 

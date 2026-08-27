@@ -6,6 +6,7 @@ import {
   decodeEncodedPath,
   isForbiddenOsPath,
   parseIndexPath,
+  pathPrefixMatches,
   posixNormalize,
   sanitizeIndexPath,
 } from "../src/context/paths.ts";
@@ -155,5 +156,16 @@ describe("parseIndexPath: first segment must be a workspace", () => {
     expect(ch?.kind).toBe("channel");
     // Uncategorized channel sits directly under its workspace.
     expect(parseIndexPath("/eboard/general-chat-5005")?.kind).toBe("channel");
+  });
+});
+
+describe("pathPrefixMatches", () => {
+  test("`/` is a no-op prefix: every absolute index path matches", () => {
+    expect(pathPrefixMatches("/eboard/eboard-teams/sponsors-1001/1", "/")).toBe(true);
+    expect(pathPrefixMatches("/programs-dev", "/")).toBe(true);
+    expect(pathPrefixMatches("/", "/")).toBe(true);
+    expect(pathPrefixMatches("/eboard/general-chat-5005", "/eboard")).toBe(true);
+    expect(pathPrefixMatches("/eboard", "/eboard")).toBe(true);
+    expect(pathPrefixMatches("/eboard-other", "/eboard")).toBe(false);
   });
 });
