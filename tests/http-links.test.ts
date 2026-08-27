@@ -32,9 +32,12 @@ const DRIVE_L = "https://drive.google.com/file/d/LLLLLLLLLLLLLLLLLLLL/view";
 const DRIVE_T = "https://drive.google.com/file/d/TTTTTTTTTTTTTTTTTTTT/view";
 const FORM_PD = "https://forms.google.com/forms/d/PPPPPPPPPPPPPPPPPPPP/viewform";
 const SLIDES_DEL = "https://docs.google.com/presentation/d/DDDDDDDDDDDDDDDDDDDD/edit";
+// Backfilled: posted long ago (created_at 500) but ingested very late (first_seen_at 99_000).
+const DRIVE_BACKFILL = "https://drive.google.com/file/d/BACKFILLBACKFILL9999/view";
 
 const E_MSG = "100000000000000001"; // eboard 1001: DOC_A (newest of the dup pair) + SHEET_E + SHEET_E2
 const E_OLD_MSG = "100000000000000002"; // eboard 1001: DOC_A_OLD (older, same file_id)
+const E_BACKFILL_MSG = "100000000000000000"; // eboard 1001: DRIVE_BACKFILL, created 500 / first_seen 99_000
 const E_DEL_MSG = "100000000000000003"; // eboard 1001: SLIDES_DEL, deleted
 const L_MSG = "200000000000000002"; // leadership 2002: DRIVE_L
 const L_THREAD_ID = "200000000000000050";
@@ -50,6 +53,10 @@ function seed(input: MessageInput, firstSeenAt: number): void {
 
 beforeAll(() => {
   resetChannelsForTest();
+  seed(
+    { id: E_BACKFILL_MSG, channelId: "1001", authorId: "u1", authorName: "alice", content: `archive ${DRIVE_BACKFILL}`, createdAt: 500 },
+    99_000,
+  );
   seed(
     { id: E_OLD_MSG, channelId: "1001", authorId: "u1", authorName: "alice", content: `old ${DOC_A_OLD}`, createdAt: 1_000 },
     1_000,
@@ -190,10 +197,19 @@ describe("GET /v1/links", () => {
     expect((await get("/v1/links?kind=dropbox", EBOARD)).status).toBe(400);
   });
 
-  test("since / until filter on first_seen_at", async () => {
+  test("since / until filter on posted time (created_at), never ingest time", async () => {
+    // The backfilled link was ingested at 99_000 but POSTED at 500: it must not
+    // satisfy since=4000, and it must satisfy until=800.
     expect((await links("?since=4000", EBOARD)).map((l) => l.url)).toEqual([FORM_PD]);
-    expect((await links("?until=1500", EBOARD)).map((l) => l.url)).toEqual([DOC_A_OLD]);
+    expect((await links("?until=800", EBOARD)).map((l) => l.url)).toEqual([DRIVE_BACKFILL]);
+    expect((await links("?until=1500", EBOARD)).map((l) => l.url)).toEqual([DOC_A_OLD, DRIVE_BACKFILL]);
     expect((await get("/v1/links?since=abc", EBOARD)).status).toBe(400);
+  });
+
+  test("ordering is newest-first by posted time; a late backfill does not jump the feed", async () => {
+    const out = await links("", EBOARD);
+    expect(out[0]!.url).toBe(FORM_PD);
+    expect(out[out.length - 1]!.url).toBe(DRIVE_BACKFILL);
   });
 
   test("limit is clamped", async () => {
