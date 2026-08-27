@@ -1,10 +1,10 @@
-Parent: #25. Next: #27 / #40. **Blocked on #39 (Mini + Tailscale).** Do **not** implement from the frozen GitHub #26 body.
+Parent: [#41](https://github.com/sean-lai-sh/morpheus/issues/41) / [#40](https://github.com/sean-lai-sh/morpheus/issues/40). **Blocked on #39 (Mini + Tailscale).** Do **not** implement from the frozen GitHub **#26** body (poll-by-`created_at`, client namespace).
 
 ## Goal
 
-Replace Nia as the retrieval engine with an in-process `ContextStore` backed by SQLite FTS5 so Grok can **live grep/cat/ls the index** (HTTP in #27/#40). Ingest already upserts `messages`.
+In-process `ContextStore` backed by SQLite FTS5 so Grok can **live grep/cat/ls the index** (HTTP in #40). Ingest already upserts `messages`. Nia was **removed in PR #24** — this is the retrieval engine, not a soak-then-delete-Nia slice.
 
-This **supersedes the Nia half of #15**. Owner close #15: #38.
+This **supersedes** frozen GitHub #26 and the Nia half of #15.
 
 ## `channelId` vs schema (do not contradict `messages`)
 
@@ -31,7 +31,7 @@ This **supersedes the Nia half of #15**. Owner close #15: #38.
 - `src/context/namespace.ts` — `namespaceForRow` only.
 - `src/context/store.ts` — SQLite + **virtual** index paths (not Mini `data/` or `~`).
 - `src/storage/db.ts` — FTS5. Prefer external-content `content='messages'`; resolve namespace at query time from config. Flipping `isolated` requires `bun run reindex`.
-- `src/bot/ingest.ts` — `contextStore.index` after upsert/delete. Keep `appendBlock` until #28.
+- `src/bot/ingest.ts` — `contextStore.index` after upsert/delete. Local `appendBlock` markdown export may stay; it is not pushed to Nia (Nia is gone).
 - `src/tasks/reindex.ts` — rebuild FTS from `messages`.
 - Tests: thread→leadership, seq poll after edit/delete, `channelId` vs `parentChannelId`.
 

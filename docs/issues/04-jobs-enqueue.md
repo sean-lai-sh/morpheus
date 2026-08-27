@@ -1,4 +1,4 @@
-Parent: #25. Next: #30 / #37. Host: Mac Mini. Official bot only.
+Parent: [#41](https://github.com/sean-lai-sh/morpheus/issues/41). Next: #30 / #37. Host: Mac Mini. Official bot only.
 
 ## Goal
 

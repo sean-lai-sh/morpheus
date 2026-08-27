@@ -1,4 +1,4 @@
-Parent: #25 / #33. GitHub issue **#36**. Parallel with #29–#31. Does **not** replace FTS/`/v1`.
+Parent: [#41](https://github.com/sean-lai-sh/morpheus/issues/41). GitHub issue **#36**. Ops feed only — **not** the @-reply path (#30). Does **not** replace FTS/`/v1/fs`.
 
 ## Goal
 

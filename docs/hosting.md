@@ -11,7 +11,7 @@
 | SSHFS / NFS / SMB of `~` | **Forbidden.** Personal Mini projects stay off this share. |
 | Mac Mini on Sean's LAN + Tailscale | **Target host.** Always-on Discord gateway + Morpheus index HTTP. |
 
-Slice #0: [#39](https://github.com/sean-lai-sh/morpheus/issues/39). Live index tools: [#40](https://github.com/sean-lai-sh/morpheus/issues/40).
+Slice #0: [#39](https://github.com/sean-lai-sh/morpheus/issues/39). Live index tools: [#40](https://github.com/sean-lai-sh/morpheus/issues/40). Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
 
 ## What runs where
 
@@ -45,9 +45,9 @@ Slice #0: [#39](https://github.com/sean-lai-sh/morpheus/issues/39). Live index t
 
 - Destination: Mini tagged `tag:morpheus`
 - Port: Morpheus HTTP (`HEALTH_PORT`) **only**
+- Bind: `HEALTH_HOST`. **Production** = Mini Tailscale IPv4 (`100.x` / `100.64/10` CGNAT), ACL-allowlisted. **Local smoke** = loopback `127.0.0.1` (code default). Never `0.0.0.0` / `::` / `*`.
 - Auth: scoped `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP` (namespace from the token)
 - ACL sketch: `tag:grok-bot` → `tag:morpheus` TCP that port. **No SSH.** No other ports.
-- Bind the HTTP server to the Tailscale address (not a public NIC, not a LAN-wide `0.0.0.0` without ACL).
 - Encrypted by Tailscale; do not publish a public hostname or AWS load balancer.
 
 **Not a filesystem mount.** Paths on `/v1/fs` are **index paths** (channels, threads, leadership notes). They are not `/Users/sean`, `~/src`, or `data/` on disk. Do not design SSHFS/NFS/SMB of the homedir.
@@ -61,6 +61,7 @@ Documented empty in `.env.example`. Inject via Doppler **on the Mini** or the Gr
 | `DISCORD_BOT_TOKEN` | **Mini only** | Official bot token. Legacy alias: `DISCORD_TOKEN`. **Never** on Grok Bot. |
 | `DISCORD_GUILD_ID` | Mini | Guild snowflake |
 | `GROK_BOT_WEBHOOK_URL` | **Mini** | HTTPS URL of the Grok Bot routine. Thin job POST. |
+| `GROK_BOT_WEBHOOK_SECRET` | **Mini** | Bearer for that POST (`Authorization: Bearer …`). Not in the JSON body. |
 | `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP` | Mini + Grok (matching scope) | Tailscale `/v1/fs` + optional job complete. Namespace from which secret matched. |
 | `MORPHEUS_BASE_URL` | **Grok Bot** | Tailnet URL of Mini Morpheus HTTP. Not a public URL. |
 | `DISCORD_WEBHOOK_SPONSORS` | **Grok Bot** | Incoming webhook for `#sponsors` |
@@ -70,7 +71,7 @@ Documented empty in `.env.example`. Inject via Doppler **on the Mini** or the Gr
 
 Do not put these in git, in `config/channels.yml`, or in PR text. Do not put `MORPHEUS_BASE_URL` or API tokens in the Discord webhook payload.
 
-Mini Doppler does **not** need `NIA_*`. Nia is unsupported; delete leftover Nia secrets.
+Mini Doppler does **not** need `NIA_*`. Nia was **removed in PR #24**; do not set those secrets. Do not write a “delete Nia” slice again.
 
 ## Operator notes (Mini)
 

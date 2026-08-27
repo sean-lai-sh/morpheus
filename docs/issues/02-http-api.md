@@ -1,4 +1,4 @@
-Parent: #25. Depends on #26 (FTS) and #39 (Mini + Tailscale). Product: [#40](https://github.com/sean-lai-sh/morpheus/issues/40). Host: [`docs/hosting.md`](../hosting.md).
+Parent: [#41](https://github.com/sean-lai-sh/morpheus/issues/41) / [#40](https://github.com/sean-lai-sh/morpheus/issues/40). Depends on ContextStore FTS (`01-context-store.md`, **not** frozen GitHub #26) and #39 (Mini + Tailscale). Host: [`docs/hosting.md`](../hosting.md). Do **not** implement from frozen GitHub #27.
 
 ## Goal
 
@@ -53,7 +53,7 @@ Reject (`404`): `..`, `/Users`, `~`, absolute host paths, any path that is not u
 
 ## Implementation notes
 
-- Same `Bun.serve` as `/health`. Listen on Tailscale IP (`HEALTH_HOST` / default Tailscale interface), **not** a public NIC.
+- Same `Bun.serve` as `/health`. Listen on Tailscale IP (`HEALTH_HOST`: production `100.x` allowlist, loopback for local smoke), **not** a public NIC. Never `0.0.0.0`.
 - `limit` capped at 50 for search, 100 for tree.
 - Never return SQL errors; 500 internally.
 - CORS default deny.

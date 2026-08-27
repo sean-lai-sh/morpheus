@@ -1,4 +1,4 @@
-Parent: #25. **Nia runtime was removed in PR #24.** This file is no longer “flag off, soak, then delete `src/nia/`.” Product vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
+**DONE.** Parent was #25. **Nia runtime was removed in PR #24** (`074022f` on `main`). This file is not “flag off, soak, then delete `src/nia/`.” Do not reopen Nia. Product vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
 
 ## Done in #24
 

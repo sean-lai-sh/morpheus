@@ -1,4 +1,4 @@
-Parent: #25 / #33. GitHub issue **#39**. Spec: [`docs/hosting.md`](../hosting.md). **Do this before #26.**
+Parent: [#41](https://github.com/sean-lai-sh/morpheus/issues/41). GitHub issue **#39**. Spec: [`docs/hosting.md`](../hosting.md). Slice #0.
 
 ## Goal
 
@@ -17,7 +17,7 @@ Cloud agents edit a repo and exit. Grok Bot’s shared box is one-shot. Neither 
 - [ ] `doppler run -- bun run live` under launchd / `brew services`
 - [ ] Mini is on the tailnet with `tag:morpheus`
 - [ ] ACL: only `tag:grok-bot` (or equivalent) → `tag:morpheus` **TCP `HEALTH_PORT`**. No SSH grant.
-- [ ] Bind Morpheus HTTP to the Tailscale address (not LAN `0.0.0.0`, not a public NIC)
+- [ ] Bind Morpheus HTTP: production `HEALTH_HOST` = Mini Tailscale `100.x`; local smoke = `127.0.0.1`. Never `0.0.0.0`.
 - [ ] Doppler on Mini: `DISCORD_BOT_TOKEN`, `GROK_BOT_WEBHOOK_URL`. Grok never gets the bot token.
 - [ ] Personal projects under `~` are **not** in the index and **not** shared
 

@@ -1,3 +1,5 @@
+**SUPERSEDED as the implementation contract by [#41](https://github.com/sean-lai-sh/morpheus/issues/41).** Keep the **consumer name** (Grok Bot). Poll-loop / “Grok polls `/v1/jobs`” text in the GitHub body is **stale** — Mini pushes (#37 / #42).
+
 ## Goal
 
 Name the **consumer** so later Cursor slices do not rebuild the May 2026 in-process Pi agent.
@@ -9,7 +11,7 @@ Name the **consumer** so later Cursor slices do not rebuild the May 2026 in-proc
 ## The loop (required)
 
 1. Official Discord bot on the Mini (`DISCORD_BOT_TOKEN`). Not a self-bot.
-2. Mini **POSTs** a **first-pass** `{ job, snippets, first_pass: true }` to `GROK_BOT_WEBHOOK_URL`.
+2. Mini **POSTs** a **first-pass** `{ job, snippets, first_pass: true }` to `GROK_BOT_WEBHOOK_URL` (`Authorization: Bearer GROK_BOT_WEBHOOK_SECRET`).
 3. Grok Bot (one-shot) **live-searches the Morpheus index** over Tailscale (`/v1/fs/tree|search|read`) if snippets are not enough. Index paths only — not the Mini homedir.
 4. Then Grok:
    - returns `{ reply }` to Mini (job complete)
@@ -31,11 +33,9 @@ Name the **consumer** so later Cursor slices do not rebuild the May 2026 in-proc
 
 ## Implement in this order
 
-**One sequence** (`docs/context-layer.md` §7): **#39** host → #26 FTS → #29 jobs → #37 first-pass POST → **#42 activate Grok Bot webhook** → **#40/#27 Tailscale vfs** → #30 replies → #36 webhooks → #31 GitHub optional → **#28 last**.
+**#41’s sequence:** **#39** host → #29 jobs → #37 first-pass POST → **#42 activate Grok Bot webhook** → **#40 Tailscale vfs** → #30 replies → #36 webhooks.
 
-Product vision (locked): [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
-
-#31 poll-over-internet is **not** how Grok receives work. Mini pushes; the worker is the Grok Bot URL (#42). Without #42 this is a queue with no consumer.
+Nia was **removed in #24**. Poll-over-internet #31 is **not** how Grok receives work. Mini pushes; the worker is the Grok Bot URL (#42).
 
 ## Docs
 

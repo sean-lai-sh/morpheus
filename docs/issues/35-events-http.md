@@ -1,6 +1,8 @@
+**PARK.** Product vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41). PR **#23 was closed without merge**. Do **not** implement `/v1/events` until an events table exists on `main`.
+
 ## Goal
 
-Once the events table from #7 / PR #23 is on main, expose it over **the same Morpheus HTTP** as #27/#40 (Tailscale `tag:morpheus`, scoped tokens). Event context for Grok can also ride in the Mini→`GROK_BOT_WEBHOOK_URL` first-pass POST (#37). Grok does not poll this over the **public** internet.
+Once an events table from #7 / PR #23 (or a successor) is on main, expose it over **the same Morpheus HTTP** as #40 (Tailscale `tag:morpheus`, scoped tokens). Event context for Grok can also ride in the Mini→`GROK_BOT_WEBHOOK_URL` first-pass POST (#37). Grok does not poll this over the **public** internet.
 
 This **replaces** implementing #17 / #18 as `pi-agent-core` tools. Do **not** host this API on AWS, Cursor VMs, or Grok Bot’s shared computer.
 

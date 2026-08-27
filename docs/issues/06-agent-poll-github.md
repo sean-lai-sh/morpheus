@@ -1,4 +1,4 @@
-Parent: #25. GitHub issue **#31**. Hosting: [`docs/hosting.md`](../hosting.md). Mini POSTs to Grok (#37). **Activation: [`42-grok-bot-activation.md`](42-grok-bot-activation.md).** Grok does **not** poll Mini over the public internet.
+**STALE as the consumer contract.** GitHub issue **#31**. Product vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41). Mini POSTs to Grok (#37); worker is #42. Grok does **not** poll Mini `/v1/jobs` over the public internet. Optional GitHub-issue-from-leadership stays **off**. Do not keep a poll-loop doc as the contract.
 
 ## Goal
 

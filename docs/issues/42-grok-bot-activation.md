@@ -9,7 +9,7 @@ This slice is the consumer **activation**, not another poll loop. Product vision
 ## What “activated” means
 
 1. There is a Cursor **Grok Bot** routine (`tech@nyu summary`) that accepts HTTPS POSTs.
-2. Mini Doppler has `GROK_BOT_WEBHOOK_URL` set to that routine’s URL (https only).
+2. Mini Doppler has `GROK_BOT_WEBHOOK_URL` set to that routine’s URL (https only) and `GROK_BOT_WEBHOOK_SECRET` for `Authorization: Bearer`.
 3. On enqueue, Mini POSTs the thin first-pass pack (`first_pass: true`) — sketched in `src/notify/grok-dispatch.ts`.
 4. That POST **is** the wakeup. Grok then:
    - uses first-pass snippets if they suffice, else Tailscale `/v1/fs` (#40)

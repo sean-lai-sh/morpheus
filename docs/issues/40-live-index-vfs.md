@@ -1,4 +1,4 @@
-Parent: #25 / #33 / #39. GitHub issue **#40**. HTTP shape: `docs/issues/02-http-api.md`. Host: `docs/hosting.md`.
+Parent: [#41](https://github.com/sean-lai-sh/morpheus/issues/41) / #39. GitHub issue **#40**. HTTP shape: `docs/issues/02-http-api.md` (not frozen GitHub #26/#27). Host: `docs/hosting.md`.
 
 ## Goal
 

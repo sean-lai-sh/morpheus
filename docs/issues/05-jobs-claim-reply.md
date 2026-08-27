@@ -1,4 +1,4 @@
-Parent: #25. Depends on #29. Host: Mac Mini. Official bot posts replies. Jobs go **out** via `GROK_BOT_WEBHOOK_URL` (#37); Grok is activated by that POST (#42). Product vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
+Parent: [#41](https://github.com/sean-lai-sh/morpheus/issues/41). Depends on #29. Host: Mac Mini. Official bot posts replies (`message.reply`). Jobs go **out** via `GROK_BOT_WEBHOOK_URL` (#37); Grok is activated by that POST (#42). Incoming webhooks are **#36 ops feed only**.
 
 ## Goal
 

@@ -1,28 +1,20 @@
 # Morpheus as a queryable context layer
 
-Investigation of https://github.com/sean-lai-sh/morpheus (main @ `291a3ef`, after PR #6 `nia-index-overhaul`). This document is the source of truth for the Nia-exit and Discord-entry work. It is based on the current tree, not on earlier guesses.
+**Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).** Implement that. This document is investigation + interface sketches. Do **not** implement May `agent-v1`, frozen GitHub #26/#31/#33, Nia, or poll-loop “Grok polls `/v1/jobs`”.
 
-**Host (decided):** persistent **Mac Mini** on Sean's network — official Discord gateway + Morpheus **index**. **Not AWS**. **Not** a Cursor cloud-agent VM. **Not** Grok Bot's shared computer. Live Grok tools reach the index over **Tailscale only** (`tag:morpheus`, HTTP port, scoped token). Not a homedir mount. See [`docs/hosting.md`](hosting.md).
+Nia runtime was **removed in PR [#24](https://github.com/sean-lai-sh/morpheus/pull/24)** (`074022f` on `main`). `src/nia/` is gone. Mini needs zero `NIA_*`. Do not soak-then-delete Nia again; do not restore it.
 
-**This PR (#24) removes the Nia runtime (`src/nia/` gone; Mini needs zero `NIA_*`) plus investigation + hosting/webhook docs + `src/notify` ops-feed helpers.** Do not implement jobs enqueue, FTS ContextStore, `/v1/fs`, or mention replies here — sibling PRs take those slices. Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
+**Host (decided):** persistent **Mac Mini** on Sean's network — official Discord gateway + Morpheus **index**. **Not AWS**. **Not** a Cursor cloud-agent VM. **Not** Grok Bot's shared computer. Live Grok tools reach the index over **Tailscale only** (`tag:morpheus`, HTTP port, scoped token). `HEALTH_HOST` production = Tailscale `100.x`; loopback for local smoke. Not a homedir mount. See [`docs/hosting.md`](hosting.md).
 
-**Corrections vs. the investigation brief**
+Jobs / FTS / `/v1/fs` / mention replies are **later slices** (open PRs #43 / #44 — do not merge from a docs PR). Marker: [`docs/issues/PARKED.md`](issues/PARKED.md).
 
-| Guess | What the code actually does |
-|---|---|
-| Morpheus is a generic partial-indexing tool | It is a **Tech@NYU eboard Discord ingest bot**. It crawls allowlisted channels into SQLite, renders markdown, and (optionally) pushes that markdown to Nia. |
-| Nia dumps artifacts onto a local filesystem that Morpheus then reads | **Inverted.** Morpheus writes `data/discord/**/*.md` itself, then **pushes** those files to Nia's remote filesystem API. Nothing in this repo searches or reads Nia. |
-| Runtime depends on `nia-cli` | **No.** There is no `nia-cli` dependency. Indexing uses `fetch` against `https://apigcp.trynia.ai/v2` in `src/nia/client.ts`. `nia` CLI appears only as a *human* research step in closed issue #9. |
-| Discord is a future entry point | Discord is **already** the ingest entry point (official `discord.js` bot, not a self-bot). What is missing is mention→job, replies, and GitHub issue posting. |
-| Search/read of indexed artifacts lives here | **Not implemented.** Planned in open issue #15 as "SQLite FTS + Nia search", which this plan supersedes. |
-
-Existing `agent-v1` issues (#7–#22) assume an **in-process Pi/Claude agent** (`@mariozechner/pi-agent-core`) that still queries Nia. The consumer is now **Cursor Grok Bot** (Tech@NYU): Discord → **Mac Mini** (thin job POST) → Grok **live-searches the Morpheus index over Tailscale**. Audit: [`docs/grok-bot-audit.md`](grok-bot-audit.md). Hosting: [`docs/hosting.md`](hosting.md). Do not implement #15's Nia retrieval path or #10's in-process mention reply. Do not mount the Mini homedir.
+The consumer is **Cursor Grok Bot**: Discord → **Mac Mini** (thin job POST) → Grok **live-searches the Morpheus index over Tailscale**. Do not implement #15's Nia retrieval or #10's in-process mention reply.
 
 ---
 
 ## 1. Architecture map
 
-**Today (code on Mini once deployed):** Discord gateway → ingest → SQLite → optional Nia push.
+**Today on `main` (after #24):** Discord gateway → ingest → SQLite → local markdown export. **No Nia push.**
 
 **Target loop (thin Discord job + live index tools):**
 
@@ -32,6 +24,7 @@ Existing `agent-v1` issues (#7–#22) assume an **in-process Pi/Claude agent** (
                                              • Morpheus SQLite index (club only)
                                              • no public inbound IP
                       POST GROK_BOT_WEBHOOK_URL
+                      Authorization: Bearer GROK_BOT_WEBHOOK_SECRET
                                              • { job, first_pass snippets }
                       -------------------->  Grok Bot (one-shot)
                                              • if needed: Tailscale
@@ -64,37 +57,30 @@ Do **not** run `bun run live` on Grok Bot's machine or on Cursor cloud agents. D
                 ├─ hard filters (bots, too-short, pure media)
                 ├─ SQLite upsert   ← SOURCE OF TRUTH
                 ├─ GDrive link extract
-                └─ append markdown block + mark dirty
+                └─ append markdown block (local export only; not pushed to Nia)
                         │
                         ▼
               data/discord/{general|leadership}/.../*.md
-                        │
-                        ▼  60s dirty-flag poll (live) or flushNow (backfill/reconcile/shutdown)
-              src/nia/syncer.ts → PUT /fs/{id}/files
-                        │
-                        ▼
-              Nia remote namespaces (semantic search happens *outside this repo*)
 ```
 
 ### Entry points (`src/index.ts`)
 
 | Command | Script | What it does |
 |---|---|---|
-| `live` | `bun run live` / `dev` | Gateway subscriber + Nia syncer + `/health` + scheduled reconcile/backfill/backup. Long-running. |
-| `backfill` | `bun run backfill` | One-shot history crawl, then `flushNow()` to Nia. |
-| `reconcile` | `bun run reconcile` | One-shot lookback, then Nia flush. |
-| `reindex` | `bun run reindex` | Rebuild markdown from SQLite. Does **not** push to Nia by itself (dirty flag is set; live syncer or a later flush would). |
+| `live` | `bun run live` / `dev` | Gateway subscriber + `/health` + scheduled reconcile/backfill/backup. Long-running. **No Nia syncer.** |
+| `backfill` | `bun run backfill` | One-shot history crawl. |
+| `reconcile` | `bun run reconcile` | One-shot lookback. |
+| `reindex` | `bun run reindex` | Rebuild markdown from SQLite. |
 | `rotate` | `bun run rotate` | Archive old markdown. Currently only scans **flat** files under `data/discord/*.md` (legacy). Hierarchical layout from PR #6 is not rotated. |
 
-One-shot scripts: `scripts/register-nia-source.ts`, `scripts/list-channels.ts`, `scripts/refresh-members.ts`.
+One-shot scripts: `scripts/list-channels.ts`, `scripts/refresh-members.ts`, `scripts/post-feed.ts`. (`register-nia-source.ts` was deleted in #24.)
 
 ### How indexing is triggered
 
 1. **Live:** `Events.MessageCreate` / `MessageUpdate` / `MessageDelete` / reaction add/remove → `ingestMessage` / `ingestDelete` / `handleReactionChange`.
 2. **Backfill:** paginate `channel.messages.fetch({ before })` from `oldest_seen_id` back to channel creation; optional active + archived threads.
 3. **Reconcile:** refetch last `defaults.reconcile_lookback` (default 200) messages; tombstone SQLite rows in that window that Discord no longer returns.
-4. **Markdown:** every insert/edit/delete/reaction that changes stored content calls `appendBlock` → append-only `.md` + `markDirty(GENERAL_DIR|LEADERSHIP_DIR)`.
-5. **Nia:** `startSyncer()` in live mode polls every 60s; if dirty, **pushes every `.md` file in the tree** (not a delta). `flushNow()` after backfill/reconcile and on shutdown.
+4. **Markdown:** every insert/edit/delete/reaction that changes stored content calls `appendBlock` → append-only `.md`. Local export only.
 
 There is no inbound "index this URL" API. The only sources are Discord channels listed in `config/channels.yml`.
 
@@ -105,85 +91,52 @@ Local (gitignored `data/`):
 ```
 data/
   morpheus.db              SQLite source of truth (override: MORPHEUS_DB_PATH)
-  backups/morpheus-*.db    nightly copy next to the live DB (honors MORPHEUS_DB_PATH; not hardcoded data/)
+  backups/morpheus-*.db    nightly copy next to the live DB (honors MORPHEUS_DB_PATH)
   discord/
     general/{category?}/{channel-slug-last4}/
       main.md
       threads/{thread-slug-last4}.md
     leadership/...         channels with isolated: true
-  discord-archive/         rotate() target — not registered with Nia
+  discord-archive/         rotate() target
 ```
 
-Nia (remote):
-
-- Namespace `morpheus-discord-general` ← `NIA_DISCORD_SOURCE_ID`
-- Namespace `morpheus-discord-leadership` ← `NIA_DISCORD_LEADERSHIP_SOURCE_ID`
-- Paths inside a namespace are relative to `GENERAL_DIR` / `LEADERSHIP_DIR` (e.g. `eboard-teams/leadership-team-1234/main.md`).
+Nia remote namespaces **no longer exist in this repo**.
 
 ### How search / read works today
 
-**It doesn't, in this repo.**
+**Not on `main` yet.** FTS + `/v1/fs` are #40 / in-repo `docs/issues/01-context-store.md` + `02-http-api.md` (open draft PR #44). Do **not** implement from frozen GitHub #26 (poll-by-`created_at`, client namespace).
 
-- SQLite has `messages`, `links`, `users`, `crawl_state`, `nia_sync_state`. Queries are by id / channel / parent, not FTS.
-- Markdown is append-only logs for Nia to embed. Edits append a new `EDIT` block; deletes append a tombstone. `reindex` cannot replay original-then-EDIT history because SQLite keeps only latest content.
-- `src/nia/client.ts` implements `POST /fs`, `PUT /fs/{id}/files`, `DELETE /fs/{id}/files`. `GET /fs` is mentioned in a comment and **not implemented**. There is no search, query, or read-file client.
-- `/health` reports `nia_dirty` / `nia_last_sync_at` / `nia_consecutive_failures` by reading `nia_sync_state` for `DISCORD_DIR` (`data/discord`). The syncer dirty flags are on `GENERAL_DIR` and `LEADERSHIP_DIR`. Health is looking at the **wrong row** and will not reflect real sync state.
+- SQLite has `messages`, `links`, `users`, `crawl_state`, `sync_state` (local dirty flags for markdown export). Queries are by id / channel / parent, not FTS.
+- Markdown is append-only logs. Edits append a new `EDIT` block; deletes append a tombstone.
+- `/health` reports ingest `last_message_at` (no `nia_*` fields).
 
 ---
 
-## 2. Nia-specific coupling (complete)
+## 2. Historical Nia coupling (removed in #24)
 
-### Code
+Do not reintroduce these. They are gone from `main`:
 
-| Location | Coupling |
+| Was | Status |
 |---|---|
-| `src/nia/client.ts` | REST client. Hardcoded fallback base `https://apigcp.trynia.ai/v2`. Requires `NIA_API_KEY`. |
-| `src/nia/syncer.ts` | 60s poll, full-tree `pushFile`, maps dirs → `NIA_DISCORD_SOURCE_ID` / `NIA_DISCORD_LEADERSHIP_SOURCE_ID`. |
-| `scripts/register-nia-source.ts` | `POST /fs`, then `doppler secrets set` for the two source IDs. `--force` abandons old namespaces. |
-| `src/index.ts` | `startSyncer` / `stopSyncer` / `flushNow` on live, backfill, reconcile, shutdown. |
-| `src/storage/db.ts` | Table `nia_sync_state(folder_path, last_sync_at, dirty, consecutive_failures)`. |
-| `src/storage/sync-state.ts` | Dirty-flag helpers keyed by **local folder path**. |
-| `src/storage/markdown.ts` | `GENERAL_DIR` / `LEADERSHIP_DIR`; `appendBlock` / `rerenderChannel` call `markDirty`. Written for Nia, but the files are local. |
-| `src/http/health.ts` | Exposes Nia sync fields (wrong folder key; see above). |
-| `src/tasks/rotate.ts` | Comment: archive is "NOT registered with Nia". Implementation is stale vs hierarchical layout. |
-| `src/config.ts` | `NIA_API_KEY`, `NIA_BASE_URL` (zod default `https://api.trynia.ai` — **different host and no `/v2` vs client.ts**), `NIA_DISCORD_SOURCE_ID`, `NIA_DISCORD_LEADERSHIP_SOURCE_ID`. |
-| `src/bot/ingest.ts` | Comments: "NIA indexes all content at query time"; always `setClassification(..., "operational")`. |
-| `package.json` | Script `register-nia`. |
+| `src/nia/client.ts`, `src/nia/syncer.ts` | **Deleted** |
+| `scripts/register-nia-source.ts` | **Deleted** |
+| `NIA_*` env keys | **Removed** from config / `.env.example` |
+| 60s dirty-flag full-tree PUT to Nia | **Gone** |
+| `/health` `nia_dirty` / `nia_last_sync_at` | **Gone** |
 
-### Env / Doppler (from `.env.example` + code; do not invent values)
+Leftover, unused: `NVIDIA_API_KEY` (classifier removed). `openai` may still be in `package.json` with no imports.
 
-Required for any Discord command (Mini only): `DISCORD_BOT_TOKEN` (legacy alias `DISCORD_TOKEN`), `DISCORD_GUILD_ID`. Mini outbound to Grok: `GROK_BOT_WEBHOOK_URL`. Never on Grok Bot; never in git.
+### What was *not* coupled to Nia (keep)
 
-Nia (all optional at process boot; sync no-ops with a warning if source IDs missing):
-
-- `NIA_API_KEY`
-- `NIA_BASE_URL` (README: `https://apigcp.trynia.ai/v2`)
-- `NIA_DISCORD_SOURCE_ID` (written by `register-nia`; listed in `.env.example`)
-- `NIA_DISCORD_LEADERSHIP_SOURCE_ID` (written by `register-nia`; **missing from `.env.example`**)
-
-Leftover, unused in source: `NVIDIA_API_KEY` (classifier removed; `db.ts` drops `classification_queue`). `openai` is in `package.json` with no imports.
-
-Runtime: `LOG_LEVEL`, `HEALTH_PORT`, `RETENTION_MONTHS`, `NODE_ENV`, `MORPHEUS_DB_PATH`.
-
-### Assumed local folders
-
-- `config/channels.yml` (gitignored; copy from `config/channels.example.yml`)
-- `data/discord/general`, `data/discord/leadership`
-- `data/morpheus.db` (+ WAL)
-- `data/backups/`, `data/discord-archive/`
-- Doppler CLI on the machine that runs `register-nia` / `bun run *` scripts (`doppler run --` wrappers)
-
-### What is *not* coupled to Nia (keep)
-
-Discord gateway, ingest filters, SQLite schema for messages/links/users/crawl_state, markdown *rendering* (useful as a human export), channel allowlist + `isolated` namespace split, health server process, tests.
+Discord gateway, ingest filters, SQLite schema for messages/links/users/crawl_state, markdown *rendering* (human export), channel allowlist + `isolated` namespace split, health server process, tests.
 
 ---
 
-## 3. Migration off Nia
+## 3. Live index (Nia already gone)
 
-Goal: Grok Bot can **live-search the Morpheus index** (tree / grep / cat) over Tailscale, after a thin Discord job POST. No Nia account. No public inbound IP. No Mini homedir share. AWS is **stale**.
+Goal: Grok Bot can **live-search the Morpheus index** (tree / grep / cat) over Tailscale, after a thin Discord job POST. No Nia. No public inbound IP. No Mini homedir share. AWS is **stale**.
 
-SQLite is already the source of truth. Nia is a derived, lossy, full-tree replica. The markdown tree can remain as an optional export; it must not be the retrieval API.
+SQLite is the source of truth. The markdown tree is an optional local export; it must not be the retrieval API. Nia was a derived replica and is **deleted**.
 
 ### Recommended shape
 
@@ -193,6 +146,7 @@ Keep ingest as-is. Add a `ContextStore` in-process (FTS5). Mini POSTs a **first-
  Discord ingest  →  SQLite (messages + fts)
                          │
                          ├── Mini POST GROK_BOT_WEBHOOK_URL  { job, first_pass }
+                         │     Authorization: Bearer GROK_BOT_WEBHOOK_SECRET
                          ├── Tailscale /v1/fs/tree|search|read  (Grok live tools)
                          └── optional markdown export (no Nia push)
 ```
@@ -302,13 +256,14 @@ Poll cursor is monotonic **`seq`**, bumped on every write (`upsertMessage` / `ma
 
 Do not expose raw SQL, Mini `data/` paths, `~`, or Discord tokens. Third-party egress: club Discord text leaves the Mini toward Cursor/xAI when Grok runs — snippets in the first-pass POST plus whatever Grok reads over Tailscale. Leadership isolation is necessary but not the whole privacy story; cap payloads; do not ship deleted messages.
 
-### Why not keep Nia as the query engine
+### Why Nia is not coming back
 
-- Requires `NIA_API_KEY` on every consumer (Discord bot, Cursor agent, laptop).
-- Index is a markdown dump: no structured filters (channel, thread, time) without parsing files.
-- Full-tree PUT every 60s does not scale and races the agent ("flush Nia before every turn" in #14).
-- Default URL mismatch (`api.trynia.ai` vs `apigcp.trynia.ai/v2`) is already a footgun.
-- This repo never implemented Nia search; wiring it now is new work on a vendor we are leaving.
+Nia is **gone** (PR #24). Do not restore it as a query engine:
+
+- Required `NIA_API_KEY` on every consumer.
+- Markdown dump: no structured filters without parsing files.
+- Full-tree PUT every 60s raced the agent ("flush Nia before every turn" in #14).
+- This repo never implemented Nia search.
 
 v1 FTS will miss some semantic paraphrases. That is acceptable; add embeddings behind `ContextStore.search` later without changing HTTP.
 
@@ -328,7 +283,8 @@ What to add: Mini POSTs a **thin** job (`first_pass` snippets) to `GROK_BOT_WEBH
         ▼
  Mac Mini  ingest + first-pass snippets
         │
-        POST GROK_BOT_WEBHOOK_URL   { job, snippets, first_pass: true }
+        POST GROK_BOT_WEBHOOK_URL   Authorization: Bearer GROK_BOT_WEBHOOK_SECRET
+                                    { job, snippets, first_pass: true }
         ▼
  Grok Bot (one-shot)
         ├─ Tailscale /v1/fs  search | read | tree   (if first-pass isn't enough)
@@ -400,11 +356,13 @@ Restrict the bot to eboard channels at the Discord permission layer **and** via 
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | **Mac Mini** Doppler. Never git. | Official gateway. Legacy alias: `DISCORD_TOKEN`. **Not** Grok Bot. **Not** Cursor VMs. |
 | `GROK_BOT_WEBHOOK_URL` | **Mac Mini** | Thin job + first-pass snippets. Not the full index. |
+| `GROK_BOT_WEBHOOK_SECRET` | **Mac Mini** | Bearer for that POST. Not in the JSON body. |
 | `DISCORD_WEBHOOK_*` | **Grok Bot** secret store | Incoming webhooks for `#sponsors` / `#opportunities` / `#speakers` / `#inbox`. |
 | `DISCORD_GUILD_ID` | Mini | Snowflake. Don't commit real `channels.yml`. |
 | `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP` | Mini + Grok (matching scope) | Tailscale `/v1/fs`. Namespace from which secret matched. |
 | `MORPHEUS_BASE_URL` | **Grok Bot** | Tailnet URL of Mini Morpheus HTTP. Not public. |
-| `NIA_*` | Mini Doppler until deleted | Not Grok Bot. |
+| `HEALTH_HOST` | Mini | Production: Tailscale `100.x`. Local smoke: `127.0.0.1`. Never `0.0.0.0`. |
+| `NIA_*` | **gone** | Removed in PR #24. Do not set. |
 | `NVIDIA_API_KEY` | leftover | Unused. Drop. |
 | SQLite | Mini disk | Club messages. **Not** a network filesystem share. |
 | Gateway + Morpheus | **Mac Mini**, always-on | Outbound Discord + Tailscale index HTTP. **AWS/Fly stale.** |
@@ -414,42 +372,38 @@ Single-process SQLite is fine for one bot replica. Multiple ingest replicas woul
 
 ---
 
-## 6. Stale or conflicting open issues
+## 6. Stale or conflicting GitHub issues
 
-Implementers should not blindly follow these:
+**Do not implement from these**, even if GitHub still shows OPEN (close often 403s). Full list: [`docs/issues/PARKED.md`](issues/PARKED.md). Owner paste: [`docs/issues/38-owner-close-stale.md`](issues/38-owner-close-stale.md).
 
 | Issue | Status vs current main |
 |---|---|
+| **#41** | **Locked vision. Start here.** |
 | #1 `ready` → `clientReady` | Still valid. Tiny fix in `src/bot/client.ts`. |
-| #2 backup after Nia sync | Backup already runs nightly in `live.ts`. Wiring to Nia sync is moot if Nia is removed; backup after successful FTS index flush is the replacement. |
-| #3 schedule reconcile | **Done** in `src/crawler/live.ts`. Owner close: #38. |
 | #4 `--channel` backfill flag | Still valid, independent. |
-| #5 thread attribution in markdown | **Done** in PR #6. Owner close: #38. |
-| #9 Nia-index pi-mono | Closed research; used `nia` CLI. Do not revive Nia indexing. |
-| #14 resumeBackfill + Nia flush | Catch-up pagination is still useful; **drop** `flushNamespace` / Nia dirty. |
-| #10–#13, #15, #19 | **Do not implement.** Owner close/retitle: [#38](https://github.com/sean-lai-sh/morpheus/issues/38). |
+| #2 backup after Nia sync | Moot. Nia gone. Nightly backup already in `live.ts`. |
+| #3 schedule reconcile | **Done** in `src/crawler/live.ts`. |
+| #5 thread attribution | **Done** in PR #6. |
+| #9 Nia-index pi-mono | Closed. Do not revive Nia. |
+| #10–#22 May agent-v1 | **Do not implement** (Pi / Nia / sandbox). |
+| #25–#28, #31–#35, #38 | Done or superseded by #41. Frozen #26/#31/#33 bodies are not the contract. |
 
----
+Live slices: #39 #29 #37 #42 #40 #36 #30.
 
-Issue drafts (same text filed on GitHub) live in [`docs/issues/`](issues/). Tracking epic: **#25**. PR: **#24**.
+Issue drafts live in [`docs/issues/`](issues/). Canonical: **#41**, not epic #25.
 
-## 7. Implementation order (Nia already removed in #24)
+## 7. Implementation order (parent: #41)
 
-Nia runtime is **gone** (PR #24). AWS/Fly as host is stale. Do **not** start GitHub #26 from its frozen body — implement in-repo `docs/issues/01-context-store.md` after #39.
+Nia is **gone**. AWS/Fly as host is stale. Do **not** start frozen GitHub #26/#27/#31. ContextStore spec is in-repo `docs/issues/01-context-store.md`.
 
-1. **#39** Mini host: launchd, Doppler, Tailscale `tag:morpheus`, no public inbound, no `~` share.
-2. **#26** ContextStore + FTS5 (`namespaceForRow`, `channelId`+`parentChannelId`, poll **seq** not `created_at`).
-3. **#29** mention → jobs (role gate, caps, trigger independent of ingest). `/cmd` is in-product (#41); mentions may ship first.
-4. **#37** Mini POST **first-pass** `{ job, snippets, first_pass: true }` (not a full-index dump).
-5. **#42** Grok Bot **activated** at `GROK_BOT_WEBHOOK_URL` (without this the queue has no worker).
-6. **#40 / #27** Tailscale vfs: `/v1/fs/tree|search|read`, scoped tokens. Grok live tools.
-7. **#30** idempotent official-bot replies (`claimed_by` mandatory; **Send Messages in Threads**).
-8. **#36** Discord incoming webhooks `#sponsors` `#opportunities` `#speakers` `#inbox` (parallel).
-9. **#31** GitHub **only** for implementation; **fail open** if `gh` is missing. Not how Grok receives work.
-10. **#35** `/v1/events` after PR #23 + `grok_bot` enum.
+1. **#39** Mini host: launchd, Doppler, Tailscale `tag:morpheus`, `HEALTH_HOST` = `100.x` in production.
+2. **#29** mention → jobs (role gate, caps). `/cmd` is in-product (#41); mentions may ship first.
+3. **#37** Mini POST **first-pass** with `Authorization: Bearer GROK_BOT_WEBHOOK_SECRET`.
+4. **#42** Grok Bot **activated** at `GROK_BOT_WEBHOOK_URL`.
+5. **#40** Tailscale vfs `/v1/fs/tree|search|read` (in-repo FTS + HTTP docs; not frozen #26/#27).
+6. **#30** idempotent official-bot `message.reply`.
+7. **#36** Discord incoming webhooks (ops feed only, not @-replies).
 
-Nia was **removed in #24**. Leftover #28 prose is now unused `openai` / `NVIDIA_API_KEY` (see `docs/issues/03-remove-nia.md`).
+**#35** `/v1/events` waits until an events table exists on main (PR #23 closed unmerged). GitHub issues are optional implementation-only, fail open — **not** how Grok receives work.
 
-Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41). Use relative in-repo links (`docs/context-layer.md`), not `blob/cursor/nia-migration-plan-9afa/...`. Filed GitHub #25/#26 still pin the branch; owner paste in #38.
-
-Markdown export (`appendBlock`) stays as a local dump; do not build new retrieval on it.
+Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41). Markdown export (`appendBlock`) stays as a local dump; do not build new retrieval on it.

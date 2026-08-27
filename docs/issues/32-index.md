@@ -1,30 +1,17 @@
-This index is GitHub issue **#32** (create-only). Owner close of stale issues: **#38**. **Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).**
+This index is **historical** (GitHub #32). **Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).**
 
-Parent epic: #25. Grok Bot: #33. Host: #39. Live index: #40. Activation: #42. Park agent-v1: #34 / [`PARKED.md`](PARKED.md). Analysis: PR #24.
+Nia was **removed in PR #24**. There is no “#28 last / soak then delete Nia” work left. Do not restore `src/nia/`.
 
-**One cutover** (#28 last). Relative links only — never `blob/cursor/nia-migration-plan-9afa`.
+Remaining implementation order is **#41’s list**, not the #25–#31 Nia-exit checklist:
 
-## Implementation order
-
-- [ ] **#41** product vision (locked — do not re-litigate)
-- [ ] #39 Mini host + Tailscale `tag:morpheus` (no public inbound, no `~` share)
-- [ ] #26 ContextStore FTS (`namespaceForRow`, `channelId`+`parentChannelId`, poll **seq**) — in-repo `01-context-store.md`, **not** the frozen GitHub body
-- [ ] #29 Discord mention → jobs (role gate, caps, trigger ≠ ingest). `/cmd` follow-up, still in-product (#41)
-- [ ] #37 Mini first-pass POST (`first_pass: true`, not a full-index dump)
-- [ ] **#42** Grok Bot **activated** at `GROK_BOT_WEBHOOK_URL` (queue with a worker)
-- [ ] #40 / #27 Tailscale vfs: `/v1/fs/tree|search|read`, scoped tokens
-- [ ] #30 Idempotent Discord replies; `claimed_by` mandatory; **Send Messages in Threads**
-- [ ] #36 Operational Discord webhooks `#sponsors` `#opportunities` `#speakers` `#inbox`
-- [ ] #31 GitHub implementation-only (fail open; allowlisted repo; approval). **Not** how Grok receives work
-- [ ] #35 `/v1/events` after PR #23 + `grok_bot` enum
-- [ ] #28 **last** — feature-flag and delete Nia (acceptance = `rg`/`tsc`/`bun test`, no Doppler)
+1. #39 Mini host + Tailscale `tag:morpheus` (no public inbound, no `~` share)
+2. #29 Discord mention → jobs (role gate, caps). `/cmd` follow-up, still in-product
+3. #37 Mini first-pass POST (`Authorization: Bearer GROK_BOT_WEBHOOK_SECRET`)
+4. #42 Grok Bot activated at `GROK_BOT_WEBHOOK_URL`
+5. #40 Tailscale vfs `/v1/fs` tree/search/read (in-repo `01-context-store.md` + `02-http-api.md`, **not** frozen GitHub #26/#27)
+6. #30 Idempotent Discord `message.reply`
+7. #36 Operational Discord webhooks (ops feed only — not @-replies)
 
 ## Do not implement
 
-- #10 / #13 / #15 / #19 (owner: #38; in-repo marker: [`PARKED.md`](PARKED.md))
-- Fat webhook as the retrieval API
-- Homedir / SSHFS / NFS / SMB of the Mini
-- One shared `MORPHEUS_API_TOKEN` plus client-supplied `namespace`
-- `DISCORD_BOT_TOKEN` on Grok Bot
-- AWS / Fly / Cursor VM as 24/7 host
-- Poll-loop #31 as the consumer contract
+See [`PARKED.md`](PARKED.md). In particular: #10 / #13 / #15 / #19, poll-loop #31 as the consumer contract, fat webhook retrieval, homedir mount, AWS/Fly host, `DISCORD_BOT_TOKEN` on Grok Bot.

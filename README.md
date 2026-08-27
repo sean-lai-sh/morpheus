@@ -1,14 +1,16 @@
 # Morpheus
 
-Discord intelligence bot for the club's eboard. Ingests allowlisted channels into SQLite and renders local markdown. Retrieval is SQLite on the Mac Mini (FTS / `/v1/fs` in later slices) — **not Nia**. Mini runs with **zero `NIA_*` secrets**.
+**Locked vision: [GitHub issue #41](https://github.com/sean-lai-sh/morpheus/issues/41).** Implement that. Do **not** implement May 2026 `agent-v1` issues, frozen GitHub **#26 / #31 / #33** bodies, Nia, Pi, or poll-loop “Grok polls `/v1/jobs`”.
 
-**Direction (2026-08):** **Host = Mac Mini.** **Grok Bot = consumer** with **live index search** over Tailscale (tree/grep/cat), not a Mini homedir mount. Thin Discord job POST + first-pass snippets; pull more via `/v1/fs`. See [docs/hosting.md](docs/hosting.md). **PR #24 does not implement jobs, FTS, `/v1/fs`, or mention replies** — those are later slices. Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
+Discord intelligence bot for the club's eboard. Ingests allowlisted channels into SQLite and renders local markdown. **Host = Mac Mini** (outbound-only). **Grok Bot = consumer.** Thin Discord job POST + first-pass snippets; Grok live-searches the Morpheus index over Tailscale (`/v1/fs` tree/grep/cat). Mini `message.reply`s as the official bot. Incoming webhooks are the [#36](https://github.com/sean-lai-sh/morpheus/issues/36) ops feed only.
 
-- Plan: [docs/context-layer.md](docs/context-layer.md) · hosting: [docs/hosting.md](docs/hosting.md) · webhooks: [docs/discord-webhooks.md](docs/discord-webhooks.md)
-- **Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41)** · Issue/PR audit: [docs/grok-bot-audit.md](docs/grok-bot-audit.md)
-- Grok Bot spec: [#33](https://github.com/sean-lai-sh/morpheus/issues/33) · activation: [docs/issues/42-grok-bot-activation.md](docs/issues/42-grok-bot-activation.md) · live index: [#40](https://github.com/sean-lai-sh/morpheus/issues/40) · Mini host: [#39](https://github.com/sean-lai-sh/morpheus/issues/39)
-- Parked agent-v1: [docs/issues/PARKED.md](docs/issues/PARKED.md) · owner close: [#38](https://github.com/sean-lai-sh/morpheus/issues/38)
-- Slices: [#32](https://github.com/sean-lai-sh/morpheus/issues/32) · Nia removed in this PR · #39 host → FTS → jobs → first-pass POST → **activate Grok Bot** → Tailscale `/v1/fs` → webhooks → GitHub optional
+Nia is **gone** (PR [#24](https://github.com/sean-lai-sh/morpheus/pull/24), `074022f` on `main`). `src/nia/` was deleted. Mini runs with **zero `NIA_*` secrets**. Do not restore Nia.
+
+Jobs / VFS are later slices — see open PRs #43 / #44. This tree on `main` does not implement them. Do not merge those PRs from a docs cleanup.
+
+- Vision + live slices: [#41](https://github.com/sean-lai-sh/morpheus/issues/41) · [#39](https://github.com/sean-lai-sh/morpheus/issues/39) Mini host · [#29](https://github.com/sean-lai-sh/morpheus/issues/29) enqueue · [#37](https://github.com/sean-lai-sh/morpheus/issues/37) Mini POST · [#42](https://github.com/sean-lai-sh/morpheus/issues/42) Grok worker · [#40](https://github.com/sean-lai-sh/morpheus/issues/40) live index · [#36](https://github.com/sean-lai-sh/morpheus/issues/36) ops webhooks · [#30](https://github.com/sean-lai-sh/morpheus/issues/30) official-bot reply
+- Hosting: [docs/hosting.md](docs/hosting.md) · plan: [docs/context-layer.md](docs/context-layer.md) · webhooks: [docs/discord-webhooks.md](docs/discord-webhooks.md)
+- Stale GitHub issues (do not implement): [docs/issues/PARKED.md](docs/issues/PARKED.md). Owner close paste: [docs/issues/38-owner-close-stale.md](docs/issues/38-owner-close-stale.md)
 
 ## Local markdown export
 
@@ -65,10 +67,11 @@ doppler setup --project morpheus-bot --config dev
 doppler secrets set DISCORD_BOT_TOKEN=...
 doppler secrets set DISCORD_GUILD_ID=...
 doppler secrets set GROK_BOT_WEBHOOK_URL=...
+doppler secrets set GROK_BOT_WEBHOOK_SECRET=...
 doppler secrets set LOG_LEVEL=info HEALTH_PORT=8080
 ```
 
-Do **not** set `NIA_*`. Delete them from Doppler if they still exist.
+Do **not** set `NIA_*`. They were removed in PR #24.
 
 Grok Bot (not Mini) holds `DISCORD_WEBHOOK_SPONSORS` / `_OPPORTUNITIES` / `_SPEAKERS` / `_INBOX`. Never commit any of these.
 
