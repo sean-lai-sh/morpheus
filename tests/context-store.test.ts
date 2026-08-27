@@ -612,4 +612,44 @@ describe("ContextStore search recall (issue #50)", () => {
     const other = hits.find((h) => h.id !== LINK_MSG);
     if (other) expect(other.links).toEqual([]);
   });
+
+  test("thread pathPrefix is narrowed in SQL before the limit (no starvation)", () => {
+    const THREAD_PATH = "/leadership/eboard-teams/leadership-team-2002/threads/retreat-seating-0050";
+    const THREAD_HIT = "200000000000000200";
+    // Add a matching message inside the target thread.
+    upsertMessage({
+      id: THREAD_HIT,
+      channelId: L_THREAD_ID,
+      parentChannelId: "2002",
+      authorId: "u2",
+      authorName: "bob",
+      content: "thread-starvation-token unique to the retreat thread",
+      createdAt: 6_000,
+      threadId: L_THREAD_ID,
+      threadName: "Retreat seating",
+    });
+    indexFromRow(getMessage(THREAD_HIT)!);
+    // Flood the parent channel with matching messages so the pre-fix code would
+    // fill the FTS window before reaching the thread row.
+    for (let i = 0; i < 50; i++) {
+      const id = `2000000000000000${String(i).padStart(2, "0")}`;
+      upsertMessage({
+        id,
+        channelId: "2002",
+        authorId: "u2",
+        authorName: "bob",
+        content: "thread-starvation-token unique to the retreat thread",
+        createdAt: 5_000 + i,
+      });
+      indexFromRow(getMessage(id)!);
+    }
+    const hits = contextStore.search({
+      query: "thread-starvation-token unique",
+      scope: leadership,
+      pathPrefix: THREAD_PATH,
+      limit: 10,
+    });
+    expect(hits.map((h) => h.id)).toEqual([THREAD_HIT]);
+    expect(hits.every((h) => h.path.startsWith(THREAD_PATH))).toBe(true);
+  });
 });
