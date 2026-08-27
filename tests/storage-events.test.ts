@@ -191,6 +191,25 @@ describe("storage/events", () => {
     expect(getEventById(created.id)?.version).toBe(1);
   });
 
+  test("grok_bot can update a manual row (Grok Bot is a non-parser writer)", () => {
+    const created = upsertEvent({
+      name: "manual-but-grok-ok",
+      status: "planned",
+      sourceType: "slash_command",
+      isManual: true,
+    });
+    const updated = upsertEvent({
+      id: created.id,
+      name: "manual-but-grok-ok",
+      status: "confirmed",
+      sourceType: "grok_bot",
+      isManual: true,
+      expectedVersion: 1,
+    });
+    expect(updated.version).toBe(2);
+    expect(updated.source_type).toBe("grok_bot");
+  });
+
   test("agent_update can update a manual row (only parser is gated)", () => {
     const created = upsertEvent({
       name: "manual-but-agent-ok",

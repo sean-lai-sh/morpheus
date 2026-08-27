@@ -15,6 +15,8 @@ export const EVENT_SOURCE_TYPES = [
   "agent_update",
   "slash_command",
   "manual_seed",
+  /** Cursor Grok Bot completing a Discord job (Tech@NYU). Same write privileges as agent_update. */
+  "grok_bot",
 ] as const;
 export type EventSourceType = (typeof EVENT_SOURCE_TYPES)[number];
 
