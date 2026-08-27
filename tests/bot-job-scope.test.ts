@@ -5,41 +5,87 @@ import {
   mentionChannelIds,
   resolveJobChannelScope,
 } from "../src/bot/job-scope.ts";
-import type { ChannelResolver } from "../src/storage/jobs.ts";
+import type { ChannelResolver } from "../src/context/namespace.ts";
+import {
+  DEV_CHAT,
+  EBOARD,
+  GENERAL_CHAT,
+  LEADERSHIP,
+  LEADERSHIP_TEAM,
+  MENTORSHIP_CHAT,
+  PROGRAMS_DEV,
+  PROGRAMS_MENTORSHIP,
+  SPONSORS,
+} from "./jobs-fixture.ts";
 
-const GENERAL = "111111111111111111";
-const MARKETING = "333333333333333333";
-const LEADERSHIP = "222222222222222222";
 const UNKNOWN = "999999999999999999";
 
-const resolveChannel: ChannelResolver = (id) => {
-  if (id === GENERAL || id === MARKETING) return { isolated: false, include_threads: true };
-  if (id === LEADERSHIP) return { isolated: true };
-  return undefined;
+/** The canonical tree, injected — this suite never reads channels.yml. */
+const WORKSPACES: Record<string, { parent?: string }> = {
+  [LEADERSHIP]: {},
+  [EBOARD]: { parent: LEADERSHIP },
+  [PROGRAMS_MENTORSHIP]: { parent: EBOARD },
+  [PROGRAMS_DEV]: { parent: EBOARD },
 };
+const resolveWorkspace = (id: string) => WORKSPACES[id];
+const visibleWorkspaces = (root: string): ReadonlySet<string> => {
+  const out = new Set<string>();
+  if (!(root in WORKSPACES)) return out;
+  const queue = [root];
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    if (out.has(cur)) continue;
+    out.add(cur);
+    for (const [id, w] of Object.entries(WORKSPACES)) if (w.parent === cur) queue.push(id);
+  }
+  return out;
+};
+
+const CHANNELS: Record<string, { workspace: string; include_threads?: boolean }> = {
+  [SPONSORS]: { workspace: EBOARD },
+  [GENERAL_CHAT]: { workspace: EBOARD },
+  [LEADERSHIP_TEAM]: { workspace: LEADERSHIP, include_threads: true },
+  [MENTORSHIP_CHAT]: { workspace: PROGRAMS_MENTORSHIP },
+  [DEV_CHAT]: { workspace: PROGRAMS_DEV, include_threads: true },
+};
+const resolveChannel: ChannelResolver = (id) => CHANNELS[id];
+
+function scopeFor(namespace: string, over: Partial<Parameters<typeof resolveJobChannelScope>[0]> = {}) {
+  return resolveJobChannelScope({
+    namespace,
+    originatingChannelId: SPONSORS,
+    threadId: null,
+    mentionedChannelIds: [],
+    canViewChannel: () => false,
+    resolveChannel,
+    resolveWorkspace,
+    visibleWorkspaces,
+    ...over,
+  });
+}
 
 describe("mentionChannelIds", () => {
   test("parses <#id> and mentions.channels keys", () => {
-    const mentions = new Map([[MARKETING, {}]]);
+    const mentions = new Map([[DEV_CHAT, {}]]);
     expect(
       mentionChannelIds({
-        content: `see <#${GENERAL}> and <#${MARKETING}>`,
+        content: `see <#${SPONSORS}> and <#${DEV_CHAT}>`,
         mentions: { channels: mentions },
       }),
-    ).toEqual(expect.arrayContaining([GENERAL, MARKETING]));
+    ).toEqual(expect.arrayContaining([SPONSORS, DEV_CHAT]));
   });
 });
 
 describe("authorCanViewChannel", () => {
   test("fail closed when member or channel cache is missing", () => {
-    expect(authorCanViewChannel({ member: { id: "m" } }, GENERAL)).toBe(false);
+    expect(authorCanViewChannel({ member: { id: "m" } }, SPONSORS)).toBe(false);
     expect(
       authorCanViewChannel(
         {
           member: undefined,
           guild: { channels: { cache: { get: () => ({ permissionsFor: () => ({ has: () => true }) }) } } },
         },
-        GENERAL,
+        SPONSORS,
       ),
     ).toBe(false);
   });
@@ -54,104 +100,84 @@ describe("authorCanViewChannel", () => {
       authorCanViewChannel(
         {
           member: { id: "m" },
-          guild: { channels: { cache: { get: (id: string) => (id === MARKETING ? channel : undefined) } } },
+          guild: { channels: { cache: { get: (id: string) => (id === DEV_CHAT ? channel : undefined) } } },
         },
-        MARKETING,
+        DEV_CHAT,
       ),
     ).toBe(true);
   });
 });
 
 describe("resolveJobChannelScope", () => {
-  test("leadership is unrestricted", () => {
+  test("a root workspace is unrestricted inside its subtree", () => {
     expect(
-      resolveJobChannelScope({
-        namespace: "leadership",
-        originatingChannelId: LEADERSHIP,
-        threadId: null,
-        mentionedChannelIds: [GENERAL],
+      scopeFor(LEADERSHIP, {
+        originatingChannelId: LEADERSHIP_TEAM,
+        mentionedChannelIds: [SPONSORS],
         canViewChannel: () => true,
-        resolveChannel,
       }),
-    ).toEqual({ scope: "leadership", channelIds: [] });
+    ).toEqual({ scope: "workspace", channelIds: [] });
   });
 
-  test("general defaults to originating only", () => {
-    expect(
-      resolveJobChannelScope({
-        namespace: "general",
-        originatingChannelId: GENERAL,
-        threadId: null,
-        mentionedChannelIds: [],
-        canViewChannel: () => false,
-        resolveChannel,
-      }),
-    ).toEqual({ scope: "channel", channelIds: [GENERAL] });
+  test("a non-root workspace is channel-scoped, originating only by default", () => {
+    expect(scopeFor(EBOARD)).toEqual({ scope: "channel", channelIds: [SPONSORS] });
+  });
+
+  test("an unknown workspace falls back to channel scope (fail closed)", () => {
+    expect(scopeFor("does-not-exist")).toEqual({ scope: "channel", channelIds: [SPONSORS] });
   });
 
   test("thread trigger includes parent + thread", () => {
     const thread = "555555555555555555";
-    expect(
-      resolveJobChannelScope({
-        namespace: "general",
-        originatingChannelId: GENERAL,
-        threadId: thread,
-        mentionedChannelIds: [],
-        canViewChannel: () => false,
-        resolveChannel,
-      }).channelIds,
-    ).toEqual([GENERAL, thread]);
+    expect(scopeFor(EBOARD, { threadId: thread }).channelIds).toEqual([SPONSORS, thread]);
   });
 
-  test("same-namespace mention with ViewChannel is added", () => {
+  test("same-workspace mention with ViewChannel is added", () => {
     expect(
-      resolveJobChannelScope({
-        namespace: "general",
-        originatingChannelId: GENERAL,
-        threadId: null,
-        mentionedChannelIds: [MARKETING],
-        canViewChannel: (id) => id === MARKETING,
-        resolveChannel,
+      scopeFor(EBOARD, {
+        mentionedChannelIds: [GENERAL_CHAT],
+        canViewChannel: (id) => id === GENERAL_CHAT,
       }).channelIds,
-    ).toEqual([GENERAL, MARKETING]);
+    ).toEqual([SPONSORS, GENERAL_CHAT]);
+  });
+
+  test("a descendant-workspace mention is visible to an eboard job", () => {
+    expect(
+      scopeFor(EBOARD, {
+        mentionedChannelIds: [DEV_CHAT, MENTORSHIP_CHAT],
+        canViewChannel: () => true,
+      }).channelIds,
+    ).toEqual([SPONSORS, DEV_CHAT, MENTORSHIP_CHAT]);
+  });
+
+  test("a sibling workspace is NOT visible to a programs-mentorship job", () => {
+    expect(
+      scopeFor(PROGRAMS_MENTORSHIP, {
+        originatingChannelId: MENTORSHIP_CHAT,
+        mentionedChannelIds: [DEV_CHAT, SPONSORS],
+        canViewChannel: () => true,
+      }).channelIds,
+    ).toEqual([MENTORSHIP_CHAT]);
+  });
+
+  test("a parent-workspace mention is not added to a child job", () => {
+    expect(
+      scopeFor(EBOARD, {
+        mentionedChannelIds: [LEADERSHIP_TEAM],
+        canViewChannel: () => true,
+      }).channelIds,
+    ).toEqual([SPONSORS]);
   });
 
   test("mention without ViewChannel is ignored", () => {
     expect(
-      resolveJobChannelScope({
-        namespace: "general",
-        originatingChannelId: GENERAL,
-        threadId: null,
-        mentionedChannelIds: [MARKETING],
-        canViewChannel: () => false,
-        resolveChannel,
-      }).channelIds,
-    ).toEqual([GENERAL]);
-  });
-
-  test("isolated mention is not added to a general job", () => {
-    expect(
-      resolveJobChannelScope({
-        namespace: "general",
-        originatingChannelId: GENERAL,
-        threadId: null,
-        mentionedChannelIds: [LEADERSHIP],
-        canViewChannel: () => true,
-        resolveChannel,
-      }).channelIds,
-    ).toEqual([GENERAL]);
+      scopeFor(EBOARD, { mentionedChannelIds: [GENERAL_CHAT], canViewChannel: () => false }).channelIds,
+    ).toEqual([SPONSORS]);
   });
 
   test("unknown / non-indexed mention is not added", () => {
     expect(
-      resolveJobChannelScope({
-        namespace: "general",
-        originatingChannelId: GENERAL,
-        threadId: null,
-        mentionedChannelIds: [UNKNOWN],
-        canViewChannel: () => true,
-        resolveChannel,
-      }).channelIds,
-    ).toEqual([GENERAL]);
+      scopeFor(EBOARD, { mentionedChannelIds: [UNKNOWN], canViewChannel: () => true }).channelIds,
+    ).toEqual([SPONSORS]);
   });
 });

@@ -109,12 +109,17 @@ export async function postJobReply(
   return { messageId: sent.id };
 }
 
+/**
+ * Default deny: a job's workspace must be listed in `allowedWorkspaces`
+ * (GITHUB_ISSUES_WORKSPACES) before its reply may carry a GitHub issue URL.
+ * Exact membership, not hierarchy.
+ */
 export function allowlistedGithubIssueUrl(
   raw: string | null | undefined,
-  opts: { repo?: string; namespace?: string; allowLeadershipGithub?: boolean } = {},
+  opts: { repo?: string; namespace?: string; allowedWorkspaces: string[] },
 ): string | null {
   if (!raw?.trim()) return null;
-  if (opts.namespace === "leadership" && !opts.allowLeadershipGithub) return null;
+  if (!opts.namespace || !opts.allowedWorkspaces.includes(opts.namespace)) return null;
   const repo = opts.repo?.trim();
   if (!repo) return null;
   try {
@@ -153,7 +158,8 @@ export async function completeJobWithReply(
     now?: number;
     postReplies?: boolean;
     githubRepo?: string;
-    allowLeadershipGithub?: boolean;
+    /** Workspace ids allowed to carry a GitHub issue URL. Default: GITHUB_ISSUES_WORKSPACES. */
+    githubWorkspaces?: string[];
   } = {},
 ): Promise<CompleteJobResult> {
   if (typeof input.reply !== "string" || input.reply.trim() === "") {
@@ -161,19 +167,19 @@ export async function completeJobWithReply(
   }
 
   let githubRepo = opts.githubRepo;
-  let allowLeadershipGithub = opts.allowLeadershipGithub;
+  let githubWorkspaces = opts.githubWorkspaces;
   let postReplies = opts.postReplies;
   const env = loadEnv();
   const reply = redactSecrets(input.reply, env);
   githubRepo ??= env.GITHUB_ISSUE_REPO;
-  allowLeadershipGithub ??= env.OPEN_GITHUB_ISSUES_FROM_LEADERSHIP;
+  githubWorkspaces ??= env.GITHUB_ISSUES_WORKSPACES;
   postReplies ??= env.DISCORD_POST_REPLIES;
 
   const existing = getJob(id);
   const github = allowlistedGithubIssueUrl(input.github_issue_url, {
     repo: githubRepo,
     namespace: existing?.namespace,
-    allowLeadershipGithub,
+    allowedWorkspaces: githubWorkspaces,
   });
 
   const prep = prepareComplete(

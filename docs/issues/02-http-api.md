@@ -14,28 +14,30 @@ Bind to the **Tailscale** address. ACL: `tag:morpheus`, **this HTTP port only**,
 
 ## Auth: namespace is not a client parameter
 
-**A client-supplied `namespace` is not authorization.** Scoped secrets: `MORPHEUS_API_TOKEN_GENERAL` and `MORPHEUS_API_TOKEN_LEADERSHIP`. Derive namespace **server-side** from the bearer. Ignore or **403** a client-supplied namespace that does not match. Job routes (#30) take namespace from the **job row**.
+**A client-supplied `namespace` is not authorization.** One scoped bearer per workspace, declared as `workspaces.<id>.token_env` in `config/channels.yml` (e.g. `MORPHEUS_API_TOKEN_LEADERSHIP`, `MORPHEUS_API_TOKEN_EBOARD`, `MORPHEUS_API_TOKEN_PROGRAMS_DEV`). Derive scope **server-side** from whichever token matched (`scopeFor`) — that workspace plus every transitive descendant, never upward or sideways. A client-supplied `namespace` that does not equal the token's root workspace → **403**. Job routes (#30) take scope from the **job row**'s workspace.
 
 Do **not** use `DISCORD_BOT_TOKEN` as this bearer.
 
 ## Index paths
 
-Virtual, POSIX-looking, rooted at `/general` or `/leadership`:
+Virtual, POSIX-looking, rooted at a workspace id (see `docs/context-layer.md` § Workspaces for the tree):
 
 ```
-/general/{category}/{channel-slug}
-/general/{category}/{channel-slug}/threads/{thread-slug}
-/leadership/...
+/{workspace}/{category}/{channel-slug}
+/{workspace}/{category}/{channel-slug}/threads/{thread-slug}
+/{workspace}/{category}/{channel-slug}[/threads/{thread-slug}]/{messageId}
 ```
+
+`GET /v1/fs/tree?path=/` lists the workspaces visible from the token's scope, flat and sorted.
 
 `channelId` on a stored row is the Discord channel **or thread** id (`messages.channel_id`). `parentChannelId` is the parent text channel (`messages.parent_channel_id`). Tree keys on the **parent/allowlisted** channel (same as `messagesForChannelAsc`: `channel_id = ? OR parent_channel_id = ?`). Read of a message uses the row’s own `channelId` in its Discord permalink.
 
-**Path-traversal acceptance (client `path` / `pathPrefix` is the general/leadership boundary):**
+**Path-traversal acceptance (client `path` / `pathPrefix` is checked against the token's `scope.visible` set):**
 
 1. Decode encodings (including `%2e%2e` and double-encoded `%252e%252e`) before any other check.
-2. POSIX **normalize-then-prefix-check**: collapse `.` / `..`, then require the result to be `/`, `/${tokenNamespace}`, or a descendant of `/${tokenNamespace}`.
+2. POSIX **normalize-then-prefix-check**: collapse `.` / `..`, then require the first path segment to be `/` or a workspace id in `scope.visible`.
 3. Reject encoded `..`, `/Users`, `~`, and absolute host paths (`/home`, `/etc`, Windows drives, `//share`, …). Relative paths that escape `/` are rejected.
-4. A general token on `/general/../leadership` or `/general/%2e%2e/leadership` is **404** after normalize — never a 200 leak of leadership. Do not `readdir` the Mini disk.
+4. A narrow token normalizing into a workspace **outside** its scope is **404** — never a 200 leak. A path that normalizes into a workspace still **inside** scope is fine even if it walked through `..` to get there (e.g. an `eboard` token on `/eboard/../programs-dev/...` → 200). Do not `readdir` the Mini disk.
 
 ## Routes
 
@@ -50,17 +52,20 @@ Virtual, POSIX-looking, rooted at `/general` or `/leadership`:
 
 ## Negative tests (principals, not query params)
 
-- [ ] General token cannot tree/read/search a `/leadership/...` path (even if `namespace=leadership` is sent).
-- [ ] General token + leadership message id → **404**.
+- [ ] A `programs-dev` token cannot tree/read/search `/programs-mentorship` (sideways, same parent) → **404**.
+- [ ] An `eboard` token cannot tree/read/search `/leadership` (upward) → **404**.
+- [ ] `/programs-dev/../eboard` from a `programs-dev` token → **404** (normalizes outside scope).
+- [ ] A `namespace=` query param that does not equal the token's root workspace → **403**.
+- [ ] A category name used as the first path segment (no matching workspace id) → **404**.
 - [ ] `path=/Users/sean` or `path=../` → **404**.
-- [ ] Encoded `..` (`%2e%2e`, `%252e%252e`) and `/general/../leadership` with a general token → **404**.
+- [ ] Encoded `..` (`%2e%2e`, `%252e%252e`) resolving outside the token's scope → **404**.
 - [ ] `~/src`, `/etc/passwd`, and other absolute host paths → **404**.
 - [ ] `includeDeleted: true` on **any** `/v1/*` route (search, read, messages, poll, tree) → **400**. Cat of a deleted message → **404**. Poll may emit the tombstone with empty content.
 - [ ] No token → 401 on every `/v1/*` except `/health`.
 
 ## Implementation notes
 
-- Same `Bun.serve` as `/health`. Bind `HEALTH_HOST` (zod allowlist: `127.0.0.1`, `::1`, Tailscale `100.64/10` / `fd7a:`). Default `127.0.0.1`. Refuse `0.0.0.0`, `::`, `::0`, LAN/WAN unicasts. Tokens and bind address go through `loadEnv()` / zod (`MORPHEUS_API_TOKEN_GENERAL`, `MORPHEUS_API_TOKEN_LEADERSHIP`, `HEALTH_HOST`).
+- Same `Bun.serve` as `/health`. Bind `HEALTH_HOST` (zod allowlist: `127.0.0.1`, `::1`, Tailscale `100.64/10` / `fd7a:`). Default `127.0.0.1`. Refuse `0.0.0.0`, `::`, `::0`, LAN/WAN unicasts. Bind address goes through `loadEnv()` / zod (`HEALTH_HOST`); tokens are loaded per-workspace via `loadWorkspaceTokens()` (`workspaces.<id>.token_env` in `channels.yml`).
 - This slice is **#40** (live vfs). Do **not** close [#41](https://github.com/sean-lai-sh/morpheus/issues/41) from this PR.
 - `limit` capped at 50 for search, 100 for tree.
 - Never return SQL errors; 500 internally.

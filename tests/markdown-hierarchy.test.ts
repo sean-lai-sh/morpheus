@@ -1,15 +1,18 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { withTempCwd, withTempDb } from "./helpers.ts";
 import {
-  GENERAL_DIR,
-  LEADERSHIP_DIR,
   appendBlock,
   channelFilePath,
   channelSlug,
+  discordDir,
+  legacyDir,
+  removeLegacyNamespaceDirs,
   rerenderChannel,
+  workspaceDir,
 } from "../src/storage/markdown.ts";
+import type { ChannelKey } from "../src/storage/markdown.ts";
 import { getMessage, upsertMessage } from "../src/storage/messages.ts";
 import { getSyncState } from "../src/storage/sync-state.ts";
 
@@ -22,38 +25,61 @@ afterAll(() => {
 });
 
 const guildId = "987654321098765432";
+const DISCORD_DIR = discordDir();
+const LEGACY_DIR = legacyDir();
+const EBOARD_DIR = workspaceDir("eboard");
+const LEADERSHIP_DIR = workspaceDir("leadership");
 
 // ── Path structure ──────────────────────────────────────────────────────────
 
 describe("markdown/hierarchy — channelFilePath", () => {
-  test("no category: resolves under general root", () => {
-    const ch = { id: "111", name: "eboard-chat" };
-    const path = channelFilePath(ch);
+  test("no category: resolves directly under the workspace root", () => {
+    const ch: ChannelKey = { id: "111", name: "eboard-chat", workspace: "eboard" };
     const slug = channelSlug("eboard-chat", "111");
-    expect(path).toBe(resolve(GENERAL_DIR, slug, "main.md"));
+    expect(channelFilePath(ch)).toBe(resolve(DISCORD_DIR, "eboard", slug, "main.md"));
   });
 
-  test("with category: resolves under general/{category}/{slug}", () => {
-    const ch = { id: "222", name: "startup-week-team", category: "eboard-teams" };
-    const path = channelFilePath(ch);
+  test("with category: resolves under {workspace}/{category}/{slug}", () => {
+    const ch: ChannelKey = {
+      id: "222",
+      name: "startup-week-team",
+      category: "eboard-teams",
+      workspace: "eboard",
+    };
     const slug = channelSlug("startup-week-team", "222");
-    expect(path).toBe(resolve(GENERAL_DIR, "eboard-teams", slug, "main.md"));
+    expect(channelFilePath(ch)).toBe(resolve(DISCORD_DIR, "eboard", "eboard-teams", slug, "main.md"));
   });
 
-  test("isolated channel resolves under leadership root", () => {
-    const ch = { id: "333", name: "leadership-team", category: "eboard-teams", isolated: true };
-    const path = channelFilePath(ch);
+  test("a different workspace gets a different root", () => {
+    const ch: ChannelKey = {
+      id: "333",
+      name: "leadership-team",
+      category: "eboard-teams",
+      workspace: "leadership",
+    };
     const slug = channelSlug("leadership-team", "333");
-    expect(path).toBe(resolve(LEADERSHIP_DIR, "eboard-teams", slug, "main.md"));
+    expect(channelFilePath(ch)).toBe(resolve(DISCORD_DIR, "leadership", "eboard-teams", slug, "main.md"));
+  });
+
+  test("a nested workspace is still one flat directory, not a nested tree", () => {
+    const ch: ChannelKey = { id: "444", name: "dev-chat", category: "programs", workspace: "programs-dev" };
+    expect(channelFilePath(ch)).toBe(
+      resolve(DISCORD_DIR, "programs-dev", "programs", channelSlug("dev-chat", "444"), "main.md"),
+    );
   });
 });
 
 // ── appendBlock routing ──────────────────────────────────────────────────────
 
 describe("markdown/hierarchy — appendBlock routing", () => {
-  const mainChannel = { id: "500", name: "events-team", category: "eboard-teams" };
+  const mainChannel: ChannelKey = {
+    id: "500",
+    name: "events-team",
+    category: "eboard-teams",
+    workspace: "eboard",
+  };
 
-  test("non-thread message writes to main.md and marks GENERAL_DIR dirty", () => {
+  test("non-thread message writes to main.md and marks the workspace dir dirty", () => {
     upsertMessage({
       id: "msg-main-1",
       channelId: "500",
@@ -69,8 +95,7 @@ describe("markdown/hierarchy — appendBlock routing", () => {
     expect(existsSync(path)).toBe(true);
     expect(readFileSync(path, "utf8")).toContain("hello from main");
 
-    const state = getSyncState(GENERAL_DIR);
-    expect(state.dirty).toBe(1);
+    expect(getSyncState(workspaceDir("eboard")).dirty).toBe(1);
   });
 
   test("thread message writes to threads/{slug}.md, not main.md", () => {
@@ -88,13 +113,12 @@ describe("markdown/hierarchy — appendBlock routing", () => {
     const msg = getMessage("msg-thread-1")!;
     appendBlock(mainChannel, guildId, msg, "create");
 
-    const mainPath = channelFilePath(mainChannel);
-    const mainContent = readFileSync(mainPath, "utf8");
+    const mainContent = readFileSync(channelFilePath(mainChannel), "utf8");
     expect(mainContent).not.toContain("reply in thread");
 
     const slug = channelSlug("Speaker Coordination", "thread-500");
     const threadPath = resolve(
-      GENERAL_DIR,
+      EBOARD_DIR,
       "eboard-teams",
       channelSlug("events-team", "500"),
       "threads",
@@ -107,7 +131,7 @@ describe("markdown/hierarchy — appendBlock routing", () => {
   test("thread file header contains starter_message_id equal to thread_id", () => {
     const slug = channelSlug("Speaker Coordination", "thread-500");
     const threadPath = resolve(
-      GENERAL_DIR,
+      EBOARD_DIR,
       "eboard-teams",
       channelSlug("events-team", "500"),
       "threads",
@@ -119,12 +143,12 @@ describe("markdown/hierarchy — appendBlock routing", () => {
     expect(content).toContain("parent_channel_id: 500");
   });
 
-  test("isolated channel writes to LEADERSHIP_DIR and marks it dirty", () => {
-    const leadershipChannel = {
+  test("a leadership channel writes under its own workspace dir and marks it dirty", () => {
+    const leadershipChannel: ChannelKey = {
       id: "600",
       name: "leadership-team",
       category: "eboard-teams",
-      isolated: true,
+      workspace: "leadership",
     };
     upsertMessage({
       id: "msg-leadership-1",
@@ -142,12 +166,10 @@ describe("markdown/hierarchy — appendBlock routing", () => {
     expect(existsSync(path)).toBe(true);
     expect(readFileSync(path, "utf8")).toContain("sensitive planning note");
 
-    const state = getSyncState(LEADERSHIP_DIR);
-    expect(state.dirty).toBe(1);
+    expect(getSyncState(workspaceDir("leadership")).dirty).toBe(1);
   });
 
-  test("isolated channel content does not appear under GENERAL_DIR", () => {
-    // Read all files under GENERAL_DIR recursively and confirm no leadership content
+  test("leadership content never lands under another workspace's dir", () => {
     const { readdirSync, statSync } = require("node:fs");
     function collectTexts(dir: string): string {
       if (!existsSync(dir)) return "";
@@ -159,18 +181,16 @@ describe("markdown/hierarchy — appendBlock routing", () => {
       }
       return out;
     }
-    const generalContent = collectTexts(GENERAL_DIR);
-    expect(generalContent).not.toContain("sensitive planning note");
+    expect(collectTexts(EBOARD_DIR)).not.toContain("sensitive planning note");
   });
 });
 
 // ── rerenderChannel ─────────────────────────────────────────────────────────
 
 describe("markdown/hierarchy — rerenderChannel", () => {
-  const ch = { id: "700", name: "dev-team", category: "eboard-teams" };
+  const ch: ChannelKey = { id: "700", name: "dev-team", category: "eboard-teams", workspace: "eboard" };
 
   beforeAll(() => {
-    // main channel message
     upsertMessage({
       id: "rc-main",
       channelId: "700",
@@ -179,7 +199,6 @@ describe("markdown/hierarchy — rerenderChannel", () => {
       content: "main channel post",
       createdAt: 1_000,
     });
-    // thread message
     upsertMessage({
       id: "rc-thread",
       channelId: "thread-700",
@@ -203,7 +222,7 @@ describe("markdown/hierarchy — rerenderChannel", () => {
   test("rerenderChannel writes thread file with thread messages", () => {
     const slug = channelSlug("Feature Planning", "thread-700");
     const threadPath = resolve(
-      GENERAL_DIR,
+      EBOARD_DIR,
       "eboard-teams",
       channelSlug("dev-team", "700"),
       "threads",
@@ -216,7 +235,31 @@ describe("markdown/hierarchy — rerenderChannel", () => {
   });
 
   test("rerenderChannel returns total message count (main + thread)", () => {
-    const written = rerenderChannel(ch, guildId);
-    expect(written).toBe(2);
+    expect(rerenderChannel(ch, guildId)).toBe(2);
+  });
+});
+
+// ── legacy namespace dirs ───────────────────────────────────────────────────
+
+describe("markdown/hierarchy — removeLegacyNamespaceDirs", () => {
+  test("moves a stale pre-workspace dir aside and keeps a live workspace dir", () => {
+    // `general` is no longer a workspace id; `leadership` still is.
+    mkdirSync(resolve(DISCORD_DIR, "general"), { recursive: true });
+    writeFileSync(resolve(DISCORD_DIR, "general", "x.md"), "old export body", "utf8");
+    mkdirSync(LEADERSHIP_DIR, { recursive: true });
+
+    const moved = removeLegacyNamespaceDirs(["leadership", "eboard"], new Date("2026-08-27"));
+
+    const dest = resolve(LEGACY_DIR, "general-20260827");
+    expect(moved).toEqual([dest]);
+    expect(existsSync(resolve(DISCORD_DIR, "general"))).toBe(false);
+    expect(readFileSync(resolve(dest, "x.md"), "utf8")).toBe("old export body");
+    // Never deleted, never touched: `leadership` is a configured workspace.
+    expect(existsSync(LEADERSHIP_DIR)).toBe(true);
+    expect(existsSync(resolve(LEGACY_DIR, "leadership-20260827"))).toBe(false);
+  });
+
+  test("is a no-op when there is nothing left to move", () => {
+    expect(removeLegacyNamespaceDirs(["leadership", "eboard"], new Date("2026-08-27"))).toEqual([]);
   });
 });

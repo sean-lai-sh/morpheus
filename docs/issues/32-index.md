@@ -1,3 +1,5 @@
+Superseded in part by hierarchical workspaces — see docs/context-layer.md §Workspaces.
+
 This index is GitHub issue **#32** (create-only). Owner close of stale issues: **#38**. **Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).**
 
 Parent epic: #25. Grok Bot: #33. Host: #39. Live index: #40. Activation: #42. Park agent-v1: #34 / [`PARKED.md`](PARKED.md). Analysis: PR #24.

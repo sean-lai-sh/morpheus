@@ -1,53 +1,14 @@
-import { claimJob, getJob, listQueued, type Namespace } from "../storage/jobs.ts";
+import { claimJob, getJob, listQueued } from "../storage/jobs.ts";
 import { completeJobWithReply, failJobAsWorker } from "../bot/reply.ts";
 import { peekClient } from "../bot/client.ts";
-import { discordBotToken, loadEnv, type Env } from "../config.ts";
-import { logger } from "../logger.ts";
+import { loadEnv } from "../config.ts";
+import type { Scope } from "../context/types.ts";
+import { authorizeV1 } from "./auth.ts";
 
 export interface TokenScope {
-  namespace: Namespace;
+  /** Workspace subtree the bearer may act on. Produced only by authorizeV1. */
+  scope: Scope;
   workerId: string;
-}
-
-function safeEqual(a: string, b: string): boolean {
-  const enc = new TextEncoder();
-  const aa = enc.encode(a);
-  const bb = enc.encode(b);
-  if (aa.length !== bb.length) return false;
-  let out = 0;
-  for (let i = 0; i < aa.length; i++) out |= (aa[i] ?? 0) ^ (bb[i] ?? 0);
-  return out === 0;
-}
-
-/** Namespace comes from which scoped token matched — never from a client query param. */
-export function scopeFromRequest(req: Request, env: Env = loadEnv()): TokenScope | null {
-  const header = req.headers.get("authorization") ?? "";
-  const m = /^Bearer\s+(\S+)$/i.exec(header.trim());
-  if (!m?.[1]) return null;
-  const token = m[1];
-
-  try {
-    const bot = discordBotToken(env);
-    if (safeEqual(token, bot)) return null;
-  } catch {
-    // bot token unset in some tests — ignore
-  }
-
-  const general = env.MORPHEUS_API_TOKEN_GENERAL?.trim() ?? "";
-  const leadership = env.MORPHEUS_API_TOKEN_LEADERSHIP?.trim() ?? "";
-  const workerGeneral = env.JOB_WORKER_GENERAL?.trim() || "grok-general";
-  const workerLeadership = env.JOB_WORKER_LEADERSHIP?.trim() || "grok-leadership";
-
-  // Prefer the longer match if tokens ever share a prefix; require distinct secrets in ops.
-  const generalOk = general.length > 0 && safeEqual(token, general);
-  const leadershipOk = leadership.length > 0 && safeEqual(token, leadership);
-  if (generalOk && leadershipOk) {
-    logger.error("MORPHEUS_API_TOKEN_GENERAL and _LEADERSHIP must be distinct");
-    return null;
-  }
-  if (generalOk) return { namespace: "general", workerId: workerGeneral };
-  if (leadershipOk) return { namespace: "leadership", workerId: workerLeadership };
-  return null;
 }
 
 function json(status: number, body: unknown): Response {
@@ -95,12 +56,14 @@ function discordClientOrUndefined(): ReturnType<typeof peekClient> {
 
 /**
  * /v1/jobs on the same Bun.serve as /health.
- * Auth: scoped bearer. Namespace from token + job row, never ?namespace=.
+ * Auth: scoped workspace bearer. The workspace subtree comes from which token
+ * matched plus the job row — never from ?namespace=.
  */
 export async function handleJobsRequest(req: Request, url: URL): Promise<Response> {
   const env = loadEnv();
-  const scope = scopeFromRequest(req, env);
-  if (!scope) return json(401, { error: "unauthorized" });
+  const auth = authorizeV1(req);
+  if (!auth.ok) return json(auth.status, { error: auth.error });
+  const scope: TokenScope = { scope: auth.scope, workerId: `grok-${auth.scope.root}` };
 
   const { pathname } = url;
   const method = req.method.toUpperCase();
@@ -108,9 +71,9 @@ export async function handleJobsRequest(req: Request, url: URL): Promise<Respons
   if (method === "GET" && pathname === "/v1/jobs") {
     const status = url.searchParams.get("status") ?? "queued";
     if (status !== "queued") return json(400, { error: "status must be queued" });
-    // Ignore client namespace query param — list the token's namespace only.
-    const jobs = listQueued(scope.namespace, 20);
-    return json(200, { jobs, namespace: scope.namespace });
+    // Ignore any client namespace query param — the token's subtree is the list.
+    const jobs = listQueued(scope.scope, 20);
+    return json(200, { jobs, workspace: scope.scope.root, visible: [...scope.scope.visible] });
   }
 
   const jobId = jobIdFromPath(pathname);
@@ -126,8 +89,8 @@ export async function handleJobsRequest(req: Request, url: URL): Promise<Respons
 
   const existing = getJob(jobId);
   if (!existing) return json(404, { error: "not found" });
-  if (existing.namespace !== scope.namespace) {
-    return json(409, { error: "namespace mismatch" });
+  if (!scope.scope.visible.has(existing.namespace)) {
+    return json(409, { error: "workspace mismatch" });
   }
 
   if (action === "claim") {

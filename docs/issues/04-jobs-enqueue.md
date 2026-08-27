@@ -15,7 +15,7 @@ Minimum MVP policy (implement in this slice or block enqueue):
 1. **Role gate.** Author must have at least one role in `JOB_TRIGGER_ROLE_IDS` (comma-separated snowflakes in Mini Doppler; empty placeholder in `.env.example`). If the list is empty in production, log an error and **do not enqueue** (fail closed). Tests inject a set.
 2. **Outstanding-job cap.** Max **2** `queued`+`claimed` jobs per `author_id` (configurable `JOB_MAX_OUTSTANDING_PER_AUTHOR`, default 2). Excess → no insert; log.
 3. **Rate cap.** Max **5** enqueues per author per rolling hour (`JOB_MAX_PER_AUTHOR_PER_HOUR`, default 5).
-4. **Namespace from the message row**, not a bare channel id: `namespaceForRow(row)` using `effectiveChannelId` / `parent_channel_id`. Unknown channel → **do not enqueue** (do not fail open to `general`). Threads of `#leadership-team` are leadership.
+4. **Workspace from the message row**, not a bare channel id: `namespaceForRow(row)` using `effectiveChannelId` / `parent_channel_id`. Unknown channel → **do not enqueue** (do not fail open to any default workspace). A thread of a `#leadership-team` channel takes that channel's `workspace`.
 5. **Trigger is independent of ingest.** `src/bot/ingest.ts` strips mentions then drops `stripped.length < 6`. A bare `@Morpheus` must still enqueue. Check triggers on the **raw** Discord message; job `content` is the raw text, not a SQLite read-back (ingest may have dropped the row).
 
 Do **not** cancel other authors’ queued jobs in the same channel (that was #13’s in-process “latest wins” and is wrong for a shared eboard channel). Optional: cancel the **same author + same thread** older `queued` jobs and post a one-line “superseded” reply in #30 — not silent `cancelled` for someone else.
@@ -36,11 +36,11 @@ Do **not** cancel other authors’ queued jobs in the same channel (that was #13
 3. Role gate (#1 above).
 4. Mention of `client.user.id` **or** reply to a bot message.
 5. Caps (#2–#3).
-6. Insert `status=queued`, namespace from `namespaceForRow`. Unique on `discord_message_id`. Persist `scope` + `channel_ids` (MVP channel scope: originating channel only, plus same-namespace `#` mentions the author can ViewChannel). Leadership jobs are not channel-scoped.
+6. Insert `status=queued`, namespace (workspace id) from `namespaceForRow`. Unique on `discord_message_id`. Persist `scope` + `channel_ids` (MVP channel scope: originating channel only, plus same-workspace `#` mentions the author can ViewChannel). A job whose originating channel's workspace is a tree root (e.g. `leadership`) is not channel-scoped — its scope kind is `"workspace"`.
 
 Do **not** post a Discord reply here (#30). Do **not** open GitHub issues here (#31). Logging `job_id` is enough. Mini later POSTs to `GROK_BOT_WEBHOOK_URL` (#37).
 
-**MVP channel scope (temporary until proper isolation).** First-pass snippets and the thin Grok payload must not dump the whole `/general` namespace. Grok should honor `job.channel_ids` as pathPrefix; `/v1/fs` tokens stay namespace-scoped.
+**MVP channel scope (temporary until proper isolation).** First-pass snippets and the thin Grok payload must not dump a whole root workspace. Grok should honor `job.channel_ids` as pathPrefix; `/v1/fs` tokens stay scoped to a workspace plus its descendants.
 
 ## Out of scope
 
@@ -51,8 +51,8 @@ Do **not** post a Discord reply here (#30). Do **not** open GitHub issues here (
 
 ## Acceptance criteria
 
-- [ ] Mention in allowlisted general channel, allowed role → one `queued` job `namespace=general`.
-- [ ] Mention in `isolated: true` **thread** → `namespace=leadership` (not fail-open general).
+- [ ] Mention in an allowlisted channel, allowed role → one `queued` job with `namespace` set to that channel's `workspace`.
+- [ ] Mention in a **thread** of a `workspace: leadership` parent → `namespace=leadership` (not fail-open to any default workspace).
 - [ ] Unknown / non-allowlisted channel → no job.
 - [ ] Author without trigger role → no job.
 - [ ] Over outstanding/rate cap → no job.

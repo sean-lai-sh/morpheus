@@ -1,15 +1,26 @@
-import { loadEnv, type Env } from "../config.ts";
+import { getWorkspace, loadEnv, loadWorkspaceTokens, workspaceIds, type Env } from "../config.ts";
+import { scopeFor } from "../context/namespace.ts";
+import { parseIndexPath } from "../context/paths.ts";
+import type { Namespace, Scope } from "../context/types.ts";
 import { logger } from "../logger.ts";
-import { MAX_JOB_CHANNEL_IDS, type JobScope, type Namespace } from "../storage/jobs.ts";
+import { MAX_JOB_CHANNEL_IDS, type JobScope } from "../storage/jobs.ts";
 import { isDiscordWebhookUrl } from "./webhooks.ts";
+
+/** Every configured workspace bearer. Config missing / invalid → redact nothing extra. */
+function workspaceTokenValues(): string[] {
+  try {
+    return loadWorkspaceTokens().map((t) => t.token);
+  } catch {
+    return [];
+  }
+}
 
 /** Strip Mini secrets from untrusted Discord text before it leaves the process. */
 export function redactSecrets(text: string, env: Env = loadEnv()): string {
   const secrets = [
     env.DISCORD_BOT_TOKEN,
     env.DISCORD_TOKEN,
-    env.MORPHEUS_API_TOKEN_GENERAL,
-    env.MORPHEUS_API_TOKEN_LEADERSHIP,
+    ...workspaceTokenValues(),
     env.GROK_BOT_WEBHOOK_URL,
     env.GROK_BOT_WEBHOOK_SECRET,
     env.NVIDIA_API_KEY,
@@ -28,10 +39,11 @@ export interface GrokJobPayload {
     discord_message_id?: string;
     discord_channel_id?: string;
     author_id?: string;
+    /** Workspace id from channels.yml. Required — there is no default workspace. */
     namespace: Namespace;
-    /** `leadership` = whole isolated namespace. `channel` = honor `channel_ids`. */
+    /** `workspace` = the job's workspace and its descendants. `channel` = honor `channel_ids`. */
     scope?: JobScope;
-    /** Allowlisted Discord channel ids. Empty + scope leadership = unrestricted leadership. */
+    /** Allowlisted Discord channel ids. Empty + scope `workspace` = the whole subtree. */
     channel_ids?: string[];
     content: string;
   };
@@ -72,11 +84,21 @@ const MAX_SNIPPET_CHARS = 1200;
 const MAX_PATH = 200;
 const MAX_FEED_HINT = 40;
 
+/** First segment must be a configured workspace id. Config unreadable → reject. */
 function indexOnlyPath(path: string | undefined): string | undefined {
   if (!path) return undefined;
   if (path.includes("..") || path.includes("\\") || path.includes("\0")) return undefined;
-  if (!(path.startsWith("/general") || path.startsWith("/leadership"))) return undefined;
-  return path.slice(0, MAX_PATH);
+  if (!path.startsWith("/")) return undefined;
+  const first = path.split("/").filter(Boolean)[0];
+  if (!first) return undefined;
+  let ids: string[];
+  try {
+    ids = workspaceIds();
+  } catch {
+    return undefined;
+  }
+  if (!ids.includes(first)) return undefined;
+  return path;
 }
 
 function capChannelIds(ids: string[] | undefined): string[] {
@@ -92,66 +114,79 @@ function capChannelIds(ids: string[] | undefined): string[] {
 }
 
 function jobScopeOf(job: GrokJobPayload["job"]): JobScope {
-  if (job.scope === "leadership" || job.scope === "channel") return job.scope;
-  return job.namespace === "leadership" ? "leadership" : "channel";
+  if (job.scope === "workspace" || job.scope === "channel") return job.scope;
+  // Legacy payloads from before workspaces.
+  if ((job.scope as unknown) === "leadership") return "workspace";
+  try {
+    const ws = getWorkspace(job.namespace);
+    return ws && ws.parent == null ? "workspace" : "channel";
+  } catch {
+    return "channel";
+  }
 }
 
 function allowedChannelIds(job: GrokJobPayload["job"], scope: JobScope): string[] {
   const capped = capChannelIds(job.channel_ids);
-  if (scope === "leadership") return [];
+  if (scope === "workspace") return [];
   if (capped.length > 0) return capped;
   if (job.discord_channel_id && /^\d+$/.test(job.discord_channel_id)) return [job.discord_channel_id];
   return [];
 }
 
-/** `/namespace/channelId/...` must stay inside the job's allowed set. */
+/** `scopeFor` reads channels.yml; a missing/invalid config means no scope, not a throw. */
+function safeScopeFor(namespace: Namespace): Scope | null {
+  try {
+    return scopeFor(namespace);
+  } catch {
+    return null;
+  }
+}
+
+/** An index path must parse, land inside the token's subtree, and (channel scope) name an allowed channel. */
 function pathInJobScope(
   path: string | undefined,
-  namespace: Namespace,
-  scope: JobScope,
+  scope: Scope,
+  jobScope: JobScope,
   allowed: string[],
 ): string | undefined {
   const indexed = indexOnlyPath(path);
   if (!indexed) return undefined;
-  const parts = indexed.split("/").filter(Boolean);
-  const ns = parts[0];
-  const channelId = parts[1];
-  if (scope === "leadership") {
-    return ns === "leadership" ? indexed : undefined;
-  }
-  if (ns !== namespace) return undefined;
+  const parsed = parseIndexPath(indexed);
+  if (!parsed || parsed.kind === "root") return undefined;
+  if (!scope.visible.has(parsed.namespace)) return undefined;
+  if (jobScope === "workspace") return indexed.slice(0, MAX_PATH);
   if (allowed.length === 0) return undefined;
-  if (!channelId || !allowed.includes(channelId)) return undefined;
-  return indexed;
+  const ids: string[] = [];
+  if (parsed.kind !== "namespace" && parsed.kind !== "category") ids.push(parsed.channel.id);
+  if (parsed.kind === "thread") ids.push(parsed.threadId);
+  if (parsed.kind === "message" && parsed.threadId) ids.push(parsed.threadId);
+  if (!ids.some((id) => allowed.includes(id))) return undefined;
+  return indexed.slice(0, MAX_PATH);
 }
 
 function snippetInJobScope(
   snippet: { channelId?: string; path?: string },
-  namespace: Namespace,
-  scope: JobScope,
+  scope: Scope,
+  jobScope: JobScope,
   allowed: string[],
 ): boolean {
-  if (snippet.path) {
-    const indexed = indexOnlyPath(snippet.path);
-    if (!indexed) return false;
-    return Boolean(pathInJobScope(snippet.path, namespace, scope, allowed));
-  }
-  if (scope === "leadership") return true;
+  if (snippet.path) return Boolean(pathInJobScope(snippet.path, scope, jobScope, allowed));
+  if (jobScope === "workspace") return true;
   if (snippet.channelId) return allowed.includes(snippet.channelId);
   return false;
 }
 
 function capFeedHint(
   hint: string | undefined,
-  namespace: Namespace,
-  scope: JobScope,
+  scope: Scope,
+  jobScope: JobScope,
   allowed: string[],
 ): string | undefined {
   if (!hint) return undefined;
   const t = hint.trim().slice(0, MAX_FEED_HINT);
   if (!t) return undefined;
   if (t.startsWith("/")) {
-    return pathInJobScope(t, namespace, scope, allowed);
+    return pathInJobScope(t, scope, jobScope, allowed);
   }
   return t;
 }
@@ -159,34 +194,38 @@ function capFeedHint(
 /** Cap untrusted Discord text, index paths, channel_ids, and feed_hint. First-pass pack, not the retrieval API. */
 export function capGrokPayload(payload: GrokJobPayload, env: Env = loadEnv()): GrokJobPayload {
   const job = payload.job;
-  const scope = jobScopeOf(job);
-  const channelIds = allowedChannelIds(job, scope);
-  const feedHint = capFeedHint(payload.feed_hint, job.namespace, scope, channelIds);
+  const jobScope = jobScopeOf(job);
+  const channelIds = allowedChannelIds(job, jobScope);
+  const scope = safeScopeFor(job.namespace);
+  const feedHint = scope ? capFeedHint(payload.feed_hint, scope, jobScope, channelIds) : undefined;
   return {
     first_pass: true,
     ...(feedHint ? { feed_hint: feedHint } : {}),
     job: {
       id: job.id,
       namespace: job.namespace,
-      scope,
+      scope: jobScope,
       channel_ids: channelIds,
       content: redactSecrets(job.content, env).slice(0, MAX_JOB_CONTENT),
       ...(job.discord_message_id ? { discord_message_id: job.discord_message_id } : {}),
       ...(job.discord_channel_id ? { discord_channel_id: job.discord_channel_id } : {}),
       ...(job.author_id ? { author_id: job.author_id } : {}),
     },
-    snippets: payload.snippets
-      .slice(0, MAX_SNIPPETS)
-      .filter((s) => snippetInJobScope(s, job.namespace, scope, channelIds))
-      .map((s) => {
-        const path = pathInJobScope(s.path, job.namespace, scope, channelIds);
-        return {
-          ...(s.id ? { id: s.id } : {}),
-          ...(s.channelId ? { channelId: s.channelId } : {}),
-          ...(path ? { path } : {}),
-          content: redactSecrets(s.content, env).slice(0, MAX_SNIPPET_CHARS),
-        };
-      }),
+    // No resolvable workspace → no snippets leave the process.
+    snippets: scope == null
+      ? []
+      : payload.snippets
+          .slice(0, MAX_SNIPPETS)
+          .filter((s) => snippetInJobScope(s, scope, jobScope, channelIds))
+          .map((s) => {
+            const path = pathInJobScope(s.path, scope, jobScope, channelIds);
+            return {
+              ...(s.id ? { id: s.id } : {}),
+              ...(s.channelId ? { channelId: s.channelId } : {}),
+              ...(path ? { path } : {}),
+              content: redactSecrets(s.content, env).slice(0, MAX_SNIPPET_CHARS),
+            };
+          }),
   };
 }
 
@@ -200,13 +239,19 @@ export async function dispatchGrokJob(
   opts: { env?: Env; poster?: HttpsPoster } = {},
 ): Promise<{ dispatched: boolean; status?: number; skipped?: string }> {
   const env = opts.env ?? loadEnv();
-  if (payload.job.namespace !== "general" && payload.job.namespace !== "leadership") {
-    logger.error("Grok dispatch refused: job.namespace is required");
+  const scope = safeScopeFor(payload.job.namespace);
+  if (!scope) {
+    logger.error({ namespace: payload.job.namespace }, "Grok dispatch refused: job.namespace is not a configured workspace");
     return { dispatched: false, skipped: "namespace-required" };
   }
-  if (payload.job.namespace === "leadership" && !env.GROK_DISPATCH_LEADERSHIP) {
-    logger.warn("leadership job not dispatched to GROK_BOT_WEBHOOK_URL (GROK_DISPATCH_LEADERSHIP=false)");
-    return { dispatched: false, skipped: "leadership-not-dispatchable" };
+  // Exact membership, NOT hierarchy: listing `leadership` does not enable `eboard`
+  // or any other descendant. Every workspace you want POSTed must be listed.
+  if (!env.GROK_DISPATCH_WORKSPACES.includes(payload.job.namespace)) {
+    logger.warn(
+      { namespace: payload.job.namespace },
+      "job not dispatched to GROK_BOT_WEBHOOK_URL (workspace not in GROK_DISPATCH_WORKSPACES)",
+    );
+    return { dispatched: false, skipped: "workspace-not-dispatchable" };
   }
   const rawUrl = env.GROK_BOT_WEBHOOK_URL?.trim() || "";
   if (rawUrl && isDiscordWebhookUrl(rawUrl)) {

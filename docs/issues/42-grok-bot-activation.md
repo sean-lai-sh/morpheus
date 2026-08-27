@@ -1,5 +1,7 @@
 Parent: [#41](https://github.com/sean-lai-sh/morpheus/issues/41) (locked vision). GitHub issue **#42**. Follows #37. Host: [`docs/hosting.md`](../hosting.md).
 
+Superseded in part by hierarchical workspaces — see docs/context-layer.md §Workspaces.
+
 ## Goal
 
 **Close the loop.** #29 enqueues a job and #37 POSTs it to `GROK_BOT_WEBHOOK_URL`. That is only a producer. Without a **live Grok Bot worker** at that URL, mentions sit in SQLite forever.

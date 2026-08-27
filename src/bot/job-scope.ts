@@ -1,10 +1,8 @@
 import { PermissionFlagsBits } from "discord.js";
-import {
-  MAX_JOB_CHANNEL_IDS,
-  type ChannelResolver,
-  type JobScope,
-  type Namespace,
-} from "../storage/jobs.ts";
+import { getWorkspace, visibleWorkspaces } from "../config.ts";
+import type { ChannelResolver } from "../context/namespace.ts";
+import type { Namespace } from "../context/types.ts";
+import { MAX_JOB_CHANNEL_IDS, type JobScope } from "../storage/jobs.ts";
 
 export { MAX_JOB_CHANNEL_IDS };
 
@@ -69,16 +67,31 @@ export function authorCanViewChannel(
   return memberHasViewChannel(channel, member);
 }
 
-export function resolveJobChannelScope(input: {
+export interface ResolveJobChannelScopeInput {
   namespace: Namespace;
   originatingChannelId: string;
   threadId: string | null;
   mentionedChannelIds: string[];
   canViewChannel: (channelId: string) => boolean;
   resolveChannel: ChannelResolver;
-}): { scope: JobScope; channelIds: string[] } {
-  if (input.namespace === "leadership") {
-    return { scope: "leadership", channelIds: [] };
+  /** Injectable for tests; production reads channels.yml. */
+  resolveWorkspace?: (id: string) => { parent?: string } | undefined;
+  /** Injectable for tests; production reads channels.yml. */
+  visibleWorkspaces?: (root: string) => ReadonlySet<string>;
+}
+
+/**
+ * A root workspace (no parent) owns its whole subtree, so its jobs are unrestricted
+ * inside it. Anything else is channel-scoped. An unknown workspace falls through to
+ * channel scope — fail closed, never unrestricted.
+ */
+export function resolveJobChannelScope(
+  input: ResolveJobChannelScopeInput,
+): { scope: JobScope; channelIds: string[] } {
+  const resolveWorkspace = input.resolveWorkspace ?? getWorkspace;
+  const workspace = resolveWorkspace(input.namespace);
+  if (workspace && workspace.parent == null) {
+    return { scope: "workspace", channelIds: [] };
   }
 
   const ids: string[] = [];
@@ -91,13 +104,13 @@ export function resolveJobChannelScope(input: {
   add(input.originatingChannelId);
   if (input.threadId) add(input.threadId);
 
+  const visible = (input.visibleWorkspaces ?? visibleWorkspaces)(input.namespace);
   for (const raw of input.mentionedChannelIds) {
     const id = raw.trim();
     if (!/^\d+$/.test(id)) continue;
     const ch = input.resolveChannel(id);
     if (!ch) continue;
-    const ns: Namespace = ch.isolated ? "leadership" : "general";
-    if (ns !== input.namespace) continue;
+    if (!visible.has(ch.workspace)) continue;
     if (!input.canViewChannel(id)) continue;
     add(id);
   }

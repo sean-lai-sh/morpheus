@@ -1,4 +1,4 @@
-import { reloadChannels } from "./config.ts";
+import { loadWorkspaceTokens, reloadChannels } from "./config.ts";
 import { logger } from "./logger.ts";
 import { closeDb, getDb } from "./storage/db.ts";
 import { loginClient, shutdownClient } from "./bot/client.ts";
@@ -49,6 +49,8 @@ async function main(): Promise<void> {
   const { cmd } = parseArgs(process.argv);
   // Ensure DB is initialized (runs migrations) before any handler touches it.
   getDb();
+  // Validate workspace tokens at boot (collisions / bot-token reuse fail here, not on first request).
+  loadWorkspaceTokens();
 
   switch (cmd) {
     case "live": {

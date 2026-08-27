@@ -10,23 +10,53 @@ Discord intelligence bot for the club's eboard. Ingests allowlisted channels int
 - Parked agent-v1: [docs/issues/PARKED.md](docs/issues/PARKED.md) · owner close: [#38](https://github.com/sean-lai-sh/morpheus/issues/38)
 - Slices: [#32](https://github.com/sean-lai-sh/morpheus/issues/32) · Nia removed in this PR · #39 host → FTS → jobs → first-pass POST → **activate Grok Bot** → Tailscale `/v1/fs` → webhooks → GitHub optional
 
+## Workspaces
+
+`config/channels.yml` declares a `workspaces:` map — `{ <id>: { parent?: <id>, token_env?: ENV_NAME } }`. Workspace ids are single lowercase slugs (`^[a-z0-9][a-z0-9-]*$`). Every channel sets `workspace: <id>` (required — the old `isolated: true` flag is gone).
+
+Example tree:
+
+```
+leadership                     (root)
+  eboard                       (parent: leadership)
+    programs-mentorship        (parent: eboard)
+    programs-dev                (parent: eboard)
+```
+
+**Scope rule:** a token's scope is its own workspace plus every transitive descendant — never upward, never sideways. A `programs-dev` token sees only `programs-dev`; an `eboard` token sees `eboard` plus every `programs-*`; `leadership` sees everything.
+
+```yaml
+workspaces:
+  leadership: {}
+  eboard:
+    parent: leadership
+    token_env: MORPHEUS_API_TOKEN_EBOARD
+  programs-dev:
+    parent: eboard
+    token_env: MORPHEUS_API_TOKEN_PROGRAMS_DEV
+```
+
+See [docs/context-layer.md](docs/context-layer.md) (§ Workspaces) for index paths and auth details.
+
 ## Local markdown export
 
-SQLite is the source of truth. Markdown under `data/discord/{general,leadership}/` is a local render (`isolated: true` → leadership namespace). It is **not** pushed to Nia.
+SQLite is the source of truth. Markdown under `data/discord/{workspace}/` is a local render — one top-level directory per workspace id. It is **not** pushed to Nia — Nia is gone.
 
 ### File structure
 
 ```
 data/discord/
-  general/
-    {category}/
-      {channel-name}-{last4id}/
-        main.md          ← non-thread messages
-        threads/
-          {thread-name}-{last4id}.md   ← one file per thread
   leadership/
     eboard-teams/
       leadership-team-{id}/
+        main.md          ← non-thread messages
+        threads/
+          {thread-name}-{last4id}.md   ← one file per thread
+  eboard/
+    ...
+  programs-dev/
+    {category}/
+      {channel-name}-{last4id}/
         main.md
         threads/
           ...
@@ -37,16 +67,22 @@ Each thread file header includes `starter_message_id` (the message that spawned 
 ### Channel config (`config/channels.yml`)
 
 ```yaml
+workspaces:
+  leadership: {}
+  eboard:
+    parent: leadership
+    token_env: MORPHEUS_API_TOKEN_EBOARD
+
 guild_id: "your-guild-id"
 channels:
   - id: "channel-snowflake"
     name: "channel-name"
-    category: "eboard-teams"   # maps to directory prefix under general/ or leadership/
+    category: "eboard-teams"   # maps to directory prefix under the workspace root
     include_threads: true
-    isolated: false            # set true on leadership-team to route to leadership namespace
+    workspace: eboard          # required; must be declared under workspaces:
 ```
 
-`category` is optional — channels without it resolve directly under the namespace root.
+`category` is optional — channels without it resolve directly under the workspace root.
 
 ## Quickstart
 

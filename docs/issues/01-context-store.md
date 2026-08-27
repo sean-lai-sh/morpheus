@@ -19,7 +19,7 @@ This **supersedes the Nia half of #15**. Owner close #15: #38.
 
 ## `namespaceForRow` (must not fail open)
 
-`namespaceForRow(row): Namespace | null` using `effectiveChannelId` then `getChannel(parent)?.isolated`. **Do not** write `namespaceForChannel(channelId)` that maps unknown ids to `general` — thread ids are never in `channels.yml`, so a leadership thread would leak. Callers **hard-fail** on `null`. Positive test: thread of `isolated: true` parent → `leadership`.
+`namespaceForRow(row): Namespace | null` using `effectiveChannelId` then `getChannel(parent)?.workspace`. **Do not** write `namespaceForChannel(channelId)` that maps unknown ids to any default workspace — thread ids are never in `channels.yml`, so a hidden thread would leak. Callers **hard-fail** on `null`. Positive test: thread of a `workspace: programs-dev` parent → `programs-dev`.
 
 ## Poll cursor (decide here)
 
@@ -30,14 +30,14 @@ This **supersedes the Nia half of #15**. Owner close #15: #38.
 - `src/context/types.ts` — as `docs/context-layer.md` §3 (`tree`, `readPath`, `permalink`).
 - `src/context/namespace.ts` — `namespaceForRow` only.
 - `src/context/store.ts` — SQLite + **virtual** index paths (not Mini `data/` or `~`).
-- `src/storage/db.ts` — FTS5. Prefer external-content `content='messages'`; resolve namespace at query time from config. Flipping `isolated` requires `bun run reindex`.
+- `src/storage/db.ts` — FTS5. Prefer external-content `content='messages'`; resolve workspace at query time from config. Flipping a channel's `workspace` requires `bun run reindex`.
 - `src/bot/ingest.ts` — `contextStore.index` after upsert/delete. Keep `appendBlock` until #28.
 - `src/tasks/reindex.ts` — rebuild FTS from `messages`.
-- Tests: thread→leadership, seq poll after edit/delete, `channelId` vs `parentChannelId`.
+- Tests: thread→workspace, seq poll after edit/delete, `channelId` vs `parentChannelId`.
 
 ## VFS extras
 
-- `tree(path, namespace)` / `readPath` — `/general/{category}/{channel-slug}/…`, never OS paths.
+- `tree(path, scope)` / `readPath` — `/{workspace}/{category}/{channel-slug}/…`, never OS paths.
 - `search` default `deleted_at IS NULL`. HTTP later default-denies `includeDeleted`.
 
 ## Out of scope
@@ -49,7 +49,7 @@ This **supersedes the Nia half of #15**. Owner close #15: #38.
 
 ## Acceptance
 
-- [ ] Leadership **thread** absent from general search.
+- [ ] A thread in one workspace is absent from a search scoped to a sibling or unrelated workspace.
 - [ ] Edit/delete appears in `poll` after a cursor that passed the original `created_at`.
 - [ ] Thread row: `channelId` is thread id; `parentChannelId` is parent.
 - [ ] `bun run reindex` rebuilds FTS.

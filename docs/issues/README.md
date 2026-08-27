@@ -1,5 +1,7 @@
 # Issue drafts
 
+Superseded in part by hierarchical workspaces — see docs/context-layer.md §Workspaces.
+
 These markdown files are the implementation-slice bodies for the Nia-exit / Discord-entry work. They are filed as GitHub issues on `sean-lai-sh/morpheus` (see the tracking epic). Keep this folder in sync if an issue is edited.
 
 **Locked vision:** [#41](https://github.com/sean-lai-sh/morpheus/issues/41) — [`41-product-vision.md`](41-product-vision.md) is a pointer only; do not fork the body.

@@ -8,6 +8,7 @@ import {
   renderBlock,
   rerenderChannel,
 } from "../src/storage/markdown.ts";
+import type { ChannelKey } from "../src/storage/markdown.ts";
 import { upsertMessage, getMessage } from "../src/storage/messages.ts";
 import { extractLinks, persistLinks, linksForMessage } from "../src/storage/links.ts";
 
@@ -19,7 +20,7 @@ afterAll(() => {
   cwd.cleanup();
 });
 
-const channel = { id: "999888777666555444", name: "Eboard - General" };
+const channel: ChannelKey = { id: "999888777666555444", name: "Eboard - General", workspace: "eboard" };
 const guildId = "111";
 
 describe("markdown/channelSlug", () => {

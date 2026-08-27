@@ -22,11 +22,11 @@ Grok Bot then **live-searches the Morpheus index** over Tailscale (`/v1/fs/searc
   "job": {
     "id": "...",
     "content": "...",
-    "namespace": "general",
+    "namespace": "programs-dev",
     "scope": "channel",
     "channel_ids": ["111111111111111111"]
   },
-  "snippets": [{ "path": "/general/111111111111111111/…", "content": "..." }],
+  "snippets": [{ "path": "/programs-dev/111111111111111111/…", "content": "..." }],
   "feed_hint": "sponsors"
 }
 ```
@@ -35,11 +35,11 @@ Grok Bot then **live-searches the Morpheus index** over Tailscale (`/v1/fs/searc
 
 ### MVP channel scope (temporary until proper isolation)
 
-Default allowed set is the **originating channel only** (thread trigger: parent allowlisted channel + that thread). Discord `<#id>` / `message.mentions.channels` add extras only if the channel is in `config/channels.yml`, the author has **ViewChannel** (`permissionsFor`; fail closed if cache missing), and the extra channel is the **same namespace** as the job (general cannot `#` into isolated/leadership).
+Default allowed set is the **originating channel only** (thread trigger: parent allowlisted channel + that thread). Discord `<#id>` / `message.mentions.channels` add extras only if the channel is in `config/channels.yml`, the author has **ViewChannel** (`permissionsFor`; fail closed if cache missing), and the extra channel is the **same workspace** as the job (a job cannot `#` into a sibling or ancestor workspace).
 
-Leadership jobs (`isolated: true`, `scope: "leadership"`, `channel_ids: []`) have unadulterated access to the whole leadership namespace — do not channel-scope those. They **are** POSTed to `GROK_BOT_WEBHOOK_URL` by default (`GROK_DISPATCH_LEADERSHIP` default **true**; set `false` to skip Mini→Grok for isolated jobs).
+Jobs whose originating channel's workspace is a **tree root** (e.g. `leadership`, `scope: "workspace"`, `channel_ids: []`) have unadulterated access to that whole workspace subtree — do not channel-scope those. They **are** POSTed to `GROK_BOT_WEBHOOK_URL` by default only when the workspace id is listed in `GROK_DISPATCH_WORKSPACES` (comma list of workspace ids; empty = dispatch nothing, default deny; exact membership, not hierarchy — a listed parent does not imply its children are dispatched).
 
-**Grok consumer:** honor `job.channel_ids` as pathPrefix/channelHint. Do **not** tree all of `/general` unless `scope` is `leadership`. Mini HTTP `/v1/fs` tokens stay namespace-scoped (this slice does not invent per-job tokens).
+**Grok consumer:** honor `job.channel_ids` as pathPrefix/channelHint. Do **not** tree a whole root workspace unless `scope` is `"workspace"`. Mini HTTP `/v1/fs` tokens stay scoped to one workspace plus its descendants (this slice does not invent per-job tokens).
 
 Grok already has `MORPHEUS_BASE_URL` in **its** secret store.
 
@@ -57,7 +57,7 @@ Discord incoming webhooks are **#36 only**: ops feed (`#sponsors` `#opportunitie
 - [ ] Missing `GROK_BOT_WEBHOOK_URL` skips (warn), does not crash ingest
 - [ ] Missing `GROK_BOT_WEBHOOK_SECRET` skips (warn), does not crash ingest
 - [ ] POST uses `Authorization: Bearer <GROK_BOT_WEBHOOK_SECRET>`; key is not in the body
-- [ ] `job.namespace` is required; leadership dispatch defaults on (`GROK_DISPATCH_LEADERSHIP`, set false to skip)
+- [ ] `job.namespace` is required; dispatch only fires for workspace ids listed in `GROK_DISPATCH_WORKSPACES` (empty = none, default deny)
 - [ ] Mini→Grok POST uses `AbortSignal.timeout`
 - [ ] `capGrokPayload` caps `path` and `feed_hint` as well as body bytes
 - [ ] GROK_BOT_* / JOB_* are read through `loadEnv()` / zod, not ad-hoc `process.env`

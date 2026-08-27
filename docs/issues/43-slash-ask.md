@@ -12,8 +12,8 @@ Slash commands are **in** the product ([#41](https://github.com/sean-lai-sh/morp
 - Option: `question` (string, required)
 - Guild-scoped registration (`applications.commands` + `DISCORD_GUILD_ID`)
 - Discord requires an ACK within 3s: public `Queued.` (not the Grok answer). That ACK message id is `jobs.discord_message_id` so complete can `message.reply`.
-- Same role gate, channel allowlist, namespace, and caps as mentions.
-- Leadership `/ask` may Discord-reply; do not open GitHub issues from those by default.
+- Same role gate, channel allowlist, workspace resolution, and caps as mentions.
+- `/ask` in a workspace not listed in `GITHUB_ISSUES_WORKSPACES` may Discord-reply; do not open GitHub issues from those by default.
 
 ## Out of scope
 

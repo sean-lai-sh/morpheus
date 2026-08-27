@@ -67,7 +67,7 @@ Do **not** run `bun run live` on Grok Bot's machine or on Cursor cloud agents. D
                 └─ append markdown block + mark dirty
                         │
                         ▼
-              data/discord/{general|leadership}/.../*.md
+              data/discord/{workspace}/.../*.md
                         │
                         ▼  60s dirty-flag poll (live) or flushNow (backfill/reconcile/shutdown)
               src/nia/syncer.ts → PUT /fs/{id}/files
@@ -107,18 +107,13 @@ data/
   morpheus.db              SQLite source of truth (override: MORPHEUS_DB_PATH)
   backups/morpheus-*.db    nightly copy next to the live DB (honors MORPHEUS_DB_PATH; not hardcoded data/)
   discord/
-    general/{category?}/{channel-slug-last4}/
+    {workspace}/{category?}/{channel-slug-last4}/
       main.md
       threads/{thread-slug-last4}.md
-    leadership/...         channels with isolated: true
-  discord-archive/         rotate() target — not registered with Nia
+  discord-archive/         rotate() target
 ```
 
-Nia (remote):
-
-- Namespace `morpheus-discord-general` ← `NIA_DISCORD_SOURCE_ID`
-- Namespace `morpheus-discord-leadership` ← `NIA_DISCORD_LEADERSHIP_SOURCE_ID`
-- Paths inside a namespace are relative to `GENERAL_DIR` / `LEADERSHIP_DIR` (e.g. `eboard-teams/leadership-team-1234/main.md`).
+Nia (remote): **Nia is gone.**
 
 ### How search / read works today
 
@@ -168,14 +163,14 @@ Runtime: `LOG_LEVEL`, `HEALTH_PORT`, `RETENTION_MONTHS`, `NODE_ENV`, `MORPHEUS_D
 ### Assumed local folders
 
 - `config/channels.yml` (gitignored; copy from `config/channels.example.yml`)
-- `data/discord/general`, `data/discord/leadership`
+- `data/discord/{workspace}` (one directory per configured workspace id)
 - `data/morpheus.db` (+ WAL)
 - `data/backups/`, `data/discord-archive/`
 - Doppler CLI on the machine that runs `register-nia` / `bun run *` scripts (`doppler run --` wrappers)
 
 ### What is *not* coupled to Nia (keep)
 
-Discord gateway, ingest filters, SQLite schema for messages/links/users/crawl_state, markdown *rendering* (useful as a human export), channel allowlist + `isolated` namespace split, health server process, tests.
+Discord gateway, ingest filters, SQLite schema for messages/links/users/crawl_state, markdown *rendering* (useful as a human export), channel allowlist + hierarchical workspace scoping, health server process, tests.
 
 ---
 
@@ -197,12 +192,22 @@ Keep ingest as-is. Add a `ContextStore` in-process (FTS5). Mini POSTs a **first-
                          └── optional markdown export (no Nia push)
 ```
 
-Nia runtime was **removed in PR #24**. Mini needs zero `NIA_*` secrets. Markdown export stays local (`isolated: true` → leadership).
+Nia runtime was **removed in PR #24**. Mini needs zero `NIA_*` secrets. Markdown export stays local, one directory per workspace (see § Workspaces below).
 
 ### Interfaces (implement these; do not call Nia)
 
 ```ts
-type Namespace = "general" | "leadership";
+/** Workspace id from `channels.yml` (`workspaces:`). Plain string: the access boundary is `Scope.visible`. */
+type Namespace = string;
+
+/**
+ * Access scope derived from a token or a job's originating channel.
+ * `visible` = root workspace plus every transitive descendant. Produce only via `scopeFor()`.
+ */
+export interface Scope {
+  root: Namespace;
+  visible: ReadonlySet<Namespace>;
+}
 
 export interface IndexDocument {
   id: string;                 // Discord message snowflake
@@ -227,8 +232,8 @@ export interface IndexDocument {
 
 export interface SearchQuery {
   query: string;
-  namespace: Namespace;       // REQUIRED in-process. HTTP derives this from the token.
-  pathPrefix?: string;        // index path, e.g. /general/eboard-teams/sponsors-xxxx
+  scope: Scope;                // REQUIRED in-process. HTTP derives this from the token.
+  pathPrefix?: string;        // index path, e.g. /eboard/eboard-teams/sponsors-xxxx
   channelHint?: string;       // channel id or name
   threadId?: string;
   sinceMs?: number;
@@ -264,30 +269,47 @@ export interface IndexNode {
 export interface ContextStore {
   index(doc: IndexDocument): void;
   search(q: SearchQuery): SearchHit[];
-  readMessage(id: string, namespace: Namespace): IndexDocument | null;
-  readPath(path: string, namespace: Namespace): IndexDocument | IndexNode[] | null;
-  tree(path: string, namespace: Namespace): IndexNode[];
+  readMessage(id: string, scope: Scope): IndexDocument | null;
+  readPath(path: string, scope: Scope): IndexDocument | IndexDocument[] | IndexNode[] | null;
+  tree(path: string, scope: Scope): IndexNode[];
   readChannelWindow(opts: {
-    namespace: Namespace;
+    scope: Scope;
     /** Parent/allowlisted text channel id (effectiveChannelId). Includes threads. */
     channelId: string;
     afterId?: string;
     beforeId?: string;
     limit?: number;
   }): IndexDocument[];
-  poll(namespace: Namespace, cursor: string | null, limit?: number): PollPage;
+  poll(scope: Scope, cursor: string | null, limit?: number): PollPage;
 }
 ```
 
 `index()` is called from `ingest.ts` after upsert (same place that currently `appendBlock`s). Backfill/reindex rebuilds FTS from `messages`.
 
-**Namespace isolation:** `isolated: true` in `channels.yml` → `leadership`. Resolve via `namespaceForRow` / `effectiveChannelId` (thread ids are not in `channels.yml`). A `general` search must not return leadership rows even on exact match. **HTTP does not take a client-chosen namespace** — see below.
+**Namespace isolation:** each channel declares `workspace: <id>` in `channels.yml` (required — `isolated:` is gone; its presence is now a hard config error). Resolve via `namespaceForRow` / `effectiveChannelId` (thread ids are not in `channels.yml`, so `namespaceForRow` returns `null` for a thread whose parent is unknown — callers hard-fail, never default to a workspace). `scopeFor(root)` is the only producer of a `Scope`; a narrow scope must not return rows from a workspace outside `scope.visible`, even on exact FTS match. **HTTP does not take a client-chosen namespace** — see below.
+
+### Workspaces
+
+`config/channels.yml` declares a top-level `workspaces:` map: `{ <id>: { parent?: <id>, token_env?: ENV_NAME } }`. Ids are single lowercase slugs (`^[a-z0-9][a-z0-9-]*$`). Every channel's `workspace:` must name one of them.
+
+Example tree:
+
+```
+leadership                     (root)
+  eboard                       (parent: leadership)
+    programs-mentorship        (parent: eboard)
+    programs-dev                (parent: eboard)
+```
+
+**Scope** = a root workspace plus every transitive descendant, computed by `scopeFor(root)` / `visibleWorkspaces(root)` (`src/config.ts`). Never upward, never sideways: a token for `eboard` sees `eboard` plus every `programs-*`; a token for `programs-dev` sees only `programs-dev`; `leadership` sees everything.
+
+Index paths: `/{workspace}/{category}/{channel-slug}[/threads/{thread-slug}][/{messageId}]`, e.g. `/programs-dev/eboard-teams/dev-team-a1b2/threads/bug-triage-c3d4`. `GET /v1/fs/tree?path=/` lists the visible workspaces flat, sorted. Path resolution is decode → POSIX normalize → OS denylist → the first segment must be a visible workspace, else 404 (`/programs-dev/../eboard` from a `programs-dev` token → 404; `/eboard/../programs-dev/...` from an `eboard` token → 200, since it normalizes into a still-visible path).
 
 ### HTTP (Tailscale vfs over the index)
 
 Bind to the **Tailscale** address (`tag:morpheus`, Morpheus port only). Grok holds `MORPHEUS_BASE_URL` (tailnet) + a **scoped** token. Public internet still has no inbound port. **Not** a homedir mount.
 
-**Namespace is not auth.** Scoped secrets `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP`. Derive namespace **server-side**. Job routes take namespace from the **job row**. Negative tests: general token cannot read `/leadership/...` even if it sends `namespace=leadership`.
+**Namespace is not auth.** One scoped bearer per workspace, from `workspaces.<id>.token_env` in `channels.yml` (e.g. `MORPHEUS_API_TOKEN_LEADERSHIP`, `MORPHEUS_API_TOKEN_EBOARD`, `MORPHEUS_API_TOKEN_PROGRAMS_DEV`; `loadWorkspaceTokens()` — tokens ≥16 chars, pairwise distinct, never the Discord bot token). Scope is derived **server-side** from which token matched (`scopeFor`), never from a client field. Job routes take scope from the **job row**'s workspace. Negative tests: a `programs-dev` token cannot read `/eboard/...` or `/programs-mentorship/...` even if it sends `namespace=eboard`; a client-supplied `namespace` that isn't the token's root → **403**.
 
 | Method | Path | Tool |
 |---|---|---|
@@ -300,7 +322,7 @@ Bind to the **Tailscale** address (`tag:morpheus`, Morpheus port only). Grok hol
 
 Poll cursor is monotonic **`seq`**, bumped on every write (`upsertMessage` / `markDeleted` / `setReactions`). Never `created_at` (backfill, edits, and deletes would be silent). Order snowflake ids with `CAST(id AS INTEGER)`.
 
-Do not expose raw SQL, Mini `data/` paths, `~`, or Discord tokens. Third-party egress: club Discord text leaves the Mini toward Cursor/xAI when Grok runs — snippets in the first-pass POST plus whatever Grok reads over Tailscale. Leadership isolation is necessary but not the whole privacy story; cap payloads; do not ship deleted messages.
+Do not expose raw SQL, Mini `data/` paths, `~`, or Discord tokens. Third-party egress: club Discord text leaves the Mini toward Cursor/xAI when Grok runs — snippets in the first-pass POST plus whatever Grok reads over Tailscale. Workspace isolation is necessary but not the whole privacy story; cap payloads; do not ship deleted messages.
 
 ### Why not keep Nia as the query engine
 
@@ -344,7 +366,7 @@ Triggers (pure functions; reuse the intent of issue #11 without Pi):
 - Message contains a mention of the bot user **and** author is not a bot.
 - Message is a reply to a bot message (thread of a job).
 - Author has a role in `JOB_TRIGGER_ROLE_IDS` (fail closed if unset in production).
-- Channel (or thread parent) is allowlisted. Leadership vs general from `namespaceForRow` (never fail-open unknown → general).
+- Channel (or thread parent) is allowlisted. Workspace from `namespaceForRow` (never fail-open on an unknown channel to any workspace).
 - Outstanding-job and per-hour caps (#29).
 - Trigger check is **independent** of ingest too-short drops; job `content` is the raw Discord text.
 
@@ -357,7 +379,7 @@ CREATE TABLE jobs (
   discord_channel_id TEXT NOT NULL,
   discord_thread_id TEXT,
   author_id TEXT NOT NULL,
-  namespace TEXT NOT NULL,             -- general | leadership
+  namespace TEXT NOT NULL,             -- workspace id (see § Workspaces); answering scope = scopeFor(namespace)
   content TEXT NOT NULL,
   status TEXT NOT NULL,                -- queued | claimed | completed | failed | cancelled
   claimed_by TEXT,
@@ -380,7 +402,7 @@ Three different outputs. Do not collapse them.
 
 1. **Official bot reply** (`message.reply` in the Morpheus process, #30): answer the person who @mentioned the bot. Needs **Send Messages** and **Send Messages in Threads**. `allowedMentions: { parse: [], users: [], roles: [], repliedUser: false }`. Persist `reply_text` on the job as well as `result_discord_message_id`. Make complete **idempotent** (store a completion nonce / Discord message id before retrying send).
 2. **Channel incoming webhooks** (`docs/discord-webhooks.md`): operational feed for `#sponsors`, `#opportunities`, `#speakers`, and proposed `#inbox`. Grok Bot POSTs here **without GitHub**. Morning digest + time-sensitive hello@ items go here instead of opening an issue for every FYI.
-3. **GitHub issues**: implementation work only. Do **not** assume Grok Bot has `gh` credentials. If GitHub is unavailable, still complete the Discord feed/reply and record `github_issue_url` as null. Allowlisted repo only; approval required; leadership GitHub default off. Do not put a PAT in this repo.
+3. **GitHub issues**: implementation work only. Do **not** assume Grok Bot has `gh` credentials. If GitHub is unavailable, still complete the Discord feed/reply and record `github_issue_url` as null. Allowlisted repo only; approval required; only workspaces listed in `GITHUB_ISSUES_WORKSPACES` may carry a GitHub issue URL (empty = none, default deny). Do not put a PAT in this repo.
 
 Slash commands (`/event-status`, etc.) stay in the parked `agent-v1` series (#34).
 
@@ -402,7 +424,7 @@ Restrict the bot to eboard channels at the Discord permission layer **and** via 
 | `GROK_BOT_WEBHOOK_URL` | **Mac Mini** | Thin job + first-pass snippets. Not the full index. |
 | `DISCORD_WEBHOOK_*` | **Grok Bot** secret store | Incoming webhooks for `#sponsors` / `#opportunities` / `#speakers` / `#inbox`. |
 | `DISCORD_GUILD_ID` | Mini | Snowflake. Don't commit real `channels.yml`. |
-| `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP` | Mini + Grok (matching scope) | Tailscale `/v1/fs`. Namespace from which secret matched. |
+| Per-workspace `MORPHEUS_API_TOKEN_*` (`workspaces.<id>.token_env`, e.g. `_LEADERSHIP`, `_EBOARD`, `_PROGRAMS_DEV`) | Mini + Grok (matching scope) | Tailscale `/v1/fs`. Scope from whichever token matched (`scopeFor`), never a client field. |
 | `MORPHEUS_BASE_URL` | **Grok Bot** | Tailnet URL of Mini Morpheus HTTP. Not public. |
 | `NIA_*` | Mini Doppler until deleted | Not Grok Bot. |
 | `NVIDIA_API_KEY` | leftover | Unused. Drop. |

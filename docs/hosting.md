@@ -45,7 +45,7 @@ Slice #0: [#39](https://github.com/sean-lai-sh/morpheus/issues/39). Live index t
 
 - Destination: Mini tagged `tag:morpheus`
 - Port: Morpheus HTTP (`HEALTH_PORT`) **only**
-- Auth: scoped `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP` (namespace from the token)
+- Auth: one scoped `MORPHEUS_API_TOKEN_*` per workspace (`workspaces.<id>.token_env` in `channels.yml`, e.g. `_LEADERSHIP`, `_EBOARD`, `_PROGRAMS_DEV`; scope = that workspace plus descendants, from whichever token matched)
 - ACL sketch: `tag:grok-bot` → `tag:morpheus` TCP that port. **No SSH.** No other ports.
 - Bind `HEALTH_HOST` (zod allowlist: `127.0.0.1`, `::1`, Tailscale `100.64/10` or `fd7a:`). Default `127.0.0.1`. Never `0.0.0.0`, `::`, `::0`, or LAN/WAN unicasts.
 - Encrypted by Tailscale; do not publish a public hostname or AWS load balancer.
@@ -62,7 +62,7 @@ Documented empty in `.env.example`. Inject via Doppler **on the Mini** or the Gr
 | `DISCORD_GUILD_ID` | Mini | Guild snowflake |
 | `GROK_BOT_WEBHOOK_URL` | **Mini** | HTTPS URL of the Grok Bot routine. Thin job POST. |
 | `GROK_BOT_WEBHOOK_SECRET` | **Mini** | Sender key. Mini sends `Authorization: Bearer`. Not in the JSON body. Never on Grok as `DISCORD_BOT_TOKEN`. |
-| `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP` | Mini + Grok (matching scope) | Tailscale `/v1/fs` + optional job complete. Namespace from which secret matched. |
+| Per-workspace `MORPHEUS_API_TOKEN_*` (`workspaces.<id>.token_env`, e.g. `_LEADERSHIP`, `_EBOARD`, `_PROGRAMS_DEV`) | Mini + Grok (matching scope) | Tailscale `/v1/fs` + optional job complete. Scope = that workspace plus descendants, from whichever token matched. |
 | `MORPHEUS_BASE_URL` | **Grok Bot** | Tailnet URL of Mini Morpheus HTTP. Not a public URL. |
 | `DISCORD_WEBHOOK_SPONSORS` | **Grok Bot** | Incoming webhook for `#sponsors` |
 | `DISCORD_WEBHOOK_OPPORTUNITIES` | **Grok Bot** | `#opportunities` |

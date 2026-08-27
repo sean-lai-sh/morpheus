@@ -1,46 +1,98 @@
-# Allowlist of Discord channels the bot is permitted to crawl.
-# Belt-and-suspenders: bot ignores any channel not listed here, even if it has View Channel permission in Discord.
+# Allowlist of Discord channels the bot is permitted to crawl, plus the workspace tree
+# that governs who can read what over the HTTP API.
+#
+# Belt-and-suspenders: the bot ignores any channel not listed here, even if it has
+# View Channel permission in Discord.
 # Reload without restart: send SIGHUP to the running process.
 #
-# category: used to group channels into subdirectories in data/discord/{general|leadership}/{category}/{channel}/
-# isolated: true → leadership namespace (data/discord/leadership/…); everything else is general
+# ── workspaces ───────────────────────────────────────────────────────────────
+# A workspace is one access boundary and one on-disk root: data/discord/{workspace}/.
+# `parent:` builds a tree. A token sees its own workspace plus every transitive
+# descendant — never a sibling, never an ancestor. Cycles are rejected at load.
+#
+#   parent:    optional; must name another workspace declared here
+#   token_env: optional; env var holding that workspace's API bearer.
+#              Unset = that workspace has no /v1 HTTP access at all.
+#              Must be UPPER_SNAKE, unique per workspace, >= 16 chars at runtime,
+#              and never equal to DISCORD_BOT_TOKEN.
+#
+# Workspace ids are a single lowercase slug segment ([a-z0-9][a-z0-9-]*) because
+# they become the first segment of every index path:
+#   /{workspace}/{category}/{channel-slug}[/threads/{thread-slug}][/{messageId}]
+#
+# ── channels ─────────────────────────────────────────────────────────────────
+# workspace:       required; must be declared under `workspaces:` above
+# category:        optional; groups channels into data/discord/{workspace}/{category}/
+# include_threads: crawl threads under this channel (threads inherit the parent's workspace)
+#
+# Note: `isolated: true` was removed. Replace it with `workspace: <id>`.
 #
 # Copy this file to config/channels.yml and replace IDs with your own Discord snowflakes.
 # Right-click any channel in Discord → Copy Channel ID (Developer Mode must be on).
 
 guild_id: "YOUR_GUILD_ID"
 
+workspaces:
+  # Top of the tree: this token can read everything below it.
+  leadership:
+    token_env: MORPHEUS_API_TOKEN_LEADERSHIP
+
+  # Sees eboard + both programs workspaces, but never leadership.
+  eboard:
+    parent: leadership
+    token_env: MORPHEUS_API_TOKEN_EBOARD
+
+  # Leaf workspaces: each token sees only its own channels.
+  programs-mentorship:
+    parent: eboard
+    token_env: MORPHEUS_API_TOKEN_PM
+
+  programs-dev:
+    parent: eboard
+    token_env: MORPHEUS_API_TOKEN_PD
+
 channels:
-  # ── Example category ──────────────────────────────────────────────────────────
+  # ── Leadership-only ───────────────────────────────────────────────────────────
   - id: "CHANNEL_SNOWFLAKE_1"
-    name: "announcements"
-    category: "general"
-    classify: true
-    include_threads: true
-
-  - id: "CHANNEL_SNOWFLAKE_2"
-    name: "general-chat"
-    category: "general"
-    classify: true
-    include_threads: true
-
-  # ── Example teams category ────────────────────────────────────────────────────
-  - id: "CHANNEL_SNOWFLAKE_3"
     name: "leadership-team"
-    category: "teams"
+    category: "eboard-teams"
+    workspace: leadership
     classify: true
     include_threads: true
-    isolated: true          # leadership namespace (local markdown under data/discord/leadership/)
 
+  # ── Eboard ────────────────────────────────────────────────────────────────────
+  - id: "CHANNEL_SNOWFLAKE_2"
+    name: "announcements"
+    category: "eboard-teams"
+    workspace: eboard
+    classify: true
+    include_threads: true
+
+  - id: "CHANNEL_SNOWFLAKE_3"
+    name: "sponsors"
+    category: "eboard-teams"
+    workspace: eboard
+    classify: true
+    include_threads: true
+
+  # No category: lands directly at /eboard/general-chat-XXXX
   - id: "CHANNEL_SNOWFLAKE_4"
-    name: "marketing-team"
-    category: "teams"
+    name: "general-chat"
+    workspace: eboard
+    classify: true
+
+  # ── Programs ──────────────────────────────────────────────────────────────────
+  - id: "CHANNEL_SNOWFLAKE_5"
+    name: "mentorship-chat"
+    category: "programs"
+    workspace: programs-mentorship
     classify: true
     include_threads: true
 
-  - id: "CHANNEL_SNOWFLAKE_5"
-    name: "dev-team"
-    category: "teams"
+  - id: "CHANNEL_SNOWFLAKE_6"
+    name: "dev-chat"
+    category: "programs"
+    workspace: programs-dev
     classify: true
     include_threads: true
 

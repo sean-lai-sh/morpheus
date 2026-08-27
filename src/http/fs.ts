@@ -2,7 +2,7 @@ import { logger } from "../logger.ts";
 import { authorizeV1 } from "./auth.ts";
 import { contextStore, toFtsQuery } from "../context/store.ts";
 import { constrainIndexPath, parseIndexPath } from "../context/paths.ts";
-import type { Namespace } from "../context/types.ts";
+import type { Scope } from "../context/types.ts";
 
 const SEARCH_LIMIT_MAX = 50;
 const TREE_LIMIT = 100;
@@ -42,7 +42,7 @@ function rejectIncludeDeleted(url: URL, body?: Record<string, unknown> | null): 
   return null;
 }
 
-function rejectPath(raw: string | null, namespace: Namespace): Response | null {
+function rejectPath(raw: string | null, namespace: Scope): Response | null {
   if (raw == null) return json({ error: "not found" }, 404);
   if (constrainIndexPath(raw, namespace) == null) {
     return json({ error: "not found" }, 404);
@@ -61,7 +61,7 @@ export async function handleV1(req: Request): Promise<Response> {
 
   const auth = authorizeV1(req, clientNamespaceFrom(url, body));
   if (!auth.ok) return json({ error: auth.error }, auth.status);
-  const { namespace } = auth;
+  const { scope: namespace } = auth;
 
   const deletedFlag = rejectIncludeDeleted(url, body);
   if (deletedFlag) return deletedFlag;
@@ -90,7 +90,7 @@ export async function handleV1(req: Request): Promise<Response> {
   }
 }
 
-function handleTree(url: URL, namespace: Namespace): Response {
+function handleTree(url: URL, namespace: Scope): Response {
   const raw = url.searchParams.get("path") ?? "/";
   const bad = rejectPath(raw, namespace);
   if (bad) return bad;
@@ -102,7 +102,7 @@ function handleTree(url: URL, namespace: Namespace): Response {
   return json({ path: safe, nodes });
 }
 
-function handleSearch(namespace: Namespace, body: Record<string, unknown>): Response {
+function handleSearch(namespace: Scope, body: Record<string, unknown>): Response {
   const query = typeof body.query === "string" ? body.query : "";
   if (!query.trim() || !toFtsQuery(query)) {
     return json({ error: "query required" }, 400);
@@ -120,7 +120,7 @@ function handleSearch(namespace: Namespace, body: Record<string, unknown>): Resp
       : undefined;
   const hits = contextStore.search({
     query,
-    namespace,
+    scope: namespace,
     pathPrefix: safePrefix,
     limit,
     includeDeleted: false,
@@ -128,7 +128,7 @@ function handleSearch(namespace: Namespace, body: Record<string, unknown>): Resp
   return json({ hits });
 }
 
-function handleRead(url: URL, namespace: Namespace): Response {
+function handleRead(url: URL, namespace: Scope): Response {
   const raw = url.searchParams.get("path");
   if (raw == null) return json({ error: "not found" }, 404);
   const bad = rejectPath(raw, namespace);
@@ -152,14 +152,14 @@ function handleRead(url: URL, namespace: Namespace): Response {
   return json({ path: safe, document: result });
 }
 
-function handleMessage(id: string, namespace: Namespace): Response {
+function handleMessage(id: string, namespace: Scope): Response {
   if (!id) return json({ error: "not found" }, 404);
   const document = contextStore.readMessage(id, namespace);
   if (!document) return json({ error: "not found" }, 404);
   return json({ document });
 }
 
-function handlePoll(url: URL, namespace: Namespace): Response {
+function handlePoll(url: URL, namespace: Scope): Response {
   const cursor = url.searchParams.get("cursor");
   const limitRaw = url.searchParams.get("limit");
   const limit = limitRaw ? Number(limitRaw) : undefined;

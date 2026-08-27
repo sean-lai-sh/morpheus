@@ -3,13 +3,12 @@ import { getChannel, jobTriggerRoleIds, loadEnv, type Env } from "../config.ts";
 import { logger } from "../logger.ts";
 import { routeFeedFromText } from "../notify/route.ts";
 import { dispatchGrokJob, type HttpsPoster } from "../notify/grok-dispatch.ts";
+import { namespaceForRow, type ChannelResolver } from "../context/namespace.ts";
 import {
   countJobsSince,
   countOutstandingJobs,
   enqueueJob,
   firstPassSnippets,
-  namespaceForRow,
-  type ChannelResolver,
   type JobRow,
 } from "../storage/jobs.ts";
 import { mentionChannelIds, resolveJobChannelScope } from "./job-scope.ts";
@@ -63,6 +62,10 @@ export interface TryEnqueueOpts {
    * Production wires discord.js `permissionsFor`.
    */
   canViewChannel?: (channelId: string) => boolean;
+  /** Injectable workspace lookup for job scope. Default: channels.yml. */
+  resolveWorkspace?: (id: string) => { parent?: string } | undefined;
+  /** Injectable workspace-subtree lookup for mentioned channels. Default: channels.yml. */
+  visibleWorkspaces?: (root: string) => ReadonlySet<string>;
 }
 
 export interface TryEnqueueResult {
@@ -179,6 +182,8 @@ export async function tryEnqueueJob(
     mentionedChannelIds: mentionedIds,
     canViewChannel: opts.canViewChannel ?? (() => false),
     resolveChannel,
+    resolveWorkspace: opts.resolveWorkspace,
+    visibleWorkspaces: opts.visibleWorkspaces,
   });
 
   const { job, duplicate } = enqueueJob(

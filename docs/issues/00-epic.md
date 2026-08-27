@@ -1,3 +1,5 @@
+Superseded in part by hierarchical workspaces — see docs/context-layer.md §Workspaces.
+
 ## Goal
 
 Make Morpheus a **queryable context layer** for Tech@NYU: Discord ingest stays, Nia goes away, a Cursor/Grok agent can be talked to through the official Discord bot.

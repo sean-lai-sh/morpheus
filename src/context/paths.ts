@@ -1,9 +1,9 @@
 import type { Channel } from "../config.ts";
-import { getChannel, loadChannels } from "../config.ts";
+import { getChannel, getWorkspace, loadChannels } from "../config.ts";
 import { channelSlug } from "../storage/markdown.ts";
 import { getDb } from "../storage/db.ts";
 import { effectiveChannelId, type MessageRow } from "../storage/messages.ts";
-import type { Namespace } from "./types.ts";
+import type { Namespace, Scope } from "./types.ts";
 
 export type ParsedIndexPath =
   | { kind: "root" }
@@ -122,21 +122,28 @@ export function normalizeIndexPath(path: string): string | null {
 }
 
 /**
- * Token namespace is the access boundary. After sanitize, the path must be
- * `/`, `/${namespace}`, or `/${namespace}/...`.
+ * Token scope is the access boundary. After sanitize, the path must be `/`
+ * or start with a workspace segment that is visible from the scope.
  */
-export function constrainIndexPath(raw: string, namespace: Namespace): string | null {
+export function constrainIndexPath(raw: string, scope: Scope): string | null {
   const normalized = sanitizeIndexPath(raw);
   if (normalized == null) return null;
   if (normalized === "/") return "/";
-  const prefix = `/${namespace}`;
-  if (normalized === prefix || normalized.startsWith(`${prefix}/`)) return normalized;
+  const first = normalized.split("/").filter(Boolean)[0];
+  if (first && scope.visible.has(first)) return normalized;
   return null;
 }
 
 export function channelIdsForNamespace(namespace: Namespace): string[] {
   return loadChannels()
-    .channels.filter((c) => (c.isolated ? "leadership" : "general") === namespace)
+    .channels.filter((c) => c.workspace === namespace)
+    .map((c) => c.id);
+}
+
+/** Allowlisted channel ids across every workspace visible from the scope. */
+export function channelIdsForScope(scope: Scope): string[] {
+  return loadChannels()
+    .channels.filter((c) => scope.visible.has(c.workspace))
     .map((c) => c.id);
 }
 
@@ -147,8 +154,7 @@ export function pathPrefixMatches(path: string, prefix: string): boolean {
 export function indexPathForRow(row: MessageRow): string | null {
   const channel = getChannel(effectiveChannelId(row));
   if (!channel) return null;
-  const ns: Namespace = channel.isolated ? "leadership" : "general";
-  return messagePath(ns, channel, row);
+  return messagePath(channel.workspace, channel, row);
 }
 
 export function channelIndexPath(namespace: Namespace, channel: Channel): string {
@@ -168,7 +174,7 @@ export function messagePath(namespace: Namespace, channel: Channel, row: Message
 }
 
 function namespaceOfChannel(channel: Channel): Namespace {
-  return channel.isolated ? "leadership" : "general";
+  return channel.workspace;
 }
 
 function uncategorizedChannel(namespace: Namespace, slug: string): Channel | undefined {
@@ -269,7 +275,7 @@ function parseChannelTail(
 
 /**
  * Parse a virtual index path after sanitize. HTTP must call `constrainIndexPath`
- * first so a general token cannot follow `/general/../leadership` into leadership.
+ * first so a narrow token cannot follow `/programs-dev/../eboard` into a hidden workspace.
  */
 export function parseIndexPath(raw: string): ParsedIndexPath | null {
   const path = sanitizeIndexPath(raw);
@@ -278,7 +284,7 @@ export function parseIndexPath(raw: string): ParsedIndexPath | null {
 
   const segments = path.split("/").filter(Boolean);
   const nsSeg = segments[0];
-  if (nsSeg !== "general" && nsSeg !== "leadership") return null;
+  if (!nsSeg || !getWorkspace(nsSeg)) return null;
   const namespace: Namespace = nsSeg;
   const rest = segments.slice(1);
   if (rest.length === 0) return { kind: "namespace", namespace };

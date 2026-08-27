@@ -1,14 +1,23 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { loadEnv, resetEnvForTest } from "../src/config.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { loadEnv, loadWorkspaceTokens, resetChannelsForTest, resetEnvForTest } from "../src/config.ts";
 import { resolveListenHost } from "../src/http/listen-host.ts";
+import {
+  WORKSPACE_TOKENS,
+  WORKSPACE_TOKEN_ENV,
+  clearWorkspaceTokenEnv,
+  setWorkspaceTokenEnv,
+  writeCanonicalChannels,
+} from "./helpers.ts";
 
 const KEYS = [
   "DISCORD_BOT_TOKEN",
   "DISCORD_TOKEN",
   "DISCORD_GUILD_ID",
   "HEALTH_HOST",
-  "MORPHEUS_API_TOKEN_GENERAL",
-  "MORPHEUS_API_TOKEN_LEADERSHIP",
+  ...Object.values(WORKSPACE_TOKEN_ENV),
 ] as const;
 const saved: Record<string, string | undefined> = {};
 
@@ -21,6 +30,7 @@ function isolate(): void {
 }
 
 function restore(): void {
+  resetChannelsForTest();
   for (const k of KEYS) {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
@@ -75,15 +85,71 @@ describe("resolveListenHost", () => {
     expect(resolveListenHost()).toBe("127.0.0.1");
   });
 
-  test("MORPHEUS_API_TOKEN_* are consumed via loadEnv/zod", () => {
+  test("scoped bearers come from channels.yml token_env, not a fixed env list", () => {
     isolate();
+    clearWorkspaceTokenEnv();
     process.env.DISCORD_BOT_TOKEN = "bot-token";
     process.env.DISCORD_GUILD_ID = "123456789012345678";
-    process.env.MORPHEUS_API_TOKEN_GENERAL = "tok-g";
-    process.env.MORPHEUS_API_TOKEN_LEADERSHIP = "tok-l";
-    const env = loadEnv();
-    expect(env.MORPHEUS_API_TOKEN_GENERAL).toBe("tok-g");
-    expect(env.MORPHEUS_API_TOKEN_LEADERSHIP).toBe("tok-l");
-    expect(env.HEALTH_HOST).toBe("127.0.0.1");
+    setWorkspaceTokenEnv();
+
+    const dir = mkdtempSync(resolve(tmpdir(), "morpheus-tokens-"));
+    writeCanonicalChannels(dir);
+    const original = process.cwd();
+    process.chdir(dir);
+    resetChannelsForTest();
+    try {
+      const tokens = loadWorkspaceTokens();
+      expect(
+        Object.fromEntries(tokens.map((t) => [t.workspace, t.token])),
+      ).toEqual(WORKSPACE_TOKENS as unknown as Record<string, string>);
+      expect(tokens.map((t) => t.envName).sort()).toEqual(Object.values(WORKSPACE_TOKEN_ENV).sort());
+      expect(loadEnv().HEALTH_HOST).toBe("127.0.0.1");
+    } finally {
+      process.chdir(original);
+      resetChannelsForTest();
+      clearWorkspaceTokenEnv();
+    }
+  });
+
+  test("a workspace whose token_env is unset simply has no HTTP access", () => {
+    isolate();
+    clearWorkspaceTokenEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env[WORKSPACE_TOKEN_ENV["programs-dev"]] = WORKSPACE_TOKENS["programs-dev"];
+
+    const dir = mkdtempSync(resolve(tmpdir(), "morpheus-tokens-"));
+    writeCanonicalChannels(dir);
+    const original = process.cwd();
+    process.chdir(dir);
+    resetChannelsForTest();
+    try {
+      expect(loadWorkspaceTokens().map((t) => t.workspace)).toEqual(["programs-dev"]);
+    } finally {
+      process.chdir(original);
+      resetChannelsForTest();
+      clearWorkspaceTokenEnv();
+    }
+  });
+
+  test("a scoped bearer may never equal the Discord bot token", () => {
+    isolate();
+    clearWorkspaceTokenEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token-0123456789";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env[WORKSPACE_TOKEN_ENV.eboard] = "bot-token-0123456789";
+
+    const dir = mkdtempSync(resolve(tmpdir(), "morpheus-tokens-"));
+    writeCanonicalChannels(dir);
+    const original = process.cwd();
+    process.chdir(dir);
+    resetChannelsForTest();
+    try {
+      expect(() => loadWorkspaceTokens()).toThrow(/must not equal the Discord bot token/);
+    } finally {
+      process.chdir(original);
+      resetChannelsForTest();
+      clearWorkspaceTokenEnv();
+    }
   });
 });

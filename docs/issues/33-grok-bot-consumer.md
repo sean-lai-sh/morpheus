@@ -1,3 +1,5 @@
+Superseded in part by hierarchical workspaces — see docs/context-layer.md §Workspaces.
+
 ## Goal
 
 Name the **consumer** so later Cursor slices do not rebuild the May 2026 in-process Pi agent.

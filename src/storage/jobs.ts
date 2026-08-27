@@ -1,22 +1,28 @@
-import { getChannel } from "../config.ts";
+import { getChannel, getWorkspace, type Channel } from "../config.ts";
+import { rowInScope, scopeFor, type ChannelResolver } from "../context/namespace.ts";
+import { messagePath } from "../context/paths.ts";
+import type { Namespace, Scope } from "../context/types.ts";
+import { logger } from "../logger.ts";
 import { getDb } from "./db.ts";
 import { effectiveChannelId, type MessageRow } from "./messages.ts";
 
-export type Namespace = "general" | "leadership";
+/** Workspace lookup lives in ../context/namespace.ts — jobs only re-exports it. */
+export type { ChannelResolver };
+
 export type JobStatus = "queued" | "claimed" | "completed" | "failed" | "cancelled";
-export type JobScope = "channel" | "leadership";
+/**
+ * `channel` = only `channel_ids`. `workspace` = every channel visible from
+ * `scopeFor(job.namespace)` (the job's workspace plus its descendants).
+ * Rows persisted before workspaces stored the literal `'leadership'`; those map to `workspace`.
+ */
+export type JobScope = "channel" | "workspace";
 
 /** Cap persisted + dispatched allowlisted channel ids (MVP channel scope). */
 export const MAX_JOB_CHANNEL_IDS = 8;
 
 const FIRST_PASS_LOOKBACK_CHANNEL = 80;
-/** Scan enough recent rows to still find isolated-channel messages when general is busier. */
-const FIRST_PASS_LOOKBACK_LEADERSHIP = 2000;
-
-/** Channel lookup used for namespace + first-pass snippets. Tests inject a Map. */
-export type ChannelResolver = (
-  channelId: string,
-) => { isolated?: boolean; include_threads?: boolean } | undefined;
+/** Scan enough recent rows to still find quiet-workspace messages when a sibling is busier. */
+const FIRST_PASS_LOOKBACK_WORKSPACE = 2000;
 
 export interface JobRow {
   id: string;
@@ -24,6 +30,7 @@ export interface JobRow {
   discord_channel_id: string;
   discord_thread_id: string | null;
   author_id: string;
+  /** Workspace id from channels.yml. The DB column keeps its legacy `namespace` name. */
   namespace: Namespace;
   scope: JobScope;
   channel_ids: string[];
@@ -44,28 +51,11 @@ export interface EnqueueJobInput {
   discordMessageId: string;
   discordChannelId: string;
   discordThreadId: string | null;
-  authorId: string;
   namespace: Namespace;
+  authorId: string;
   scope?: JobScope;
   channelIds?: string[];
   content: string;
-}
-
-/**
- * Namespace from the *parent/allowlisted* channel, never a bare thread id.
- * Unknown / non-allowlisted → null (callers fail closed; do not map to general).
- */
-export function namespaceForRow(
-  row: {
-    channel_id: string;
-    parent_channel_id: string | null;
-  },
-  resolveChannel: ChannelResolver = getChannel,
-): Namespace | null {
-  const parentId = effectiveChannelId(row as MessageRow);
-  const ch = resolveChannel(parentId);
-  if (!ch) return null;
-  return ch.isolated ? "leadership" : "general";
 }
 
 function parseChannelIds(raw: unknown): string[] {
@@ -82,15 +72,38 @@ function parseChannelIds(raw: unknown): string[] {
   }
 }
 
+/** A root workspace (no parent) owns its whole subtree; anything else is channel-scoped. */
 function defaultScope(namespace: Namespace): JobScope {
-  return namespace === "leadership" ? "leadership" : "channel";
+  const ws = getWorkspace(namespace);
+  return ws && ws.parent == null ? "workspace" : "channel";
 }
 
-function mapJob(row: JobRow | Record<string, unknown>): JobRow {
+const warnedNamespaces = new Set<string>();
+
+/**
+ * Row → JobRow, or null when `namespace` is not a configured workspace.
+ * Never coerce an unknown id to a default: a row written under a workspace that
+ * has since been removed must disappear, not fall into someone else's scope.
+ */
+function mapJob(row: JobRow | Record<string, unknown>): JobRow | null {
   const r = row as JobRow & { channel_ids?: unknown; scope?: unknown };
-  const namespace: Namespace = r.namespace === "leadership" ? "leadership" : "general";
+  const namespace = String(r.namespace ?? "");
+  if (!getWorkspace(namespace)) {
+    if (!warnedNamespaces.has(namespace)) {
+      warnedNamespaces.add(namespace);
+      logger.warn(
+        { namespace, job_id: r.id },
+        "job row has an unknown workspace; ignoring row (declare it under workspaces: in channels.yml)",
+      );
+    }
+    return null;
+  }
   const scope: JobScope =
-    r.scope === "leadership" || r.scope === "channel" ? r.scope : defaultScope(namespace);
+    r.scope === "channel"
+      ? "channel"
+      : r.scope === "workspace" || r.scope === "leadership"
+        ? "workspace"
+        : defaultScope(namespace);
   let channel_ids = parseChannelIds(r.channel_ids);
   if (channel_ids.length === 0 && scope === "channel") {
     channel_ids = [String(r.discord_channel_id)];
@@ -115,17 +128,21 @@ export function getJobByDiscordMessageId(discordMessageId: string): JobRow | nul
   return row ? mapJob(row) : null;
 }
 
-export function listQueued(namespace: Namespace, limit = 20): JobRow[] {
+/** Queued jobs in every workspace visible from `scope`. Unknown-workspace rows are dropped. */
+export function listQueued(scope: Scope, limit = 20): JobRow[] {
   const cap = Math.min(Math.max(1, limit), 20);
-  return getDb()
-    .query<JobRow, [string, number]>(
+  const namespaces = [...scope.visible];
+  if (namespaces.length === 0) return [];
+  const placeholders = namespaces.map(() => "?").join(",");
+  const rows = getDb()
+    .query<JobRow, (string | number)[]>(
       `SELECT * FROM jobs
-       WHERE status = 'queued' AND namespace = ?
+       WHERE status = 'queued' AND namespace IN (${placeholders})
        ORDER BY created_at ASC, id ASC
        LIMIT ?`,
     )
-    .all(namespace, cap)
-    .map(mapJob);
+    .all(...namespaces, cap);
+  return rows.map(mapJob).filter((j): j is JobRow => j !== null);
 }
 
 export function countOutstandingJobs(authorId: string): number {
@@ -165,9 +182,12 @@ export function enqueueJob(
   const existing = getJobByDiscordMessageId(input.discordMessageId);
   if (existing) return { job: existing, duplicate: true };
 
+  if (!getWorkspace(input.namespace)) {
+    throw new Error(`enqueueJob: unknown workspace "${input.namespace}" (declare it under workspaces:)`);
+  }
   const id = crypto.randomUUID();
   const scope = input.scope ?? defaultScope(input.namespace);
-  const channelIds = (input.channelIds ?? (scope === "leadership" ? [] : [input.discordChannelId])).slice(
+  const channelIds = (input.channelIds ?? (scope === "workspace" ? [] : [input.discordChannelId])).slice(
     0,
     MAX_JOB_CHANNEL_IDS,
   );
@@ -267,7 +287,8 @@ export function prepareComplete(
     )
     .get(input.reply, completionKey, github, now, id, worker, completionKey);
 
-  if (updated) return { ok: true, job: mapJob(updated), alreadyCompleted: false };
+  const mapped = updated ? mapJob(updated) : null;
+  if (mapped) return { ok: true, job: mapped, alreadyCompleted: false };
 
   const current = getJob(id);
   if (!current) return { ok: false, reason: "not-found" };
@@ -374,14 +395,27 @@ export interface FirstPassSnippet {
   content: string;
 }
 
+type JobScopeRef = Pick<
+  JobRow,
+  "namespace" | "scope" | "channel_ids" | "discord_channel_id" | "discord_thread_id"
+>;
+
+type SnippetRow = Pick<
+  MessageRow,
+  "id" | "channel_id" | "parent_channel_id" | "thread_id" | "thread_name" | "content"
+>;
+
 function snippetAllowedForJob(
-  job: Pick<JobRow, "namespace" | "scope" | "channel_ids" | "discord_channel_id" | "discord_thread_id">,
+  job: JobScopeRef,
   row: Pick<MessageRow, "channel_id" | "parent_channel_id">,
   resolveChannel: ChannelResolver,
 ): boolean {
-  const ns = namespaceForRow(row, resolveChannel);
-  if (ns !== job.namespace) return false;
-  if (job.scope === "leadership" || job.namespace === "leadership") return true;
+  const scope = scopeFor(job.namespace);
+  if (!scope) return false;
+  // Workspace boundary first: a row outside the job's subtree never qualifies,
+  // whatever channel_ids says.
+  if (!rowInScope(row, scope, resolveChannel)) return false;
+  if (job.scope === "workspace") return true;
   const allowed = new Set(
     job.channel_ids.length > 0
       ? job.channel_ids
@@ -393,23 +427,49 @@ function snippetAllowedForJob(
   return false;
 }
 
-/** Recent SQLite messages in the job's allowed channels. Not the whole /general tree. Not FTS. */
+/**
+ * Index path for a snippet. Prefers the injected resolver when it carries enough
+ * of a `Channel` to build one, else the real config. Never emits a raw channel-id
+ * path — an unparseable path is worse than no path.
+ */
+function snippetPath(row: SnippetRow, resolveChannel: ChannelResolver): string | undefined {
+  const parentId = effectiveChannelId(row as MessageRow);
+  const resolved = resolveChannel(parentId);
+  let channel: Channel | undefined;
+  if (resolved?.name && resolved.id) {
+    channel = {
+      id: resolved.id,
+      name: resolved.name,
+      classify: true,
+      include_threads: resolved.include_threads ?? false,
+      category: resolved.category,
+      workspace: resolved.workspace,
+    };
+  } else {
+    channel = getChannel(parentId);
+  }
+  if (!channel) return undefined;
+  return messagePath(channel.workspace, channel, row as MessageRow);
+}
+
+/** Recent SQLite messages in the job's allowed channels. Not a whole workspace tree. Not FTS. */
 export function firstPassSnippets(
-  job: Pick<JobRow, "namespace" | "scope" | "channel_ids" | "discord_channel_id" | "discord_thread_id">,
+  job: JobScopeRef,
   limit = 12,
   resolveChannel: ChannelResolver = getChannel,
 ): FirstPassSnippet[] {
   const cap = Math.min(Math.max(1, limit), 12);
-  const leadership = job.scope === "leadership" || job.namespace === "leadership";
-  const lookback = leadership ? FIRST_PASS_LOOKBACK_LEADERSHIP : FIRST_PASS_LOOKBACK_CHANNEL;
+  const wide = job.scope === "workspace";
+  const lookback = wide ? FIRST_PASS_LOOKBACK_WORKSPACE : FIRST_PASS_LOOKBACK_CHANNEL;
 
-  type SnippetRow = Pick<MessageRow, "id" | "channel_id" | "parent_channel_id" | "content">;
   let rows: SnippetRow[];
 
-  if (leadership) {
+  if (wide) {
+    // An injected resolver cannot enumerate channels, so scan a recent window and
+    // let snippetAllowedForJob apply the workspace boundary row by row.
     rows = getDb()
       .query<SnippetRow, [number]>(
-        `SELECT id, channel_id, parent_channel_id, content
+        `SELECT id, channel_id, parent_channel_id, thread_id, thread_name, content
          FROM messages
          WHERE deleted_at IS NULL
          ORDER BY created_at DESC
@@ -424,7 +484,7 @@ export function firstPassSnippets(
     const threadParents = allowed.filter((id) => resolveChannel(id)?.include_threads);
     const idPh = allowed.map(() => "?").join(",");
     const args: Array<string | number> = [...allowed];
-    let sql = `SELECT id, channel_id, parent_channel_id, content
+    let sql = `SELECT id, channel_id, parent_channel_id, thread_id, thread_name, content
        FROM messages
        WHERE deleted_at IS NULL
          AND (channel_id IN (${idPh})`;
@@ -440,11 +500,11 @@ export function firstPassSnippets(
   const out: FirstPassSnippet[] = [];
   for (const row of rows) {
     if (!snippetAllowedForJob(job, row, resolveChannel)) continue;
-    const pathChannel = effectiveChannelId(row as MessageRow);
+    const path = snippetPath(row, resolveChannel);
     out.push({
       id: row.id,
       channelId: row.channel_id,
-      path: `/${job.namespace}/${pathChannel}/${row.id}`,
+      ...(path ? { path } : {}),
       content: row.content,
     });
     if (out.length >= cap) break;
