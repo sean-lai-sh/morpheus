@@ -10,7 +10,8 @@ import {
   writeCanonicalChannels,
 } from "./helpers.ts";
 import { handleRequest } from "../src/http/health.ts";
-import { indexFromRow } from "../src/context/store.ts";
+import { contextStore, indexFromRow } from "../src/context/store.ts";
+import { scopeFor } from "../src/context/namespace.ts";
 import { indexPathForRow } from "../src/context/paths.ts";
 import { getMessage, markDeleted, upsertMessage } from "../src/storage/messages.ts";
 
@@ -360,6 +361,65 @@ describe("search HTTP", () => {
     const hits = await hitsOf(res);
     expect(hits.map((h) => h.id)).toEqual([PM_MSG]);
     expect(hits[0]!.path.startsWith("/programs-mentorship/programs/")).toBe(true);
+  });
+
+  test("threadId body filter narrows to the thread (never silently ignored)", async () => {
+    // "retreat" matches both the main-channel plan (L_MSG) and the thread message.
+    const all = await post("/v1/fs/search", { query: "retreat" }, LEADERSHIP);
+    expect((await hitsOf(all)).map((h) => h.id).sort()).toEqual([L_MSG, L_THREAD_MSG].sort());
+    const threaded = await post("/v1/fs/search", { query: "retreat", threadId: L_THREAD_ID }, LEADERSHIP);
+    expect((await hitsOf(threaded)).map((h) => h.id)).toEqual([L_THREAD_MSG]);
+    expect((await post("/v1/fs/search", { query: "retreat", threadId: 123 }, LEADERSHIP)).status).toBe(400);
+  });
+
+  test("sinceMs / untilMs body filters bound createdAt (never silently ignored)", async () => {
+    // L_MSG createdAt 1100; L_THREAD_MSG createdAt 1200.
+    const since = await post("/v1/fs/search", { query: "retreat", sinceMs: 1_150 }, LEADERSHIP);
+    expect((await hitsOf(since)).map((h) => h.id)).toEqual([L_THREAD_MSG]);
+    const until = await post("/v1/fs/search", { query: "retreat", untilMs: 1_150 }, LEADERSHIP);
+    expect((await hitsOf(until)).map((h) => h.id)).toEqual([L_MSG]);
+    const none = await post("/v1/fs/search", { query: "retreat", sinceMs: 99_999 }, LEADERSHIP);
+    expect(await hitsOf(none)).toEqual([]);
+    expect((await post("/v1/fs/search", { query: "retreat", sinceMs: "abc" }, LEADERSHIP)).status).toBe(400);
+    expect((await post("/v1/fs/search", { query: "retreat", untilMs: "later" }, LEADERSHIP)).status).toBe(400);
+  });
+
+  test("channelHint body filter narrows by id or unique name; unknown name → no hits", async () => {
+    const byId = await post("/v1/fs/search", { query: "retreat", channelHint: "2002" }, LEADERSHIP);
+    expect((await hitsOf(byId)).map((h) => h.id).sort()).toEqual([L_MSG, L_THREAD_MSG].sort());
+    const byName = await post("/v1/fs/search", { query: "retreat", channelHint: "leadership-team" }, LEADERSHIP);
+    expect((await hitsOf(byName)).map((h) => h.id).sort()).toEqual([L_MSG, L_THREAD_MSG].sort());
+    const wrongChannel = await post("/v1/fs/search", { query: "retreat", channelHint: "1001" }, LEADERSHIP);
+    expect(await hitsOf(wrongChannel)).toEqual([]);
+    const unknown = await post("/v1/fs/search", { query: "retreat", channelHint: "no-such-channel" }, LEADERSHIP);
+    expect(unknown.status).toBe(200);
+    expect(await hitsOf(unknown)).toEqual([]);
+    expect((await post("/v1/fs/search", { query: "retreat", channelHint: 42 }, LEADERSHIP)).status).toBe(400);
+  });
+
+  test("channelHint name shared by two visible channels → 400 over HTTP, no hits in-store", async () => {
+    // Duplicate eboard's general-chat name into programs-dev.
+    writeCanonicalChannels(
+      process.cwd(),
+      CANONICAL_CHANNELS_YML.replace(
+        '- { id: "5005", name: general-chat, workspace: eboard }',
+        '- { id: "5005", name: general-chat, workspace: eboard }\n  - { id: "6006", name: general-chat, workspace: programs-dev }',
+      ),
+    );
+    reloadChannels();
+    try {
+      const res = await post("/v1/fs/search", { query: "retreat", channelHint: "general-chat" }, EBOARD);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("ambiguous");
+      // In-store, an ambiguous hint fails closed to no hits (never first-match).
+      const eboardScope = scopeFor("eboard")!;
+      expect(contextStore.search({ query: "retreat", scope: eboardScope, channelHint: "general-chat" })).toEqual([]);
+      // The snowflake id keeps working.
+      expect((await post("/v1/fs/search", { query: "retreat", channelHint: "5005" }, EBOARD)).status).toBe(200);
+    } finally {
+      writeCanonicalChannels();
+      reloadChannels();
+    }
   });
 
   test("eboard grep of its own content returns workspace-rooted paths", async () => {

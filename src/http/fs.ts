@@ -111,6 +111,13 @@ function handleTree(url: URL, namespace: Scope): Response {
   return json({ path: safe, nodes });
 }
 
+/** undefined = absent, null = present but invalid (reject), number = valid. */
+function msFromBody(v: unknown): number | null | undefined {
+  if (v == null) return undefined;
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  return Math.trunc(v);
+}
+
 function handleSearch(namespace: Scope, body: Record<string, unknown>): Response {
   const query = typeof body.query === "string" ? body.query : "";
   if (!query.trim() || !toFtsQuery(query)) {
@@ -127,10 +134,39 @@ function handleSearch(namespace: Scope, body: Record<string, unknown>): Response
     typeof limitRaw === "number" && Number.isFinite(limitRaw)
       ? Math.min(Math.max(Math.trunc(limitRaw), 1), SEARCH_LIMIT_MAX)
       : undefined;
+
+  // Documented body filters (issue #50 wrapper contract). A present-but-invalid
+  // filter is a 400, never silently ignored — dropped filters mean confidently
+  // wrong (unfiltered) answers presented as filtered.
+  if (body.channelHint != null && typeof body.channelHint !== "string") {
+    return json({ error: "invalid channelHint" }, 400);
+  }
+  let channelHint = typeof body.channelHint === "string" && body.channelHint !== "" ? body.channelHint : undefined;
+  if (channelHint != null) {
+    const resolved = resolveChannelInScope(namespace, channelHint);
+    if (resolved === "ambiguous") {
+      return json({ error: "ambiguous channel name; pass the channel id" }, 400);
+    }
+    if (!resolved) return json({ hits: [] });
+    channelHint = resolved.id;
+  }
+  if (body.threadId != null && typeof body.threadId !== "string") {
+    return json({ error: "invalid threadId" }, 400);
+  }
+  const threadId = typeof body.threadId === "string" && body.threadId !== "" ? body.threadId : undefined;
+  const sinceMs = msFromBody(body.sinceMs);
+  if (sinceMs === null) return json({ error: "invalid sinceMs" }, 400);
+  const untilMs = msFromBody(body.untilMs);
+  if (untilMs === null) return json({ error: "invalid untilMs" }, 400);
+
   const hits = contextStore.search({
     query,
     scope: namespace,
     pathPrefix: safePrefix,
+    channelHint,
+    threadId,
+    sinceMs,
+    untilMs,
     limit,
     includeDeleted: false,
   });

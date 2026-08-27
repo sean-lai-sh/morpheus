@@ -210,14 +210,20 @@ function sqlFilterForPathPrefix(prefix: string, scope: Scope): PrefixSqlFilter {
   };
 }
 
+/**
+ * Channel id or name → allowlisted id within `scope`. A name shared by two
+ * visible channels is null (fail closed: no hits), never a silent first-match —
+ * HTTP resolves names itself so it can 400 on ambiguity instead.
+ */
 function resolveChannelHint(scope: Scope, hint: string): string | null {
   const ids = new Set(channelIdsForScope(scope));
   const byId = getChannel(hint);
   if (byId && ids.has(byId.id)) return byId.id;
-  const byName = loadChannels().channels.find(
+  const byName = loadChannels().channels.filter(
     (c) => ids.has(c.id) && c.name.toLowerCase() === hint.toLowerCase(),
   );
-  return byName?.id ?? null;
+  if (byName.length !== 1) return null;
+  return byName[0]?.id ?? null;
 }
 
 function index(doc: IndexDocument): void {

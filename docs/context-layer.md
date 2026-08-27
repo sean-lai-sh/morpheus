@@ -323,7 +323,7 @@ Bind to the **Tailscale** address (`tag:morpheus`, Morpheus port only). Grok hol
 
 ### Search semantics (Grok tool wrapper contract) — issue #50
 
-`POST /v1/fs/search` body: `{ query, pathPrefix?, channelHint?, threadId?, sinceMs?, untilMs?, limit? (1..50, default 10) }`.
+`POST /v1/fs/search` body: `{ query, pathPrefix?, channelHint?, threadId?, sinceMs?, untilMs?, limit? (1..50, default 10) }`. A present-but-invalid filter (wrong type, non-finite number) is a 400, never silently ignored. `channelHint` takes a snowflake id or a channel name; a name shared by two visible channels is 400 (pass the id), an unknown/out-of-scope hint returns empty hits.
 
 - **Two passes.** `strict` = every non-stopword term must match (porter-stemmed). If that yields fewer than `limit` hits and the query has ≥3 terms, a `loose` pass adds hits matching **any two** terms, bm25-ranked. Each hit carries `match: "strict" | "loose"` — treat loose hits as leads, not facts.
 - `"quoted phrases"` are matched as phrases. Stopwords (`the, before, is, lol, pls, …`) are dropped unless the query is nothing but stopwords.
