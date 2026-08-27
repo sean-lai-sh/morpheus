@@ -397,6 +397,32 @@ describe("search HTTP", () => {
     expect((await post("/v1/fs/search", { query: "retreat", channelHint: 42 }, LEADERSHIP)).status).toBe(400);
   });
 
+  test("present-but-invalid body filters are 400, including explicit null (never silently dropped)", async () => {
+    const cases: Array<[string, unknown]> = [
+      ["channelHint", null],
+      ["channelHint", 42],
+      ["channelHint", ""],
+      ["threadId", null],
+      ["threadId", 42],
+      ["threadId", ""],
+      ["sinceMs", null],
+      ["sinceMs", "abc"],
+      ["sinceMs", true],
+      ["untilMs", null],
+      ["untilMs", "later"],
+      ["untilMs", {}],
+    ];
+    for (const [key, value] of cases) {
+      const res = await post("/v1/fs/search", { query: "retreat", [key]: value }, LEADERSHIP);
+      expect(`${key}=${JSON.stringify(value)} → ${res.status}`).toBe(`${key}=${JSON.stringify(value)} → 400`);
+      expect(((await res.json()) as { error: string }).error).toContain(key);
+    }
+    // Absent filters still search unfiltered.
+    const absent = await post("/v1/fs/search", { query: "retreat" }, LEADERSHIP);
+    expect(absent.status).toBe(200);
+    expect((await hitsOf(absent)).length).toBeGreaterThan(0);
+  });
+
   test("channelHint name shared by two visible channels → 400 over HTTP, no hits in-store", async () => {
     // Duplicate eboard's general-chat name into programs-dev.
     writeCanonicalChannels(
