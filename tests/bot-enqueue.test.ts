@@ -64,6 +64,8 @@ function candidate(over: Partial<JobCandidate> & { discordMessageId: string }): 
 const policy = {
   triggerRoleIds: new Set([ROLE]),
   dispatch: false as const,
+  maxOutstanding: 50,
+  maxPerHour: 50,
 };
 
 describe("tryEnqueueJob positives", () => {
@@ -165,11 +167,17 @@ describe("tryEnqueueJob negatives", () => {
 
   test("over outstanding cap → no job", async () => {
     const author = "cap-u";
-    await tryEnqueueJob(candidate({ discordMessageId: "e-cap-1", authorId: author }), policy);
-    await tryEnqueueJob(candidate({ discordMessageId: "e-cap-2", authorId: author }), policy);
+    await tryEnqueueJob(
+      candidate({ discordMessageId: "e-cap-1", authorId: author }),
+      { ...policy, maxOutstanding: 2, maxPerHour: 50 },
+    );
+    await tryEnqueueJob(
+      candidate({ discordMessageId: "e-cap-2", authorId: author }),
+      { ...policy, maxOutstanding: 2, maxPerHour: 50 },
+    );
     const r = await tryEnqueueJob(
       candidate({ discordMessageId: "e-cap-3", authorId: author }),
-      { ...policy, maxOutstanding: 2 },
+      { ...policy, maxOutstanding: 2, maxPerHour: 50 },
     );
     expect(r.skipped).toBe("outstanding-cap");
   });
@@ -191,15 +199,16 @@ describe("tryEnqueueJob negatives", () => {
   });
 
   test("duplicate discord_message_id is skipped", async () => {
-    await tryEnqueueJob(candidate({ discordMessageId: "e-dup" }), policy);
-    const r = await tryEnqueueJob(candidate({ discordMessageId: "e-dup" }), policy);
+    const author = "dup-u";
+    await tryEnqueueJob(candidate({ discordMessageId: "e-dup", authorId: author }), policy);
+    const r = await tryEnqueueJob(candidate({ discordMessageId: "e-dup", authorId: author }), policy);
     expect(r.skipped).toBe("duplicate");
   });
 });
 
 describe("tryEnqueueJob grok dispatch", () => {
   test("missing GROK_BOT_WEBHOOK_URL skips with warn and does not throw", async () => {
-    const r = await tryEnqueueJob(candidate({ discordMessageId: "e-nodispatch" }), {
+    const r = await tryEnqueueJob(candidate({ discordMessageId: "e-nodispatch", authorId: "disp-skip" }), {
       ...policy,
       dispatch: true,
       env: { ...process.env, GROK_BOT_WEBHOOK_URL: "" },
@@ -226,6 +235,7 @@ describe("tryEnqueueJob grok dispatch", () => {
     const r = await tryEnqueueJob(
       candidate({
         discordMessageId: "e-dispatch",
+        authorId: "disp-post",
         content: `<@${BOT}> summarize sponsors ${token}`,
       }),
       {
