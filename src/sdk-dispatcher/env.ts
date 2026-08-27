@@ -76,6 +76,30 @@ export interface SdkDispatcherEnv {
 }
 
 /**
+ * Secrets must be pairwise distinct roles: the inbound webhook bearer and the
+ * Cursor API key may never equal a workspace bearer (or each other) — a
+ * collision would let a workspace token authenticate to the webhook, or leak
+ * one credential's blast radius into another's. Same policy as the Mini's
+ * bot-token/workspace-token collision checks. Values are never included in
+ * the thrown message.
+ */
+export function assertSiblingSecretsDistinct(
+  env: Pick<SdkDispatcherEnv, "apiKey" | "webhookSecret">,
+  workspaceBearers: string[],
+): void {
+  const bearers = new Set(workspaceBearers.filter(Boolean));
+  if (env.webhookSecret && bearers.has(env.webhookSecret)) {
+    throw new Error("refusing to start: CURSOR_SDK_WEBHOOK_SECRET must not equal a workspace bearer");
+  }
+  if (env.apiKey && bearers.has(env.apiKey)) {
+    throw new Error("refusing to start: CURSOR_API_KEY must not equal a workspace bearer");
+  }
+  if (env.apiKey && env.webhookSecret && env.apiKey === env.webhookSecret) {
+    throw new Error("refusing to start: CURSOR_API_KEY and CURSOR_SDK_WEBHOOK_SECRET must be distinct");
+  }
+}
+
+/**
  * Parse the sibling's env. Throws if the Discord bot token is present:
  * the SDK worker is never the Discord face (product lock, #41/#47).
  */

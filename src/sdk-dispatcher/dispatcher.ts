@@ -29,6 +29,8 @@ interface KeyState {
   agent: SdkAgentHandle | null;
   busy: boolean;
   queue: SdkJobPayload[];
+  /** LRU stamp for idle-key eviction when maxKeys is reached. */
+  lastUsedAt: number;
 }
 
 export interface EnqueueResult {
@@ -73,7 +75,14 @@ export type JobOutcome =
   | "completed-fallback"
   | "failed"
   | "skipped-no-token"
-  | "skipped-not-claimed";
+  | "skipped-not-claimed"
+  /**
+   * The claim response failed validation (no claim generation, or the pack's
+   * namespace / dispatch key disagree with the persisted row). The job is left
+   * CLAIMED on purpose — no terminal /fail — so the lease sweeper requeues it
+   * for a worker fed an honest pack. A forged pack must never kill a job.
+   */
+  | "skipped-invalid-claim";
 
 export function dispatchKey(payload: SdkJobPayload): string {
   return payload.job.discord_channel_id ?? payload.job.id;
@@ -260,26 +269,56 @@ export class SdkDispatcher {
     return total;
   }
 
-  /** Accept a job pack (bounded per key, globally, and by distinct keys). */
+  /**
+   * Accept a job pack (bounded per key, globally, and by distinct keys).
+   * `maxKeys` is a bound on ACTIVE agents, not a lifetime cap: when it is
+   * reached, the least-recently-used idle key (no run in flight, empty queue)
+   * is evicted — its agent handle closed — to make room. Only when every held
+   * key is genuinely busy is a new key refused.
+   */
   enqueue(payload: SdkJobPayload): EnqueueResult {
     const key = dispatchKey(payload);
     let state = this.keys.get(key);
-    if (!state && this.keys.size >= this.maxKeys) {
+    if (!state && this.keys.size >= this.maxKeys && !this.evictIdleKey()) {
       return { accepted: false, key, queued: 0, reason: "too-many-keys" };
     }
     if (this.globalQueued() >= this.maxGlobalQueued) {
       return { accepted: false, key, queued: state?.queue.length ?? 0, reason: "global-queue-full" };
     }
     if (!state) {
-      state = { agentId: this.savedAgentIdFor(key), agent: null, busy: false, queue: [] };
+      state = { agentId: this.savedAgentIdFor(key), agent: null, busy: false, queue: [], lastUsedAt: Date.now() };
       this.keys.set(key, state);
     }
     if (state.queue.length >= this.maxQueuePerKey) {
       return { accepted: false, key, queued: state.queue.length, reason: "key-queue-full" };
     }
+    state.lastUsedAt = Date.now();
     state.queue.push(payload);
     void this.pump(key, state);
     return { accepted: true, key, queued: state.queue.length };
+  }
+
+  /** Evict the least-recently-used idle key. Returns false when everything is busy. */
+  private evictIdleKey(): boolean {
+    let lruKey: string | null = null;
+    let lruAt = Infinity;
+    for (const [key, state] of this.keys) {
+      if (state.busy || state.queue.length > 0) continue;
+      if (state.lastUsedAt < lruAt) {
+        lruAt = state.lastUsedAt;
+        lruKey = key;
+      }
+    }
+    if (lruKey == null) return false;
+    const state = this.keys.get(lruKey)!;
+    try {
+      state.agent?.close?.();
+    } catch {
+      // Disposal is best-effort; the handle is dropped either way.
+    }
+    this.keys.delete(lruKey);
+    logger.info({ key: lruKey }, "evicted idle dispatch key (maxKeys reached)");
+    return true;
   }
 
   /** Only local `agent-…` ids may ever reach Agent.resume — cloud (`bc-…`) is vetoed. */
@@ -300,6 +339,7 @@ export class SdkDispatcher {
       let payload = state.queue.shift();
       while (payload) {
         const outcome = await this.runJob(key, state, payload);
+        state.lastUsedAt = Date.now();
         this.opts.onJobSettled?.({ key, jobId: payload.job.id, outcome });
         payload = state.queue.shift();
       }
@@ -327,20 +367,31 @@ export class SdkDispatcher {
 
     // Authorization comes from the PERSISTED row we just claimed, never from
     // the inbound pack — and without a provable claim generation (claimed_at)
-    // the agent does not start at all.
+    // the agent does not start at all. Validation failures here are SKIPS, not
+    // terminal /fails: the job stays claimed and the lease sweeper requeues it,
+    // so a forged or corrupted pack can delay a job but never kill it.
     const row = parseClaimedJob(claimed.body);
     if (!row) {
-      logger.error({ job_id: job.id }, "claim response missing a valid job row / claimed_at; failing closed");
-      await this.failJob(job.id, token, null, "claim response missing claimed_at");
-      return "failed";
+      logger.error({ job_id: job.id }, "claim response missing a valid job row / claimed_at; skipping (lease sweeper will requeue)");
+      return "skipped-invalid-claim";
     }
     if (row.namespace !== job.namespace) {
       logger.error(
         { job_id: job.id, pack_namespace: job.namespace, row_namespace: row.namespace },
-        "webhook pack namespace does not match the claimed job row; failing closed",
+        "webhook pack namespace does not match the claimed job row; skipping (lease sweeper will requeue)",
       );
-      await this.failJob(job.id, token, row.claimedAt, "pack/job namespace mismatch");
-      return "failed";
+      return "skipped-invalid-claim";
+    }
+    // The dispatch key IS the agent-conversation boundary: a pack that routes
+    // one channel's job into another channel's long-lived agent would leak that
+    // conversation into the reply. The persisted row's channel must equal the
+    // key the pack was routed by.
+    if (row.discordChannelId == null || row.discordChannelId !== key) {
+      logger.error(
+        { job_id: job.id, key, row_channel: row.discordChannelId },
+        "webhook pack dispatch key does not match the claimed job row's channel; skipping (conversation isolation)",
+      );
+      return "skipped-invalid-claim";
     }
 
     const settled = await this.runClaimed(key, state, payload, token, row).catch(

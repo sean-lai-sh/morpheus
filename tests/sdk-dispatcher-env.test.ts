@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseSdkDispatcherEnv } from "../src/sdk-dispatcher/env.ts";
+import { assertSiblingSecretsDistinct, parseSdkDispatcherEnv } from "../src/sdk-dispatcher/env.ts";
 
 describe("parseSdkDispatcherEnv", () => {
   test("refuses to start when the Discord bot token is present (product lock)", () => {
@@ -82,5 +82,38 @@ describe("parseSdkDispatcherEnv", () => {
 
   test("rejects short webhook secrets", () => {
     expect(() => parseSdkDispatcherEnv({ CURSOR_SDK_WEBHOOK_SECRET: "short" })).toThrow(/16/);
+  });
+});
+
+describe("assertSiblingSecretsDistinct", () => {
+  const bearers = ["tok-eboard-0123456789", "tok-leadership-0123456789"];
+
+  test("webhook secret or api key equal to a workspace bearer is fatal (values never in the message)", () => {
+    expect(() =>
+      assertSiblingSecretsDistinct({ apiKey: "cur_key_x", webhookSecret: bearers[0]! }, bearers),
+    ).toThrow(/CURSOR_SDK_WEBHOOK_SECRET must not equal a workspace bearer/);
+    expect(() =>
+      assertSiblingSecretsDistinct({ apiKey: bearers[1]!, webhookSecret: "sibling-secret-0123456789" }, bearers),
+    ).toThrow(/CURSOR_API_KEY must not equal a workspace bearer/);
+    try {
+      assertSiblingSecretsDistinct({ apiKey: "cur_key_x", webhookSecret: bearers[0]! }, bearers);
+    } catch (err) {
+      expect((err as Error).message).not.toContain(bearers[0]!);
+    }
+  });
+
+  test("api key and webhook secret must be distinct from each other", () => {
+    expect(() =>
+      assertSiblingSecretsDistinct({ apiKey: "same-value-0123456789", webhookSecret: "same-value-0123456789" }, []),
+    ).toThrow(/must be distinct/);
+  });
+
+  test("distinct secrets pass", () => {
+    expect(() =>
+      assertSiblingSecretsDistinct(
+        { apiKey: "cur_key_x", webhookSecret: "sibling-secret-0123456789" },
+        bearers,
+      ),
+    ).not.toThrow();
   });
 });

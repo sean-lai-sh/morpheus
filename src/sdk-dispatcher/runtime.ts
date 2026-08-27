@@ -25,6 +25,8 @@ export interface SdkSendOptions {
 export interface SdkAgentHandle {
   readonly agentId: string;
   send(prompt: string, options?: SdkSendOptions): Promise<SdkRunHandle>;
+  /** Fire-and-forget disposal (used when a key is evicted). */
+  close?(): void;
 }
 
 export interface SdkRuntime {
@@ -79,6 +81,9 @@ function agentOptions(opts: CursorSdkRuntimeOptions): AgentOptions {
 function wrapAgent(agent: SDKAgent): SdkAgentHandle {
   return {
     agentId: agent.agentId,
+    close() {
+      agent.close();
+    },
     async send(prompt, options) {
       const run = await agent.send(
         prompt,

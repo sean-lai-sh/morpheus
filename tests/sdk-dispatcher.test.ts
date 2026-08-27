@@ -64,11 +64,11 @@ interface FakeRuntimeOpts {
 
 function makeFakeRuntime(opts: FakeRuntimeOpts = {}): {
   runtime: SdkRuntime;
-  calls: { prewarm: number; create: number; resume: string[]; released: number };
+  calls: { prewarm: number; create: number; resume: string[]; released: number; closed: string[] };
   sends: SentRun[];
   behavior: FakeRuntimeOpts;
 } {
-  const calls = { prewarm: 0, create: 0, resume: [] as string[], released: 0 };
+  const calls = { prewarm: 0, create: 0, resume: [] as string[], released: 0, closed: [] as string[] };
   const sends: SentRun[] = [];
   const behavior = { ...opts };
   let agentCounter = 0;
@@ -84,6 +84,9 @@ function makeFakeRuntime(opts: FakeRuntimeOpts = {}): {
         });
         sends.push({ agentId, prompt, customTools: options?.customTools, finish });
         return { wait: () => done };
+      },
+      close() {
+        calls.closed.push(agentId);
       },
     };
   }
@@ -360,6 +363,7 @@ describe("queue-when-busy and overload bounds", () => {
   test("unique keys cannot bypass the caps: global queue and key-count bounds", async () => {
     const keyBound = makeHarness({ maxKeys: 1 });
     expect(keyBound.enqueue(payloadFor("j1", { discord_channel_id: "1001" })).accepted).toBe(true);
+    // Key A is BUSY → nothing evictable → a new key is refused.
     const second = keyBound.enqueue(payloadFor("j2", { discord_channel_id: "2002", channel_ids: ["2002"] }));
     expect(second.accepted).toBe(false);
     expect(second.reason).toBe("too-many-keys");
@@ -378,6 +382,32 @@ describe("queue-when-busy and overload bounds", () => {
     await waitFor(() => globalBound.runtime.sends.length === 2, "g2 running");
     globalBound.runtime.sends[1]!.finish({ status: "finished", result: "2" });
     await globalBound.waitSettled(2);
+  });
+
+  test("maxKeys is not a lifetime cap: idle keys are LRU-evicted (agent closed) to admit new channels", async () => {
+    const h = makeHarness({ maxKeys: 1 });
+    // Channel A runs and settles → its key is now idle.
+    h.enqueue(payloadFor("j1", { discord_channel_id: "1001" }));
+    await waitFor(() => h.runtime.sends.length === 1, "first send");
+    const agentA = h.runtime.sends[0]!.agentId;
+    h.runtime.sends[0]!.finish({ status: "finished", result: "a" });
+    await h.waitSettled(1);
+
+    // Channel B arrives: A's idle key is evicted, its agent disposed, B admitted.
+    const admitted = h.enqueue(payloadFor("j2", { discord_channel_id: "2002", channel_ids: ["2002"] }));
+    expect(admitted.accepted).toBe(true);
+    await waitFor(() => h.runtime.sends.length === 2, "second send");
+    expect(h.runtime.calls.closed).toEqual([agentA]);
+    expect(h.runtime.calls.create).toBe(2);
+    h.runtime.sends[1]!.finish({ status: "finished", result: "b" });
+    await h.waitSettled(2);
+
+    // And channel A can come back later (evicting B in turn).
+    const back = h.enqueue(payloadFor("j3", { discord_channel_id: "1001" }));
+    expect(back.accepted).toBe(true);
+    await waitFor(() => h.runtime.sends.length === 3, "third send");
+    h.runtime.sends[2]!.finish({ status: "finished", result: "c" });
+    await h.waitSettled(3);
   });
 });
 
@@ -402,7 +432,7 @@ describe("claim: CAS, claimed row authority, claim generation", () => {
     expect(h.runtime.sends.length).toBe(0);
   });
 
-  test("claim response without a finite claimed_at → agent never starts, job failed closed", async () => {
+  test("claim response without a finite claimed_at → agent never starts; NO terminal /fail (sweeper requeues)", async () => {
     const h = makeHarness({
       route: (url) =>
         url.includes("/claim")
@@ -411,14 +441,14 @@ describe("claim: CAS, claimed row authority, claim generation", () => {
     });
     h.enqueue(payloadFor("j1"));
     await h.waitSettled(1);
-    expect(h.settled[0]!.outcome).toBe("failed");
+    expect(h.settled[0]!.outcome).toBe("skipped-invalid-claim");
     expect(h.runtime.sends.length).toBe(0);
     expect(h.runtime.calls.create).toBe(0);
-    const fail = h.requests.find((r) => r.url.endsWith("/v1/jobs/j1/fail"));
-    expect(JSON.parse(fail!.body!).error).toContain("claimed_at");
+    // A validation skip must never kill the job — no /fail leaves the process.
+    expect(h.requests.some((r) => r.url.endsWith("/fail"))).toBe(false);
   });
 
-  test("pack namespace that mismatches the claimed row → fail closed, no agent", async () => {
+  test("pack namespace that mismatches the claimed row → skip without /fail, no agent", async () => {
     const h = makeHarness({
       route: (url) =>
         url.includes("/claim")
@@ -432,10 +462,39 @@ describe("claim: CAS, claimed row authority, claim generation", () => {
     });
     h.enqueue(payloadFor("j1"));
     await h.waitSettled(1);
-    expect(h.settled[0]!.outcome).toBe("failed");
+    expect(h.settled[0]!.outcome).toBe("skipped-invalid-claim");
     expect(h.runtime.sends.length).toBe(0);
-    const fail = h.requests.find((r) => r.url.endsWith("/v1/jobs/j1/fail"));
-    expect(JSON.parse(fail!.body!).error).toContain("namespace mismatch");
+    expect(h.requests.some((r) => r.url.endsWith("/fail"))).toBe(false);
+  });
+
+  test("a pack routed to another channel's agent is refused: dispatch key must equal the row's channel", async () => {
+    // Forged pack: real job (row channel 5005) but discord_channel_id 1001 —
+    // it would run inside channel 1001's long-lived conversation and could
+    // leak that context into the reply posted in 5005.
+    const h = makeHarness({
+      route: (url) =>
+        url.includes("/claim")
+          ? {
+              status: 200,
+              body: JSON.stringify({
+                job: {
+                  namespace: "eboard",
+                  scope: "channel",
+                  channel_ids: ["5005"],
+                  discord_channel_id: "5005",
+                  claimed_at: CLAIMED_AT,
+                },
+              }),
+            }
+          : undefined,
+    });
+    h.enqueue(payloadFor("j1", { discord_channel_id: "1001", channel_ids: ["1001"] }));
+    await h.waitSettled(1);
+    expect(h.settled[0]!.outcome).toBe("skipped-invalid-claim");
+    expect(h.runtime.sends.length).toBe(0);
+    expect(h.runtime.calls.create).toBe(0);
+    // Left claimed for the sweeper; never killed.
+    expect(h.requests.some((r) => r.url.endsWith("/fail"))).toBe(false);
   });
 
   test("tool scope comes from the claimed row, not the untrusted pack", async () => {
@@ -1018,7 +1077,13 @@ describe("custom tools", () => {
           ? {
               status: 200,
               body: JSON.stringify({
-                job: { namespace: "eboard", scope: "channel", channel_ids: ["1001"], claimed_at: 777 },
+                job: {
+                  namespace: "eboard",
+                  scope: "channel",
+                  channel_ids: ["1001"],
+                  discord_channel_id: "1001",
+                  claimed_at: 777,
+                },
               }),
             }
           : undefined,

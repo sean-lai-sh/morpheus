@@ -1,7 +1,7 @@
 import { loadWorkspaceTokens } from "../config.ts";
 import { logger } from "../logger.ts";
 import { SdkDispatcher } from "./dispatcher.ts";
-import { parseSdkDispatcherEnv } from "./env.ts";
+import { assertSiblingSecretsDistinct, parseSdkDispatcherEnv } from "./env.ts";
 import { createCursorSdkRuntime } from "./runtime.ts";
 import { startSdkWebhookServer } from "./server.ts";
 
@@ -38,6 +38,8 @@ async function main(): Promise<void> {
   if (tokens.length === 0) {
     logger.error("no workspace tokens loaded: every fs/jobs call would 401 (set the token_env vars from channels.yml)");
   }
+  // Role collisions are fatal at boot, not discovered at auth time.
+  assertSiblingSecretsDistinct(env, tokens.map((t) => t.token));
   const byWorkspace = new Map(tokens.map((t) => [t.workspace, t.token]));
 
   const runtime = createCursorSdkRuntime({
