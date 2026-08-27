@@ -5,13 +5,13 @@ import { z } from "zod";
 import { isAllowedListenHost } from "./http/listen-allowlist.ts";
 import { isDiscordWebhookUrl } from "./notify/webhooks.ts";
 
-const emptyToUndef = (v: unknown) => {
+export const emptyToUndef = (v: unknown) => {
   if (v == null) return undefined;
   if (typeof v === "string" && v.trim() === "") return undefined;
   return v;
 };
 
-const parseBoolish = (v: unknown) => {
+export const parseBoolish = (v: unknown) => {
   if (v == null || v === "") return undefined;
   if (typeof v === "boolean") return v;
   if (typeof v === "string") {
@@ -68,6 +68,38 @@ const envSchema = z
       emptyToUndef,
       z.coerce.number().int().min(1_000).max(120_000).default(10_000),
     ),
+    /**
+     * Experiment (#47): gate for POSTing job packs to the sibling Cursor SDK
+     * dispatcher. Default OFF — the Grok path is unaffected unless this is
+     * explicitly enabled.
+     */
+    CURSOR_SDK_DISPATCH: z.preprocess(parseBoolish, z.boolean().default(false)),
+    /**
+     * Sibling Cursor SDK dispatcher URL. Same thin job pack as Grok dispatch.
+     * https anywhere (not a Discord incoming webhook, not :1340), or plain http
+     * only on loopback / Tailscale — the sibling runs next to `bun run live`.
+     */
+    CURSOR_SDK_WEBHOOK_URL: z.preprocess(
+      emptyToUndef,
+      z
+        .string()
+        .url()
+        .refine((u) => {
+          try {
+            const parsed = new URL(u);
+            if (parsed.port === "1340") return false;
+            if (isDiscordWebhookUrl(parsed.href)) return false;
+            if (parsed.protocol === "https:") return true;
+            if (parsed.protocol === "http:") return isAllowedListenHost(parsed.hostname);
+            return false;
+          } catch {
+            return false;
+          }
+        }, "must be https (or http on loopback/Tailscale), must not use port 1340, and must not be a Discord incoming webhook")
+        .optional(),
+    ),
+    /** Bearer for the sibling SDK dispatcher webhook. Auth only, never in the body. */
+    CURSOR_SDK_WEBHOOK_SECRET: z.preprocess(emptyToUndef, z.string().min(1).optional()),
     NVIDIA_API_KEY: z.string().min(1).optional(),
     LOG_LEVEL: z.string().default("info"),
     HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8080),

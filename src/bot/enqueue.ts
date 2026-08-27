@@ -2,7 +2,8 @@ import type { Message } from "discord.js";
 import { getChannel, jobTriggerRoleIds, loadEnv, type Env } from "../config.ts";
 import { logger } from "../logger.ts";
 import { routeFeedFromText } from "../notify/route.ts";
-import { dispatchGrokJob, type HttpsPoster } from "../notify/grok-dispatch.ts";
+import { dispatchGrokJob, type GrokJobPayload, type HttpsPoster } from "../notify/grok-dispatch.ts";
+import { dispatchSdkJob } from "../notify/sdk-dispatch.ts";
 import { namespaceForRow, type ChannelResolver } from "../context/namespace.ts";
 import {
   countJobsSince,
@@ -27,7 +28,18 @@ export type EnqueueSkipReason =
   | "rate-cap"
   | "duplicate";
 
-export type JobSource = "mention" | "slash";
+/**
+ * `mention` (@bot / reply-to-bot) and `slash` (/ask) are the interactive lane.
+ * `background` (/background) is the queued lane: always Grok Bot, never the
+ * SDK sibling, regardless of CURSOR_SDK_DISPATCH.
+ */
+export type JobSource = "mention" | "slash" | "background";
+
+export type JobLane = "interactive" | "background";
+
+export function laneForSource(source: JobSource): JobLane {
+  return source === "background" ? "background" : "interactive";
+}
 
 export interface JobCandidate {
   discordMessageId: string;
@@ -54,6 +66,8 @@ export interface TryEnqueueOpts {
   nodeEnv?: string;
   dispatch?: boolean;
   poster?: HttpsPoster;
+  /** Poster for the sibling Cursor SDK dispatcher (experiment #47, flag-gated off). */
+  sdkPoster?: HttpsPoster;
   env?: Env;
   /** Tests inject a Map so this file does not mutate global channels.yml / cwd. */
   resolveChannel?: ChannelResolver;
@@ -131,7 +145,10 @@ export async function tryEnqueueJob(
   if (candidate.authorIsBot) return { job: null, skipped: "bot-author" };
 
   const isTrigger =
-    candidate.source === "slash" || candidate.mentionedBot || candidate.replyToBot;
+    candidate.source === "slash" ||
+    candidate.source === "background" ||
+    candidate.mentionedBot ||
+    candidate.replyToBot;
   if (!isTrigger) return { job: null, skipped: "not-trigger" };
 
   const resolveChannel = opts.resolveChannel ?? getChannel;
@@ -216,37 +233,72 @@ export async function tryEnqueueJob(
   if (opts.dispatch === false) return { job };
 
   const dispatched = await dispatchEnqueuedJob(job, {
+    lane: laneForSource(candidate.source),
     poster: opts.poster,
+    sdkPoster: opts.sdkPoster,
     env: loaded,
     resolveChannel,
   });
   return { job, dispatched };
 }
 
+/**
+ * Lane routing (#47 split, Grok Bot stays the long-running queue):
+ *
+ *   - `background` (/background)         → Grok Bot webhook, always.
+ *   - `interactive` + CURSOR_SDK_DISPATCH → sibling Cursor SDK dispatcher.
+ *   - `interactive`, flag off (default)   → Grok Bot webhook, exactly as today.
+ *
+ * The SDK sibling never receives /background jobs; the flag never steals them.
+ */
 export async function dispatchEnqueuedJob(
   job: JobRow,
-  opts: { poster?: HttpsPoster; env?: Env; resolveChannel?: ChannelResolver } = {},
+  opts: {
+    lane?: JobLane;
+    poster?: HttpsPoster;
+    sdkPoster?: HttpsPoster;
+    env?: Env;
+    resolveChannel?: ChannelResolver;
+  } = {},
 ): Promise<boolean> {
+  const env = opts.env ?? loadEnv();
+  const lane = opts.lane ?? "interactive";
+
+  let payload: GrokJobPayload;
   try {
     const snippets = firstPassSnippets(job, 12, opts.resolveChannel ?? getChannel);
-    const result = await dispatchGrokJob(
-      {
-        first_pass: true,
-        job: {
-          id: job.id,
-          discord_message_id: job.discord_message_id,
-          discord_channel_id: job.discord_channel_id,
-          author_id: job.author_id,
-          namespace: job.namespace,
-          scope: job.scope,
-          channel_ids: job.channel_ids,
-          content: job.content,
-        },
-        snippets,
-        feed_hint: routeFeedFromText(job.content),
+    payload = {
+      first_pass: true,
+      job: {
+        id: job.id,
+        discord_message_id: job.discord_message_id,
+        discord_channel_id: job.discord_channel_id,
+        author_id: job.author_id,
+        namespace: job.namespace,
+        scope: job.scope,
+        channel_ids: job.channel_ids,
+        content: job.content,
       },
-      { env: opts.env, poster: opts.poster },
-    );
+      snippets,
+      feed_hint: routeFeedFromText(job.content),
+    };
+  } catch (err) {
+    logger.error({ err, job_id: job.id }, "job dispatch payload build failed; job remains queued");
+    return false;
+  }
+
+  if (lane === "interactive" && env.CURSOR_SDK_DISPATCH) {
+    try {
+      const result = await dispatchSdkJob(payload, { env, poster: opts.sdkPoster });
+      return result.dispatched;
+    } catch (err) {
+      logger.error({ err, job_id: job.id }, "SDK dispatch failed; job remains queued");
+      return false;
+    }
+  }
+
+  try {
+    const result = await dispatchGrokJob(payload, { env, poster: opts.poster });
     return result.dispatched;
   } catch (err) {
     logger.error({ err, job_id: job.id }, "Grok dispatch failed; job remains queued");
