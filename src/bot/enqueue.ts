@@ -1,5 +1,5 @@
 import type { Message } from "discord.js";
-import { getChannel } from "../config.ts";
+import { getChannel, jobTriggerRoleIds, loadEnv, type Env } from "../config.ts";
 import { logger } from "../logger.ts";
 import { routeFeedFromText } from "../notify/route.ts";
 import { dispatchGrokJob, type HttpsPoster } from "../notify/grok-dispatch.ts";
@@ -52,7 +52,7 @@ export interface TryEnqueueOpts {
   nodeEnv?: string;
   dispatch?: boolean;
   poster?: HttpsPoster;
-  env?: NodeJS.ProcessEnv;
+  env?: Env;
   /** Tests inject a Map so this file does not mutate global channels.yml / cwd. */
   resolveChannel?: ChannelResolver;
 }
@@ -109,18 +109,11 @@ export async function tryEnqueueJob(
   candidate: JobCandidate,
   opts: TryEnqueueOpts = {},
 ): Promise<TryEnqueueResult> {
-  const envVars = opts.env ?? process.env;
-  const enabled = opts.enabled ?? parseEnvBool(envVars.JOB_QUEUE_ENABLED, true);
-  const maxOutstanding = opts.maxOutstanding ?? parseEnvInt(envVars.JOB_MAX_OUTSTANDING_PER_AUTHOR, 2);
-  const maxPerHour = opts.maxPerHour ?? parseEnvInt(envVars.JOB_MAX_PER_AUTHOR_PER_HOUR, 5);
-  const triggerRoles =
-    opts.triggerRoleIds ??
-    new Set(
-      (envVars.JOB_TRIGGER_ROLE_IDS ?? "")
-        .split(/[\s,]+/)
-        .map((s) => s.trim())
-        .filter(Boolean),
-    );
+  const loaded = opts.env ?? loadEnv();
+  const enabled = opts.enabled ?? loaded.JOB_QUEUE_ENABLED;
+  const maxOutstanding = opts.maxOutstanding ?? loaded.JOB_MAX_OUTSTANDING_PER_AUTHOR;
+  const maxPerHour = opts.maxPerHour ?? loaded.JOB_MAX_PER_AUTHOR_PER_HOUR;
+  const triggerRoles = opts.triggerRoleIds ?? jobTriggerRoleIds(loaded);
 
   if (!enabled) return { job: null, skipped: "disabled" };
   if (candidate.authorIsBot) return { job: null, skipped: "bot-author" };
@@ -144,7 +137,7 @@ export async function tryEnqueueJob(
   if (!namespace) return { job: null, skipped: "unknown-namespace" };
 
   if (!authorPassesRoleGate(candidate.authorRoleIds, triggerRoles)) {
-    const nodeEnv = opts.nodeEnv ?? envVars.NODE_ENV ?? "development";
+    const nodeEnv = opts.nodeEnv ?? loaded.NODE_ENV;
     logger.error(
       { author_id: candidate.authorId, node_env: nodeEnv, trigger_roles: triggerRoles.size },
       "job enqueue role gate failed (fail closed)",
@@ -195,7 +188,7 @@ export async function tryEnqueueJob(
 
   const dispatched = await dispatchEnqueuedJob(job, {
     poster: opts.poster,
-    env: envVars,
+    env: loaded,
     resolveChannel,
   });
   return { job, dispatched };
@@ -203,7 +196,7 @@ export async function tryEnqueueJob(
 
 export async function dispatchEnqueuedJob(
   job: JobRow,
-  opts: { poster?: HttpsPoster; env?: NodeJS.ProcessEnv; resolveChannel?: ChannelResolver } = {},
+  opts: { poster?: HttpsPoster; env?: Env; resolveChannel?: ChannelResolver } = {},
 ): Promise<boolean> {
   try {
     const snippets = firstPassSnippets(job, 12, opts.resolveChannel ?? getChannel);
@@ -228,18 +221,4 @@ export async function dispatchEnqueuedJob(
     logger.error({ err, job_id: job.id }, "Grok dispatch failed; job remains queued");
     return false;
   }
-}
-
-function parseEnvBool(raw: string | undefined, fallback: boolean): boolean {
-  if (raw == null || raw.trim() === "") return fallback;
-  const s = raw.trim().toLowerCase();
-  if (s === "1" || s === "true" || s === "yes") return true;
-  if (s === "0" || s === "false" || s === "no") return false;
-  return fallback;
-}
-
-function parseEnvInt(raw: string | undefined, fallback: number): number {
-  if (raw == null || raw.trim() === "") return fallback;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback;
 }

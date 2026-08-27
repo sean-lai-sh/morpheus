@@ -163,16 +163,10 @@ export async function completeJobWithReply(
   let githubRepo = opts.githubRepo;
   let allowLeadershipGithub = opts.allowLeadershipGithub;
   let postReplies = opts.postReplies;
-  try {
-    const env = loadEnv();
-    githubRepo ??= env.GITHUB_ISSUE_REPO;
-    allowLeadershipGithub ??= env.OPEN_GITHUB_ISSUES_FROM_LEADERSHIP;
-    postReplies ??= env.DISCORD_POST_REPLIES;
-  } catch {
-    githubRepo ??= process.env.GITHUB_ISSUE_REPO;
-    allowLeadershipGithub ??= process.env.OPEN_GITHUB_ISSUES_FROM_LEADERSHIP === "true";
-    postReplies ??= process.env.DISCORD_POST_REPLIES !== "false";
-  }
+  const env = loadEnv();
+  githubRepo ??= env.GITHUB_ISSUE_REPO;
+  allowLeadershipGithub ??= env.OPEN_GITHUB_ISSUES_FROM_LEADERSHIP;
+  postReplies ??= env.DISCORD_POST_REPLIES;
 
   const existing = getJob(id);
   const github = allowlistedGithubIssueUrl(input.github_issue_url, {

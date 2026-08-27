@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { withTempDb } from "./helpers.ts";
 import { authorPassesRoleGate, tryEnqueueJob, type JobCandidate } from "../src/bot/enqueue.ts";
+import { parseEnv } from "../src/config.ts";
 import { upsertMessage } from "../src/storage/messages.ts";
 import { getJobByDiscordMessageId, type ChannelResolver } from "../src/storage/jobs.ts";
 
@@ -188,7 +189,7 @@ describe("tryEnqueueJob grok dispatch", () => {
     const r = await tryEnqueueJob(candidate({ discordMessageId: "e-nodispatch", authorId: "disp-skip" }), {
       ...policy,
       dispatch: true,
-      env: { ...process.env, GROK_BOT_WEBHOOK_URL: "" },
+      env: parseEnv({ ...process.env, GROK_BOT_WEBHOOK_URL: "" }),
     });
     expect(r.job?.status).toBe("queued");
     expect(r.dispatched).toBe(false);
@@ -198,14 +199,44 @@ describe("tryEnqueueJob grok dispatch", () => {
     const r = await tryEnqueueJob(candidate({ discordMessageId: "e-nosecret", authorId: "disp-nosecret" }), {
       ...policy,
       dispatch: true,
-      env: {
+      env: parseEnv({
         ...process.env,
         GROK_BOT_WEBHOOK_URL: "https://example.com/grok-routine",
         GROK_BOT_WEBHOOK_SECRET: "",
-      },
+      }),
     });
     expect(r.job?.status).toBe("queued");
     expect(r.dispatched).toBe(false);
+  });
+
+  test("leadership jobs stay queued and are not POSTed by default", async () => {
+    let posted = 0;
+    const r = await tryEnqueueJob(
+      candidate({
+        discordMessageId: "e-lead-dispatch",
+        discordChannelId: "thread-lead-disp",
+        discordThreadId: "thread-lead-disp",
+        parentChannelId: LEADERSHIP,
+        content: `<@${BOT}> budget?`,
+      }),
+      {
+        ...policy,
+        dispatch: true,
+        env: parseEnv({
+          ...process.env,
+          GROK_BOT_WEBHOOK_URL: "https://example.com/grok-routine",
+          GROK_BOT_WEBHOOK_SECRET: "grok-sender-key-for-tests",
+        }),
+        poster: async () => {
+          posted += 1;
+          return { ok: true, status: 200 };
+        },
+      },
+    );
+    expect(r.job?.namespace).toBe("leadership");
+    expect(r.job?.status).toBe("queued");
+    expect(r.dispatched).toBe(false);
+    expect(posted).toBe(0);
   });
 
   test("POSTs thin first_pass pack (not the whole index, no tokens)", async () => {
@@ -233,11 +264,12 @@ describe("tryEnqueueJob grok dispatch", () => {
         triggerRoleIds: new Set([ROLE]),
         dispatch: true,
         resolveChannel,
-        env: {
+        env: parseEnv({
+          ...process.env,
           GROK_BOT_WEBHOOK_URL: "https://example.com/grok-routine",
           GROK_BOT_WEBHOOK_SECRET: "grok-sender-key-for-tests",
           DISCORD_BOT_TOKEN: token,
-        },
+        }),
         poster: async (_url, body, headers) => {
           captured = body as typeof captured;
           const json = JSON.stringify(body);

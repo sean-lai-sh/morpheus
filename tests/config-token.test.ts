@@ -75,6 +75,14 @@ describe("GROK_BOT_WEBHOOK_URL", () => {
     expect(() => loadEnv()).toThrow(/https/);
   });
 
+  test("rejects :1340 gateway URLs", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.GROK_BOT_WEBHOOK_URL = "https://example.com:1340/hook";
+    expect(() => loadEnv()).toThrow(/1340/);
+  });
+
   test("GROK_BOT_WEBHOOK_SECRET empty is unset (optional)", () => {
     isolateEnv();
     process.env.DISCORD_BOT_TOKEN = "bot-token";
@@ -124,5 +132,12 @@ describe("job roles", () => {
     process.env.DISCORD_GUILD_ID = "123456789012345678";
     process.env.JOB_TRIGGER_ROLE_IDS = "";
     expect(jobTriggerRoleIds(loadEnv()).size).toBe(0);
+  });
+
+  test("GROK_DISPATCH_LEADERSHIP defaults off", () => {
+    isolateEnv();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    expect(loadEnv().GROK_DISPATCH_LEADERSHIP).toBe(false);
   });
 });

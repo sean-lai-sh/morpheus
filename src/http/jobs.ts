@@ -1,7 +1,7 @@
 import { claimJob, getJob, listQueued, type Namespace } from "../storage/jobs.ts";
 import { completeJobWithReply, failJobAsWorker } from "../bot/reply.ts";
 import { peekClient } from "../bot/client.ts";
-import { loadEnv } from "../config.ts";
+import { loadEnv, type Env } from "../config.ts";
 import { logger } from "../logger.ts";
 
 export interface TokenScope {
@@ -20,7 +20,7 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 /** Namespace comes from which scoped token matched — never from a client query param. */
-export function scopeFromRequest(req: Request, env: NodeJS.ProcessEnv = process.env): TokenScope | null {
+export function scopeFromRequest(req: Request, env: Env = loadEnv()): TokenScope | null {
   const header = req.headers.get("authorization") ?? "";
   const m = /^Bearer\s+(\S+)$/i.exec(header.trim());
   if (!m?.[1]) return null;
@@ -90,7 +90,7 @@ function discordClientOrUndefined(): ReturnType<typeof peekClient> {
  * Auth: scoped bearer. Namespace from token + job row, never ?namespace=.
  */
 export async function handleJobsRequest(req: Request, url: URL): Promise<Response> {
-  const env = process.env;
+  const env = loadEnv();
   const scope = scopeFromRequest(req, env);
   if (!scope) return json(401, { error: "unauthorized" });
 
@@ -142,12 +142,7 @@ export async function handleJobsRequest(req: Request, url: URL): Promise<Respons
   const completionKey =
     typeof body.completion_key === "string" ? body.completion_key : undefined;
 
-  let postReplies: boolean | undefined;
-  try {
-    postReplies = loadEnv().DISCORD_POST_REPLIES;
-  } catch {
-    postReplies = env.DISCORD_POST_REPLIES !== "false";
-  }
+  const postReplies = env.DISCORD_POST_REPLIES;
 
   const result = await completeJobWithReply(
     jobId,

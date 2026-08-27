@@ -35,14 +35,23 @@ const envSchema = z
         .url()
         .refine((u) => {
           try {
-            return new URL(u).protocol === "https:";
+            const parsed = new URL(u);
+            if (parsed.protocol !== "https:") return false;
+            if (parsed.port === "1340") return false;
+            return true;
           } catch {
             return false;
           }
-        }, "must be https")
+        }, "must be https and must not use port 1340")
         .optional(),
     ),
     GROK_BOT_WEBHOOK_SECRET: z.preprocess(emptyToUndef, z.string().min(1).optional()),
+    /** Off by default: do not POST leadership jobs to GROK_BOT_WEBHOOK_URL. */
+    GROK_DISPATCH_LEADERSHIP: z.preprocess(parseBoolish, z.boolean().default(false)),
+    GROK_DISPATCH_TIMEOUT_MS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(1_000).max(120_000).default(10_000),
+    ),
     NVIDIA_API_KEY: z.string().min(1).optional(),
     LOG_LEVEL: z.string().default("info"),
     HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8080),
@@ -128,6 +137,21 @@ const channelsConfigSchema = z.object({
 export type Channel = z.infer<typeof channelSchema>;
 export type ChannelsConfig = z.infer<typeof channelsConfigSchema>;
 
+function formatEnvError(error: z.ZodError): string {
+  const issues = error.issues.map((i) => `  ${i.path.join(".")}: ${i.message}`).join("\n");
+  return (
+    `Invalid environment. Check Doppler config and .env.example. Issues:\n${issues}\n\n` +
+    `Run with: bun src/index.ts <cmd>  (Mini: doppler run -- bun src/index.ts <cmd>)`
+  );
+}
+
+/** Parse env through the zod schema. Tests pass overlays here — do not read process.env ad hoc. */
+export function parseEnv(raw: NodeJS.ProcessEnv = process.env): Env {
+  const parsed = envSchema.safeParse(raw);
+  if (!parsed.success) throw new Error(formatEnvError(parsed.error));
+  return parsed.data;
+}
+
 let _env: Env | undefined;
 let _channels: ChannelsConfig | undefined;
 // Resolved lazily so tests that chdir before calling loadChannels() get the right file.
@@ -137,15 +161,7 @@ function channelsPath(): string {
 
 export function loadEnv(): Env {
   if (_env) return _env;
-  const parsed = envSchema.safeParse(process.env);
-  if (!parsed.success) {
-    const issues = parsed.error.issues.map((i) => `  ${i.path.join(".")}: ${i.message}`).join("\n");
-    throw new Error(
-      `Invalid environment. Check Doppler config and .env.example. Issues:\n${issues}\n\n` +
-        `Run with: bun src/index.ts <cmd>  (Mini: doppler run -- bun src/index.ts <cmd>)`,
-    );
-  }
-  _env = parsed.data;
+  _env = parseEnv();
   return _env;
 }
 
@@ -160,7 +176,7 @@ export function discordBotToken(env: Env = loadEnv()): string {
 
 /** Bind Morpheus HTTP to Tailscale or loopback — never a public NIC by default. */
 export function httpBindHostname(env: Env = loadEnv()): string {
-  return env.HEALTH_HOST ?? "127.0.0.1";
+  return env.HEALTH_HOST;
 }
 
 /** Comma/whitespace-separated snowflakes. Empty set → fail closed on enqueue. */

@@ -25,9 +25,9 @@ Grok Bot then **live-searches the Morpheus index** over Tailscale (`/v1/fs/searc
 }
 ```
 
-`capGrokPayload` already limits snippet count/bytes. Do not include `DISCORD_BOT_TOKEN`, channel webhook URLs, `MORPHEUS_BASE_URL`, or Mini filesystem paths. Grok already has `MORPHEUS_BASE_URL` in **its** secret store.
+`capGrokPayload` caps snippet count/bytes **and** `path` / `feed_hint`. Do not include `DISCORD_BOT_TOKEN`, channel webhook URLs, `MORPHEUS_BASE_URL`, or Mini filesystem paths. `job.namespace` is **required**. Leadership jobs are **not** POSTed to `GROK_BOT_WEBHOOK_URL` unless `GROK_DISPATCH_LEADERSHIP=true` (off by default). Grok already has `MORPHEUS_BASE_URL` in **its** secret store.
 
-Auth: Mini sends `Authorization: Bearer <GROK_BOT_WEBHOOK_SECRET>`. The sender key is **not** in the JSON body, query string, or Discord/job content. POST **https** to `GROK_BOT_WEBHOOK_URL` only — no undocumented Grok-box gateway.
+Auth: Mini sends `Authorization: Bearer <GROK_BOT_WEBHOOK_SECRET>` from `loadEnv()` / zod. The sender key is **not** in the JSON body, query string, or Discord/job content. POST **https** to `GROK_BOT_WEBHOOK_URL` only — no `:1340` gateway. `AbortSignal.timeout(GROK_DISPATCH_TIMEOUT_MS)` on the Mini→Grok fetch. Never put `DISCORD_BOT_TOKEN` on the request.
 
 ## After Grok receives it
 
@@ -41,6 +41,10 @@ Discord incoming webhooks are **#36 only**: ops feed (`#sponsors` `#opportunitie
 - [ ] Missing `GROK_BOT_WEBHOOK_URL` skips (warn), does not crash ingest
 - [ ] Missing `GROK_BOT_WEBHOOK_SECRET` skips (warn), does not crash ingest
 - [ ] POST uses `Authorization: Bearer <GROK_BOT_WEBHOOK_SECRET>`; key is not in the body
+- [ ] `job.namespace` is required; leadership dispatch is refused unless `GROK_DISPATCH_LEADERSHIP=true`
+- [ ] Mini→Grok POST uses `AbortSignal.timeout`
+- [ ] `capGrokPayload` caps `path` and `feed_hint` as well as body bytes
+- [ ] GROK_BOT_* / JOB_* are read through `loadEnv()` / zod, not ad-hoc `process.env`
 - [ ] Payload is marked `first_pass` and capped
 - [ ] Docs do **not** treat this webhook as “send the whole index”
 - [ ] Docs say missing URL = not activated (#42)
