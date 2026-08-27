@@ -81,6 +81,40 @@ channels:
     ).toThrow(/isolated was removed/);
   });
 
+  test("category must be a single path segment (no traversal into export dirs or index paths)", () => {
+    for (const category of ["../escape", "a/b", "..", ".", "x\\y", " padded "]) {
+      expect(() =>
+        parse(`
+workspaces:
+  eboard: {}
+channels:
+  - { id: "1001", name: sponsors, category: "${category.replace(/\\/g, "\\\\")}", workspace: eboard }
+`),
+      ).toThrow(/single path segment/);
+    }
+    // Index paths are repeatedly percent-decoded (sanitizeIndexPath), so encoded
+    // separators / dot segments — and double-encoded or malformed forms — must
+    // fail at config load, not silently rewrite the path later.
+    for (const category of ["%2F", "%252F", "%2e%2e", "%252e%252e", "50%"]) {
+      expect(() =>
+        parse(`
+workspaces:
+  eboard: {}
+channels:
+  - { id: "1001", name: sponsors, category: "${category}", workspace: eboard }
+`),
+      ).toThrow(/percent-decoding/);
+    }
+    // Permissive otherwise: uppercase and spaces inside a segment still work.
+    const ok = parse(`
+workspaces:
+  eboard: {}
+channels:
+  - { id: "1001", name: sponsors, category: "Eboard Teams", workspace: eboard }
+`);
+    expect(ok.channels[0]!.category).toBe("Eboard Teams");
+  });
+
   test("unknown channel workspace names the offending channel", () => {
     expect(() =>
       parse(`

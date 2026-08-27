@@ -16,6 +16,22 @@ describe("webhookUrlFor", () => {
     const url = "https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwx";
     expect(webhookUrlFor("sponsors", { DISCORD_WEBHOOK_SPONSORS: url })).toBe(url);
   });
+
+  test("ptb./canary. Discord hosts are recognized as Discord webhooks", () => {
+    for (const host of ["ptb.discord.com", "canary.discord.com", "ptb.discordapp.com"]) {
+      const url = `https://${host}/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwx`;
+      expect(webhookUrlFor("sponsors", { DISCORD_WEBHOOK_SPONSORS: url })).toBe(url);
+    }
+    // The documented versioned execute path is a Discord webhook too.
+    const versioned = "https://discord.com/api/v10/webhooks/123456789012345678/abcdefghijklmnopqrstuvwx";
+    expect(webhookUrlFor("sponsors", { DISCORD_WEBHOOK_SPONSORS: versioned })).toBe(versioned);
+    // A lookalike host is NOT Discord.
+    expect(() =>
+      webhookUrlFor("sponsors", {
+        DISCORD_WEBHOOK_SPONSORS: "https://evildiscord.com/api/webhooks/1/tok",
+      }),
+    ).toThrow(/not a Discord incoming webhook/);
+  });
 });
 
 describe("formatFeedContent", () => {

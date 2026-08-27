@@ -1,13 +1,56 @@
 import { FEED_WEBHOOK_ENV, type FeedChannelKey } from "./channels.ts";
 import { logger } from "../logger.ts";
 
+/**
+ * discord.com/discordapp.com and any subdomain (ptb., canary. serve the same
+ * webhook API). Compared against the DNS-canonical form: an absolute name with
+ * trailing dot(s) (`discord.com.`) resolves to the same host and must not slip
+ * past the exact/subdomain boundary check.
+ */
+function isDiscordHost(hostname: string): boolean {
+  const canonical = hostname.replace(/\.+$/, "");
+  for (const root of ["discord.com", "discordapp.com"]) {
+    if (canonical === root || canonical.endsWith(`.${root}`)) return true;
+  }
+  return false;
+}
+
+/**
+ * Percent-decode then lowercase path segments. WHATWG `URL` leaves encodings
+ * of unreserved characters in `pathname` (`%77` stays `%77`), but Discord's
+ * router decodes once — `/api/%77ebhooks/{id}/{token}` executes as a webhook.
+ * Discord also treats a decoded `%2F` as a path separator, so decoded segments
+ * are re-split on `/` (`/api/webhooks%2F{id}%2F{token}` executes too). One
+ * decode matches Discord (double-encoded `%252F`/`%2577…` forms are a generic
+ * 404 there, so they are intentionally NOT separators/matches here).
+ * Malformed encoding → null; Discord-host callers must fail closed on it.
+ */
+function decodedPathSegments(pathname: string): string[] | null {
+  try {
+    return pathname
+      .split("/")
+      .flatMap((seg) => decodeURIComponent(seg).toLowerCase().split("/"))
+      .filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
 export function isDiscordWebhookUrl(raw: string): boolean {
   try {
     const u = new URL(raw);
     if (u.protocol !== "https:") return false;
-    if (u.hostname !== "discord.com" && u.hostname !== "discordapp.com") return false;
-    const parts = u.pathname.split("/").filter(Boolean);
-    return parts[0] === "api" && parts[1] === "webhooks" && parts.length >= 4;
+    if (!isDiscordHost(u.hostname)) return false;
+    // Execute path is /webhooks/{id}/{token} on the API base — either the
+    // unversioned default alias (/api/webhooks/…) or the documented versioned
+    // base (/api/v10/webhooks/…). Segments are decoded then lowercased: this
+    // is a denylist, so `%77ebhooks` or `/API/` must not slip past it, and an
+    // undecodable path on a Discord host fails closed (treated as a webhook).
+    const parts = decodedPathSegments(u.pathname);
+    if (parts === null) return true;
+    if (parts[0] !== "api") return false;
+    const rest = /^v\d+$/.test(parts[1] ?? "") ? parts.slice(2) : parts.slice(1);
+    return rest[0] === "webhooks" && rest.length >= 3;
   } catch {
     return false;
   }

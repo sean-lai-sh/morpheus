@@ -111,12 +111,32 @@ function handleTree(url: URL, namespace: Scope): Response {
   return json({ path: safe, nodes });
 }
 
+/**
+ * Body filter extraction: `undefined` = property absent, `null` = present but
+ * invalid (400). Presence is `Object.hasOwn`, so an explicit JSON `null` (or
+ * any nonconforming value) is rejected rather than silently dropping the filter.
+ */
+function stringFromBody(body: Record<string, unknown>, key: string): string | null | undefined {
+  if (!Object.hasOwn(body, key)) return undefined;
+  const v = body[key];
+  if (typeof v !== "string" || v === "") return null;
+  return v;
+}
+
+function msFromBody(body: Record<string, unknown>, key: string): number | null | undefined {
+  if (!Object.hasOwn(body, key)) return undefined;
+  const v = body[key];
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  return Math.trunc(v);
+}
+
 function handleSearch(namespace: Scope, body: Record<string, unknown>): Response {
   const query = typeof body.query === "string" ? body.query : "";
   if (!query.trim() || !toFtsQuery(query)) {
     return json({ error: "query required" }, 400);
   }
-  const pathPrefix = typeof body.pathPrefix === "string" ? body.pathPrefix : undefined;
+  const pathPrefix = stringFromBody(body, "pathPrefix");
+  if (pathPrefix === null) return json({ error: "invalid pathPrefix" }, 400);
   if (pathPrefix != null) {
     const bad = rejectPath(pathPrefix, namespace);
     if (bad) return bad;
@@ -127,10 +147,36 @@ function handleSearch(namespace: Scope, body: Record<string, unknown>): Response
     typeof limitRaw === "number" && Number.isFinite(limitRaw)
       ? Math.min(Math.max(Math.trunc(limitRaw), 1), SEARCH_LIMIT_MAX)
       : undefined;
+
+  // Documented body filters (issue #50 wrapper contract). A present-but-invalid
+  // filter — including an explicit `null` or empty string — is a 400, never
+  // silently ignored: dropped filters mean confidently wrong (unfiltered)
+  // answers presented as filtered.
+  let channelHint = stringFromBody(body, "channelHint");
+  if (channelHint === null) return json({ error: "invalid channelHint" }, 400);
+  if (channelHint != null) {
+    const resolved = resolveChannelInScope(namespace, channelHint);
+    if (resolved === "ambiguous") {
+      return json({ error: "ambiguous channel name; pass the channel id" }, 400);
+    }
+    if (!resolved) return json({ hits: [] });
+    channelHint = resolved.id;
+  }
+  const threadId = stringFromBody(body, "threadId");
+  if (threadId === null) return json({ error: "invalid threadId" }, 400);
+  const sinceMs = msFromBody(body, "sinceMs");
+  if (sinceMs === null) return json({ error: "invalid sinceMs" }, 400);
+  const untilMs = msFromBody(body, "untilMs");
+  if (untilMs === null) return json({ error: "invalid untilMs" }, 400);
+
   const hits = contextStore.search({
     query,
     scope: namespace,
     pathPrefix: safePrefix,
+    channelHint,
+    threadId,
+    sinceMs,
+    untilMs,
     limit,
     includeDeleted: false,
   });
@@ -188,15 +234,24 @@ function parseMsParam(url: URL, name: string): number | null | undefined {
   return Number.isFinite(n) ? Math.trunc(n) : null;
 }
 
-/** Channel id or name → allowlisted channel id within `scope`, else null. */
-function resolveChannelInScope(scope: Scope, hint: string): string | null {
+type ChannelResolution = { id: string } | "ambiguous" | null;
+
+/**
+ * Channel id or name → allowlisted channel id within `scope`, else null.
+ * When two visible channels share the name, the hint is "ambiguous" — callers
+ * must reject it rather than silently picking whichever comes first in
+ * channels.yml (the caller may be reading the wrong channel without knowing).
+ * A snowflake id is never ambiguous.
+ */
+function resolveChannelInScope(scope: Scope, hint: string): ChannelResolution {
   const ids = new Set(channelIdsForScope(scope));
   const byId = getChannel(hint);
-  if (byId && ids.has(byId.id)) return byId.id;
-  const byName = loadChannels().channels.find(
+  if (byId && ids.has(byId.id)) return { id: byId.id };
+  const byName = loadChannels().channels.filter(
     (c) => ids.has(c.id) && c.name.toLowerCase() === hint.toLowerCase(),
   );
-  return byName?.id ?? null;
+  if (byName.length > 1) return "ambiguous";
+  return byName[0] ? { id: byName[0].id } : null;
 }
 
 function permalinkForRow(row: MessageRow): string {
@@ -223,8 +278,11 @@ function handleLinks(url: URL, namespace: Scope): Response {
   let channelId: string | undefined;
   if (channelHint != null && channelHint !== "") {
     const resolved = resolveChannelInScope(namespace, channelHint);
+    if (resolved === "ambiguous") {
+      return json({ error: "ambiguous channel name; pass the channel id" }, 400);
+    }
     if (!resolved) return json({ links: [] });
-    channelId = resolved;
+    channelId = resolved.id;
   }
 
   const channelIds = channelIdsForScope(namespace);

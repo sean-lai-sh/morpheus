@@ -6,16 +6,20 @@ import { logger } from "../logger.ts";
 import { MAX_JOB_CHANNEL_IDS, type JobScope } from "../storage/jobs.ts";
 import { isDiscordWebhookUrl } from "./webhooks.ts";
 
-/** Every configured workspace bearer. Config missing / invalid → redact nothing extra. */
+/**
+ * Every configured workspace bearer. FAIL CLOSED: a config/env error here must
+ * abort the caller (refuse dispatch / refuse posting), never silently shrink the
+ * redaction list — the text may contain the very tokens we failed to load.
+ */
 function workspaceTokenValues(): string[] {
-  try {
-    return loadWorkspaceTokens().map((t) => t.token);
-  } catch {
-    return [];
-  }
+  return loadWorkspaceTokens().map((t) => t.token);
 }
 
-/** Strip Mini secrets from untrusted Discord text before it leaves the process. */
+/**
+ * Strip Mini secrets from untrusted Discord text before it leaves the process.
+ * Throws when the workspace token list cannot be loaded; callers must treat
+ * that as "do not send" (fail closed), not "nothing to redact".
+ */
 export function redactSecrets(text: string, env: Env = loadEnv()): string {
   const secrets = [
     env.DISCORD_BOT_TOKEN,
@@ -294,7 +298,13 @@ export async function dispatchGrokJob(
         return { ok: false, status: 0 };
       }
     });
-  const capped = capGrokPayload(payload, env);
+  let capped: GrokJobPayload;
+  try {
+    capped = capGrokPayload(payload, env);
+  } catch (err) {
+    logger.error({ err }, "refusing Grok dispatch: secret redaction unavailable (workspace tokens failed to load)");
+    return { dispatched: false, skipped: "secret-redaction-unavailable" };
+  }
   const result = await poster(url, capped, headers);
   if (!result.ok) {
     logger.error({ status: result.status }, "Grok Bot webhook dispatch failed");
