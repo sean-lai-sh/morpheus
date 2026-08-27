@@ -5,6 +5,7 @@ import {
   getMessage,
   lastMessageAt,
   markDeleted,
+  nonDeletedMessageIds,
   recentMessages,
   setClassification,
   upsertMessage,
@@ -94,5 +95,32 @@ describe("storage/messages", () => {
 
   test("lastMessageAt returns max created_at", () => {
     expect(lastMessageAt()).toBe(10_000);
+  });
+
+  test("nonDeletedMessageIds is parent-channel rows only (not thread replies)", () => {
+    upsertMessage({
+      id: "parent-live",
+      channelId: "c1",
+      authorId: "u1",
+      authorName: "alice",
+      content: "parent still live",
+      createdAt: 11_000,
+    });
+    upsertMessage({
+      id: "thread-reply-live",
+      channelId: "thread-1",
+      parentChannelId: "c1",
+      authorId: "u1",
+      authorName: "alice",
+      content: "thread reply still live",
+      createdAt: 11_100,
+      threadId: "thread-1",
+      threadName: "A thread",
+    });
+    const ids = nonDeletedMessageIds("c1");
+    expect(ids).toContain("parent-live");
+    expect(ids).toContain("m1");
+    expect(ids).not.toContain("thread-reply-live");
+    expect(ids).not.toContain("m2"); // deleted
   });
 });
