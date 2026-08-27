@@ -251,9 +251,13 @@ describe("storage/jobs lease sweeper", () => {
     const t0 = 2_000_000;
     claimJob(job.id, "w1", t0);
     prepareComplete(job.id, "w1", { reply: "pending", completion_key: "inflight" }, t0);
-    requeueExpiredClaims(t0 + 700_000, 600_000);
+    requeueExpiredClaims(t0 + 1_000, 600_000);
     expect(getJob(job.id)?.status).toBe("claimed");
     expect(getJob(job.id)?.completion_key).toBe("inflight");
+    expect(getJob(job.id)?.error).toBeNull();
+    const retry = prepareComplete(job.id, "w1", { reply: "pending-2", completion_key: "inflight" }, t0 + 1_000);
+    expect(retry.ok).toBe(false);
+    if (!retry.ok) expect(retry.reason).toBe("in-progress");
   });
 
   test("does not requeue if result_discord_message_id is set", () => {
@@ -277,6 +281,40 @@ describe("storage/jobs lease sweeper", () => {
     requeueExpiredClaims(t0 + 700_000, 600_000);
     expect(getJob(job.id)?.status).toBe("claimed");
     expect(getJob(job.id)?.result_discord_message_id).toBe("first-chunk");
+  });
+
+  test("after lease expiry with completion_key and no discord send, complete can retry", () => {
+    const author = "cap-crash-author";
+    const { job } = enqueue("m-lease-crash", author);
+    const t0 = 5_000_000;
+    claimJob(job.id, "w1", t0);
+    const first = prepareComplete(job.id, "w1", { reply: "pending-crash", completion_key: "crash-key" }, t0);
+    expect(first.ok).toBe(true);
+    if (first.ok) expect(first.alreadyCompleted).toBe(false);
+    expect(getJob(job.id)?.error).toBeNull();
+    expect(countOutstandingJobs(author)).toBe(1);
+
+    const n = requeueExpiredClaims(t0 + 700_000, 600_000);
+    expect(n).toBe(0);
+    expect(getJob(job.id)?.status).toBe("claimed");
+    expect(getJob(job.id)?.claimed_by).toBe("w1");
+    expect(getJob(job.id)?.completion_key).toBe("crash-key");
+    expect(getJob(job.id)?.result_discord_message_id).toBeNull();
+    expect(getJob(job.id)?.error).toBe("lease-expired-before-send");
+    expect(countOutstandingJobs(author)).toBe(1);
+
+    const retry = prepareComplete(
+      job.id,
+      "w1",
+      { reply: "retry-after-crash", completion_key: "crash-key" },
+      t0 + 700_000,
+    );
+    expect(retry.ok).toBe(true);
+    if (retry.ok) {
+      expect(retry.alreadyCompleted).toBe(false);
+      expect(retry.job.reply_text).toBe("retry-after-crash");
+      expect(retry.job.error).toBeNull();
+    }
   });
 });
 

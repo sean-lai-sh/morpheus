@@ -372,11 +372,28 @@ export function failJob(id: string, claimedBy: string, error: string, now: numbe
 }
 
 /**
- * Return expired claimed jobs to queued **only if** no Discord send was recorded.
- * A set completion_key means a send is in flight / recorded — do not requeue.
+ * Return expired claimed jobs to queued **only if** no Discord send was recorded
+ * and no completion_key is set.
+ *
+ * A set completion_key with no `result_discord_message_id` means prepareComplete
+ * persisted before Discord send. Do not requeue (duplicate-post risk). After the
+ * lease expires the send is no longer in flight — set error so the same worker
+ * can retry complete (#74) and free the outstanding cap on success/fail.
  */
 export function requeueExpiredClaims(now: number, leaseMs: number): number {
   const cutoff = now - leaseMs;
+  getDb()
+    .query(
+      `UPDATE jobs
+       SET error = 'lease-expired-before-send', updated_at = ?
+       WHERE status = 'claimed'
+         AND claimed_at IS NOT NULL
+         AND claimed_at < ?
+         AND result_discord_message_id IS NULL
+         AND completion_key IS NOT NULL
+         AND error IS NULL`,
+    )
+    .run(now, cutoff);
   const res = getDb()
     .query(
       `UPDATE jobs
