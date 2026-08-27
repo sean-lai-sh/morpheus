@@ -15,7 +15,7 @@
 import type { Message, PartialMessage } from "discord.js";
 import { getChannel, isChannelAllowed, loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
-import { setOldestSeen, setNewestSeen } from "../storage/crawl-state.ts";
+import { setNewestSeen } from "../storage/crawl-state.ts";
 import { extractLinks, persistLinks, removeLinksNotIn } from "../storage/links.ts";
 import { appendBlock } from "../storage/markdown.ts";
 import {
@@ -119,8 +119,11 @@ export interface IngestResult {
  * Ingest a message. For thread messages, pass parentChannelId (the parent text
  * channel's id) and threadName (the thread channel's display name).
  *
- * `updateCrawlCursors` defaults true. Reconcile's thread pass sets it false so
- * archived thread snowflakes cannot rewind an in-progress parent backfill cursor.
+ * `updateCrawlCursors` defaults true. Thread-message ingest never writes the
+ * parent crawl row: live create/edit and `backfillThread` snowflakes must not
+ * rewind an in-progress parent `oldest_seen_id` (#71). Reconcile's thread pass
+ * also sets this false. Parent `oldest_seen_id` is advanced only by parent
+ * backfill pagination (`setOldestSeen` is backfill-only).
  */
 export async function ingestMessage(
   message: Message,
@@ -156,9 +159,11 @@ export async function ingestMessage(
     );
   }
 
-  // Crawl cursors track under the effective (config) channel id.
-  if (opts?.updateCrawlCursors !== false) {
-    setOldestSeen(configChannelId, input.id);
+  // Crawl cursors: parent newest may advance from parent-channel ingest.
+  // Thread snowflakes never become the parent `before` cursor (#71).
+  // `setOldestSeen` is backfill-only — live/reconcile last-N of an old parent
+  // edit would otherwise rewind an in-progress parent backfill.
+  if (opts?.updateCrawlCursors !== false && !parentChannelId) {
     setNewestSeen(configChannelId, input.id);
   }
 

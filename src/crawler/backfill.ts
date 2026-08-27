@@ -153,7 +153,9 @@ async function backfillThread(
     }
     let oldestInBatch: string | undefined;
     for (const m of batch.values()) {
-      const r = await ingestMessage(m, parentChannel.id, thread.name);
+      const r = await ingestMessage(m, parentChannel.id, thread.name, {
+        updateCrawlCursors: false,
+      });
       if (r.action === "inserted" || r.action === "edited") ingested++;
       if (!oldestInBatch || BigInt(m.id) < BigInt(oldestInBatch)) oldestInBatch = m.id;
     }

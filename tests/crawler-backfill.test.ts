@@ -137,4 +137,57 @@ describe("backfillChannel include_threads", () => {
     expect(getState(parentId)?.last_backfill_complete).not.toBe(1);
     expect(getMessage(parentMsg)).not.toBeNull();
   }, 20_000);
+
+  test("backfillThread does not rewind parent oldest_seen_id from thread snowflakes", async () => {
+    const parentId = "3003";
+    const oldestSeen = "300000000000090000";
+    const mid = "300000000000050000";
+    const threadId = "300000000000020000";
+    const threadMsg = "300000000000010000";
+    const parentContent = "mentorship parent for thread-backfill cursor isolate";
+    const midContent = "parent mid unique-thread-backfill-mid snacks";
+    const threadContent = "thread reply unique-thread-backfill-token snacks";
+
+    const { setOldestSeen } = await import("../src/storage/crawl-state.ts");
+    setOldestSeen(parentId, oldestSeen);
+    expect(getState(parentId)?.last_backfill_complete).toBe(0);
+
+    const thread = {
+      id: threadId,
+      name: "Archived planning thread",
+      messages: {
+        fetch: fetchByBefore([threadMsg], threadId, () => threadContent),
+      },
+    };
+    const parentChannel = {
+      id: parentId,
+      type: ChannelType.GuildText,
+      messages: {
+        fetch: fetchByBefore([oldestSeen, mid], parentId, (id) => (id === mid ? midContent : parentContent)),
+      },
+      threads: {
+        fetchActive: async () => ({ threads: new Map() }),
+        fetchArchived: async () => ({ threads: collectionOf([thread]), hasMore: false }),
+      },
+    };
+    const client = {
+      channels: {
+        fetch: async (id: string) => {
+          if (id === parentId) return parentChannel;
+          return null;
+        },
+      },
+    } as unknown as Client;
+
+    const { backfillChannel } = await import("../src/crawler/backfill.ts");
+    const channel = getChannel(parentId)!;
+    expect(channel.include_threads).toBe(true);
+    const result = await backfillChannel(client, channel);
+
+    expect(getMessage(mid)).not.toBeNull();
+    expect(getMessage(threadMsg)).not.toBeNull();
+    expect(getState(parentId)?.oldest_seen_id).not.toBe(threadMsg);
+    expect(BigInt(getState(parentId)!.oldest_seen_id!)).toBeGreaterThan(BigInt(threadMsg));
+    expect(result.complete).toBe(true);
+  }, 20_000);
 });
