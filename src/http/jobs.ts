@@ -93,6 +93,17 @@ export async function handleJobsRequest(req: Request, url: URL): Promise<Respons
     return json(409, { error: "workspace mismatch" });
   }
 
+  // Claim generation: `claimed_by` alone cannot distinguish two workers using
+  // the same workspace token (both are `grok-<root>`). A worker that echoes the
+  // claimed_at it was handed on claim is refused once its lease expired and the
+  // job was reclaimed (requeue nulls claimed_at; a new claim sets a new one).
+  // Optional so the deployed Grok worker's complete/fail contract is unchanged.
+  if (action !== "claim" && body.claimed_at !== undefined) {
+    if (typeof body.claimed_at !== "number" || body.claimed_at !== existing.claimed_at) {
+      return json(409, { error: "stale claim", job: existing });
+    }
+  }
+
   if (action === "claim") {
     const claimed = claimJob(jobId, claimedBy);
     if (!claimed) return json(409, { error: "not queued" });

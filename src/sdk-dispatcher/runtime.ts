@@ -42,12 +42,30 @@ export interface CursorSdkRuntimeOptions {
 }
 
 /**
- * The agent never gets shell/edit/write: it may only call our custom tools
- * (the `mcp` family carries `local.customTools`) and search the web — enough
- * to answer Discord questions, nothing that can touch the Mini's disk.
+ * The agent gets ONLY our custom tools (the `mcp` family carries
+ * `local.customTools`): no shell/edit/write, and no webSearch — untrusted
+ * Discord text must have no outbound channel beyond the scoped Morpheus API.
  * Not persisted on the agent, so pass again on every create/resume.
  */
-const AGENT_TOOLS: ToolName[] = ["mcp", "webSearch"];
+const AGENT_TOOLS: ToolName[] = ["mcp"];
+
+/**
+ * Local SDK agent ids are `agent-…`; the SDK auto-detects `bc-…` on
+ * `Agent.resume` as CLOUD and would attach a cloud runtime. Cloud is vetoed
+ * for this path, so anything that is not a local id is refused before the SDK
+ * is even imported.
+ */
+export function isLocalAgentId(agentId: string): boolean {
+  return /^agent-\S+$/.test(agentId);
+}
+
+export function assertLocalAgentId(agentId: string): void {
+  if (!isLocalAgentId(agentId)) {
+    throw new Error(
+      `refusing Agent.resume("${agentId.slice(0, 12)}…"): only local "agent-…" ids may be resumed (cloud runtime is vetoed)`,
+    );
+  }
+}
 
 function agentOptions(opts: CursorSdkRuntimeOptions): AgentOptions {
   return {
@@ -93,6 +111,7 @@ export function createCursorSdkRuntime(opts: CursorSdkRuntimeOptions): SdkRuntim
       return wrapAgent(await Agent.create(agentOptions(opts)));
     },
     async resumeAgent(agentId) {
+      assertLocalAgentId(agentId);
       const { Agent } = await import("@cursor/sdk");
       return wrapAgent(await Agent.resume(agentId, agentOptions(opts)));
     },

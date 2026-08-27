@@ -49,6 +49,9 @@ async function main(): Promise<void> {
     runtime,
     morpheusBaseUrl: env.morpheusBaseUrl,
     tokenFor: (namespace) => byWorkspace.get(namespace) ?? null,
+    // Sibling-held secrets are scrubbed from job content/snippets before any
+    // prompt is built, on top of the Mini-side redaction.
+    redactValues: [env.apiKey, env.webhookSecret],
   });
 
   await dispatcher.start();

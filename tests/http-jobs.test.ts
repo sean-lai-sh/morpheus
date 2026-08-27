@@ -13,7 +13,7 @@ import {
   withWorkspaceConfig,
 } from "./jobs-fixture.ts";
 import { handleHttpRequest } from "../src/http/health.ts";
-import { claimJob, enqueueJob, getJob } from "../src/storage/jobs.ts";
+import { claimJob, enqueueJob, getJob, requeueExpiredClaims } from "../src/storage/jobs.ts";
 import { parseEnv, resetEnvForTest } from "../src/config.ts";
 import { isJobTypingActive, startJobTyping, stopAllJobTyping } from "../src/bot/typing.ts";
 
@@ -95,6 +95,82 @@ describe("HTTP /v1/jobs auth", () => {
       else process.env.DISCORD_BOT_TOKEN = savedBot;
       resetEnvForTest();
     }
+  });
+});
+
+describe("claim generation (claimed_at echo)", () => {
+  test("complete without claimed_at keeps the legacy Grok contract (200)", async () => {
+    const job = queue("h-gen-legacy", EBOARD, SPONSORS);
+    await handleHttpRequest(req("POST", `/v1/jobs/${job.id}/claim`, { body: {} }));
+    const res = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/complete`, { body: { reply: "ok" } }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  test("complete echoing the claim's claimed_at succeeds; a wrong one is 409 stale", async () => {
+    const job = queue("h-gen-echo", EBOARD, SPONSORS);
+    const claim = await handleHttpRequest(req("POST", `/v1/jobs/${job.id}/claim`, { body: {} }));
+    const claimed = ((await claim.json()) as { job: { claimed_at: number } }).job;
+
+    const stale = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/complete`, {
+        body: { reply: "late", claimed_at: claimed.claimed_at - 1 },
+      }),
+    );
+    expect(stale.status).toBe(409);
+    expect(getJob(job.id)?.status).toBe("claimed");
+
+    const ok = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/complete`, {
+        body: { reply: "on time", claimed_at: claimed.claimed_at },
+      }),
+    );
+    expect(ok.status).toBe(200);
+    expect(getJob(job.id)?.status).toBe("completed");
+  });
+
+  test("a stale worker cannot complete after lease expiry + reclaim, even with the same claimed_by", async () => {
+    const job = queue("h-gen-stale", EBOARD, SPONSORS);
+    const now = Date.now();
+    // Worker A (SDK sibling) claims and stalls past its lease.
+    const first = claimJob(job.id, "grok-eboard", now - 100_000);
+    expect(first).not.toBeNull();
+    expect(requeueExpiredClaims(now, 60_000)).toBe(1);
+    // Worker B (Grok) reclaims — same token, same claimed_by, NEW claimed_at.
+    const second = claimJob(job.id, "grok-eboard", now);
+    expect(second).not.toBeNull();
+
+    // Worker A wakes up and echoes its old claim generation → refused.
+    const stale = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/complete`, {
+        body: { reply: "stale answer", claimed_at: first!.claimed_at },
+      }),
+    );
+    expect(stale.status).toBe(409);
+    expect(getJob(job.id)?.status).toBe("claimed");
+
+    // Worker B's completion (current generation) lands.
+    const fresh = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/complete`, {
+        body: { reply: "fresh answer", claimed_at: second!.claimed_at },
+      }),
+    );
+    expect(fresh.status).toBe(200);
+    expect(getJob(job.id)?.reply_text).toBe("fresh answer");
+  });
+
+  test("fail with a stale claimed_at is also refused", async () => {
+    const job = queue("h-gen-fail", EBOARD, SPONSORS);
+    const claim = await handleHttpRequest(req("POST", `/v1/jobs/${job.id}/claim`, { body: {} }));
+    const claimed = ((await claim.json()) as { job: { claimed_at: number } }).job;
+    const stale = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/fail`, {
+        body: { error: "boom", claimed_at: claimed.claimed_at + 5 },
+      }),
+    );
+    expect(stale.status).toBe(409);
+    expect(getJob(job.id)?.status).toBe("claimed");
   });
 });
 

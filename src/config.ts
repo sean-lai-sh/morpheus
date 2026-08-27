@@ -76,8 +76,9 @@ const envSchema = z
     CURSOR_SDK_DISPATCH: z.preprocess(parseBoolish, z.boolean().default(false)),
     /**
      * Sibling Cursor SDK dispatcher URL. Same thin job pack as Grok dispatch.
-     * https anywhere (not a Discord incoming webhook, not :1340), or plain http
-     * only on loopback / Tailscale — the sibling runs next to `bun run live`.
+     * The sibling runs next to `bun run live`, so the host must be loopback, a
+     * Tailscale address, or a tailnet MagicDNS name (*.ts.net) — never an
+     * arbitrary internet host (http or https). Not :1340, not a Discord webhook.
      */
     CURSOR_SDK_WEBHOOK_URL: z.preprocess(
       emptyToUndef,
@@ -89,17 +90,20 @@ const envSchema = z
             const parsed = new URL(u);
             if (parsed.port === "1340") return false;
             if (isDiscordWebhookUrl(parsed.href)) return false;
-            if (parsed.protocol === "https:") return true;
-            if (parsed.protocol === "http:") return isAllowedListenHost(parsed.hostname);
-            return false;
+            if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+            const host = parsed.hostname.toLowerCase();
+            return isAllowedListenHost(host) || host.endsWith(".ts.net");
           } catch {
             return false;
           }
-        }, "must be https (or http on loopback/Tailscale), must not use port 1340, and must not be a Discord incoming webhook")
+        }, "host must be loopback, Tailscale (100.64/10, fd7a:115c:a1e0::/48), or *.ts.net; not :1340; not a Discord webhook")
         .optional(),
     ),
-    /** Bearer for the sibling SDK dispatcher webhook. Auth only, never in the body. */
-    CURSOR_SDK_WEBHOOK_SECRET: z.preprocess(emptyToUndef, z.string().min(1).optional()),
+    /** Bearer for the sibling SDK dispatcher webhook. Auth only, never in the body. Same min as the sibling. */
+    CURSOR_SDK_WEBHOOK_SECRET: z.preprocess(
+      emptyToUndef,
+      z.string().min(16, "must be at least 16 chars").optional(),
+    ),
     NVIDIA_API_KEY: z.string().min(1).optional(),
     LOG_LEVEL: z.string().default("info"),
     HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8080),

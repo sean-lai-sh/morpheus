@@ -1,4 +1,5 @@
 import type { SDKCustomTool } from "@cursor/sdk";
+import { sanitizeIndexPath } from "../context/paths.ts";
 import { logger } from "../logger.ts";
 
 /**
@@ -8,7 +9,16 @@ import { logger } from "../logger.ts";
  * descendants, never siblings or ancestors). The token lives only in this
  * closure — it is never in tool results, prompts, or logs, and the agent never
  * sees a Discord bot token because this process never holds one.
+ *
+ * On top of the server-side workspace boundary, these tools enforce the JOB's
+ * scope client-side: a channel-scoped job may only tree/read paths inside its
+ * allowlisted channels (and their threads), and search hits outside them are
+ * filtered out. Prompt instructions are not authorization — this is.
  */
+
+export type JobAccessScope =
+  | { kind: "workspace" }
+  | { kind: "channel"; channelIds: string[] };
 
 export interface FetchResult {
   ok: boolean;
@@ -26,6 +36,10 @@ export interface JobToolDeps {
   /** Workspace-scoped bearer for this job's namespace. Never echoed anywhere. */
   token: string;
   jobId: string;
+  /** Job scope: `workspace` = token subtree; `channel` = only these channel ids. */
+  scope: JobAccessScope;
+  /** claimed_at from our claim, echoed on complete so a stale worker cannot win. */
+  claimedAt?: number;
   fetcher?: Fetcher;
   timeoutMs?: number;
   /** Called after a 2xx job-complete so the dispatcher knows the reply landed. */
@@ -35,6 +49,54 @@ export interface JobToolDeps {
 const MAX_TOOL_RESULT_CHARS = 30_000;
 const MAX_REPLY_CHARS = 4_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
+const MAX_PATH_CHARS = 200;
+
+/**
+ * Index-path segments carry their Discord id as a trailing `-<id>` (channel
+ * and thread slugs both come from `channelSlug(name, id)`). A path is inside a
+ * channel-scoped job iff at least one segment's REAL trailing id is
+ * allowlisted. Root/namespace/category paths carry no ids → rejected (fail
+ * closed). The server still owns existence + the workspace boundary; this
+ * narrowing can only remove access, never add it.
+ */
+export function pathInJobScope(rawPath: string, scope: JobAccessScope): boolean {
+  if (rawPath.length > MAX_PATH_CHARS) return false;
+  const sanitized = sanitizeIndexPath(rawPath);
+  if (sanitized == null) return false;
+  if (scope.kind === "workspace") return true;
+  if (scope.channelIds.length === 0) return false;
+  const trailingIds = sanitized
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => /-(\d+)$/.exec(segment)?.[1])
+    .filter((id): id is string => Boolean(id));
+  return trailingIds.some((id) => scope.channelIds.includes(id));
+}
+
+/** Drop `hits`/`nodes`/`documents` entries whose path is outside the job scope. */
+export function filterListingForScope(bodyText: string, scope: JobAccessScope): string {
+  if (scope.kind === "workspace") return bodyText;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    // Not JSON → nothing safe to hand a channel-scoped agent.
+    return JSON.stringify({ error: "unparseable response withheld (channel scope)" });
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return bodyText;
+  const obj = { ...(parsed as Record<string, unknown>) };
+  for (const key of ["hits", "nodes", "documents"]) {
+    const list = obj[key];
+    if (!Array.isArray(list)) continue;
+    obj[key] = list.filter((item) => {
+      if (!item || typeof item !== "object") return false;
+      const path = (item as Record<string, unknown>).path;
+      // Fail closed: entries without a checkable path never reach the agent.
+      return typeof path === "string" && pathInJobScope(path, scope);
+    });
+  }
+  return JSON.stringify(obj);
+}
 
 function defaultFetcher(timeoutMs: number): Fetcher {
   return async (url, init) => {
@@ -50,6 +112,8 @@ function textResult(text: string): { content: Array<{ type: "text"; text: string
 function errorResult(text: string): { content: Array<{ type: "text"; text: string }>; isError: true } {
   return { content: [{ type: "text", text }], isError: true };
 }
+
+const OUT_OF_SCOPE = "path is outside this job's channel scope";
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v.trim() !== "" ? v : undefined;
@@ -88,20 +152,23 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
   return {
     morpheus_fs_tree: {
       description:
-        "List the Morpheus Discord index tree at a path (e.g. '/' or '/eboard'). " +
-        "Paths outside the job's workspace return not found.",
+        "List the Morpheus Discord index tree at a path. Channel-scoped jobs may only list " +
+        "inside their own channel paths; out-of-scope paths are refused.",
       inputSchema: {
         type: "object",
         properties: { path: { type: "string", description: "Index path, default '/'" } },
       },
       async execute(args) {
         const path = str(args.path) ?? "/";
-        return get(`/v1/fs/tree?path=${encodeURIComponent(path)}`);
+        if (!pathInJobScope(path, deps.scope)) return errorResult(OUT_OF_SCOPE);
+        const result = await get(`/v1/fs/tree?path=${encodeURIComponent(path)}`);
+        if ("isError" in result) return result;
+        return textResult(filterListingForScope(result.content[0]?.text ?? "", deps.scope));
       },
     },
     morpheus_fs_search: {
       description:
-        "Full-text search the Morpheus Discord index within the job's workspace. " +
+        "Full-text search the Morpheus Discord index within this job's scope. " +
         "Use this before answering from memory.",
       inputSchema: {
         type: "object",
@@ -117,12 +184,17 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
         if (!query) return errorResult("query is required");
         const body: Record<string, unknown> = { query };
         const prefix = str(args.pathPrefix);
-        if (prefix) body.pathPrefix = prefix;
+        if (prefix != null) {
+          if (deps.scope.kind === "channel" && !pathInJobScope(prefix, deps.scope)) {
+            return errorResult(OUT_OF_SCOPE);
+          }
+          body.pathPrefix = prefix;
+        }
         if (typeof args.limit === "number") body.limit = args.limit;
         try {
           const res = await post("/v1/fs/search", body);
           if (!res.ok) return errorResult(`morpheus api ${res.status}`);
-          return textResult(res.text);
+          return textResult(filterListingForScope(res.text, deps.scope));
         } catch (err) {
           logger.error({ err, job_id: deps.jobId }, "morpheus fs search failed");
           return errorResult("morpheus api unreachable");
@@ -130,7 +202,8 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
       },
     },
     morpheus_fs_read: {
-      description: "Read a Morpheus index path (channel window, thread, or message).",
+      description:
+        "Read a Morpheus index path (channel window, thread, or message) within this job's scope.",
       inputSchema: {
         type: "object",
         properties: { path: { type: "string" } },
@@ -139,7 +212,10 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
       async execute(args) {
         const path = str(args.path);
         if (!path) return errorResult("path is required");
-        return get(`/v1/fs/read?path=${encodeURIComponent(path)}`);
+        if (!pathInJobScope(path, deps.scope)) return errorResult(OUT_OF_SCOPE);
+        const result = await get(`/v1/fs/read?path=${encodeURIComponent(path)}`);
+        if ("isError" in result) return result;
+        return textResult(filterListingForScope(result.content[0]?.text ?? "", deps.scope));
       },
     },
     morpheus_job_complete: {
@@ -157,7 +233,10 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
         const reply = str(args.reply)?.slice(0, MAX_REPLY_CHARS);
         if (!reply) return errorResult("reply is required");
         try {
-          const res = await post(`/v1/jobs/${encodeURIComponent(deps.jobId)}/complete`, { reply });
+          const res = await post(`/v1/jobs/${encodeURIComponent(deps.jobId)}/complete`, {
+            reply,
+            ...(deps.claimedAt != null ? { claimed_at: deps.claimedAt } : {}),
+          });
           if (!res.ok) return errorResult(`job complete failed (${res.status})`);
           deps.onComplete?.(reply);
           return textResult("reply delivered to the official bot");

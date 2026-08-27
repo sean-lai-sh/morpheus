@@ -6,10 +6,23 @@ import { logger } from "../logger.ts";
 import { MAX_JOB_CHANNEL_IDS, type JobScope } from "../storage/jobs.ts";
 import { isDiscordWebhookUrl } from "./webhooks.ts";
 
-/** Every configured workspace bearer. Config missing / invalid → redact nothing extra. */
-function workspaceTokenValues(): string[] {
+/** Every Mini secret that must never leave the process, by env name (values never logged). */
+function knownSecrets(env: Env): Array<{ name: string; value: string | undefined }> {
+  return [
+    { name: "DISCORD_BOT_TOKEN", value: env.DISCORD_BOT_TOKEN },
+    { name: "DISCORD_TOKEN", value: env.DISCORD_TOKEN },
+    ...loadWorkspaceTokenEntries(),
+    { name: "GROK_BOT_WEBHOOK_URL", value: env.GROK_BOT_WEBHOOK_URL },
+    { name: "GROK_BOT_WEBHOOK_SECRET", value: env.GROK_BOT_WEBHOOK_SECRET },
+    { name: "CURSOR_SDK_WEBHOOK_URL", value: env.CURSOR_SDK_WEBHOOK_URL },
+    { name: "CURSOR_SDK_WEBHOOK_SECRET", value: env.CURSOR_SDK_WEBHOOK_SECRET },
+    { name: "NVIDIA_API_KEY", value: env.NVIDIA_API_KEY },
+  ];
+}
+
+function loadWorkspaceTokenEntries(): Array<{ name: string; value: string }> {
   try {
-    return loadWorkspaceTokens().map((t) => t.token);
+    return loadWorkspaceTokens().map((t) => ({ name: t.envName, value: t.token }));
   } catch {
     return [];
   }
@@ -17,20 +30,25 @@ function workspaceTokenValues(): string[] {
 
 /** Strip Mini secrets from untrusted Discord text before it leaves the process. */
 export function redactSecrets(text: string, env: Env = loadEnv()): string {
-  const secrets = [
-    env.DISCORD_BOT_TOKEN,
-    env.DISCORD_TOKEN,
-    ...workspaceTokenValues(),
-    env.GROK_BOT_WEBHOOK_URL,
-    env.GROK_BOT_WEBHOOK_SECRET,
-    env.NVIDIA_API_KEY,
-  ];
   let out = text;
-  for (const v of secrets) {
-    const s = v?.trim();
+  for (const { value } of knownSecrets(env)) {
+    const s = value?.trim();
     if (s && s.length >= 8) out = out.split(s).join("[redacted]");
   }
   return out;
+}
+
+/**
+ * Fail-closed tripwire: after capping/redaction, scan the serialized payload
+ * for every known Mini secret. Returns the leaked secret's env NAME (never the
+ * value) or null. Anything ≥8 chars counts — shorter would false-positive.
+ */
+export function findLeakedSecretEnv(serialized: string, env: Env = loadEnv()): string | null {
+  for (const { name, value } of knownSecrets(env)) {
+    const s = value?.trim();
+    if (s && s.length >= 8 && serialized.includes(s)) return name;
+  }
+  return null;
 }
 
 export interface GrokJobPayload {
@@ -295,6 +313,11 @@ export async function dispatchGrokJob(
       }
     });
   const capped = capGrokPayload(payload, env);
+  const leaked = findLeakedSecretEnv(JSON.stringify(capped), env);
+  if (leaked) {
+    logger.error({ leaked_env: leaked, job_id: payload.job.id }, "refusing Grok dispatch: a Mini secret survived redaction (fail closed)");
+    return { dispatched: false, skipped: "refused-secret-in-payload" };
+  }
   const result = await poster(url, capped, headers);
   if (!result.ok) {
     logger.error({ status: result.status }, "Grok Bot webhook dispatch failed");

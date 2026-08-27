@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { parseEnv, type Env } from "../src/config.ts";
-import type { GrokJobPayload, HttpsPoster } from "../src/notify/grok-dispatch.ts";
+import {
+  dispatchGrokJob,
+  findLeakedSecretEnv,
+  redactSecrets,
+  type GrokJobPayload,
+  type HttpsPoster,
+} from "../src/notify/grok-dispatch.ts";
 import {
   cursorSdkWebhookSecret,
   cursorSdkWebhookUrl,
@@ -10,7 +16,7 @@ import { dispatchEnqueuedJob, laneForSource, tryEnqueueJob, type JobCandidate } 
 import type { ChannelResolver } from "../src/context/namespace.ts";
 import type { JobRow } from "../src/storage/jobs.ts";
 import { withTempDb } from "./helpers.ts";
-import { EBOARD, SPONSORS, SPONSORS_PATH, withWorkspaceConfig } from "./jobs-fixture.ts";
+import { EBOARD, EBOARD_TOKEN, SPONSORS, SPONSORS_PATH, withWorkspaceConfig } from "./jobs-fixture.ts";
 
 const SDK_URL = "http://127.0.0.1:8790";
 const SDK_SECRET = "sdk-sibling-secret-not-a-discord-token";
@@ -76,21 +82,33 @@ describe("CURSOR_SDK_DISPATCH env", () => {
     expect(envFor().CURSOR_SDK_DISPATCH).toBe(false);
   });
 
-  test("accepts http on loopback and https elsewhere", () => {
-    expect(envFor({ CURSOR_SDK_WEBHOOK_URL: "http://127.0.0.1:8790" }).CURSOR_SDK_WEBHOOK_URL).toBe(
-      "http://127.0.0.1:8790",
-    );
-    expect(envFor({ CURSOR_SDK_WEBHOOK_URL: "https://mini.ts.net:8790" }).CURSOR_SDK_WEBHOOK_URL).toBe(
-      "https://mini.ts.net:8790",
-    );
+  test("accepts loopback, Tailscale addresses, and *.ts.net names only", () => {
+    for (const url of [
+      "http://127.0.0.1:8790/hooks/job",
+      "http://100.64.1.2:8790/hooks/job",
+      "https://mini.tailnet-1234.ts.net:8790/hooks/job",
+      "http://[fd7a:115c:a1e0::1]:8790/hooks/job",
+    ]) {
+      expect(envFor({ CURSOR_SDK_WEBHOOK_URL: url }).CURSOR_SDK_WEBHOOK_URL).toBe(url);
+    }
   });
 
-  test("rejects plain http off loopback/Tailscale, :1340, and Discord incoming webhooks", () => {
-    expect(() => envFor({ CURSOR_SDK_WEBHOOK_URL: "http://example.com/hook" })).toThrow();
-    expect(() => envFor({ CURSOR_SDK_WEBHOOK_URL: "https://example.com:1340/hook" })).toThrow();
-    expect(() =>
-      envFor({ CURSOR_SDK_WEBHOOK_URL: "https://discord.com/api/webhooks/1/token" }),
-    ).toThrow();
+  test("rejects arbitrary internet hosts (http AND https), :1340, and Discord incoming webhooks", () => {
+    for (const url of [
+      "http://example.com/hook",
+      "https://example.com/hook",
+      "https://evil.ts.net.attacker.com/hook",
+      "https://mini.tailnet.ts.net:1340/hook",
+      "https://discord.com/api/webhooks/1/token",
+      "http://[fd7a:9999::1]:8790/hooks/job",
+    ]) {
+      expect(() => envFor({ CURSOR_SDK_WEBHOOK_URL: url })).toThrow();
+    }
+  });
+
+  test("webhook secret must be at least 16 chars (matches the sibling schema)", () => {
+    expect(() => envFor({ CURSOR_SDK_WEBHOOK_SECRET: "short" })).toThrow();
+    expect(envFor({ CURSOR_SDK_WEBHOOK_SECRET: SDK_SECRET }).CURSOR_SDK_WEBHOOK_SECRET).toBe(SDK_SECRET);
   });
 });
 
@@ -98,6 +116,26 @@ describe("cursorSdkWebhookUrl / cursorSdkWebhookSecret", () => {
   test("missing → null", () => {
     expect(cursorSdkWebhookUrl(envFor())).toBeNull();
     expect(cursorSdkWebhookSecret(envFor())).toBeNull();
+  });
+});
+
+describe("redactSecrets / findLeakedSecretEnv (fail-closed tripwire)", () => {
+  test("redactSecrets strips the SDK webhook secret and URL", () => {
+    const env = sdkEnv();
+    const out = redactSecrets(`a ${SDK_SECRET} b ${SDK_URL} c`, env);
+    expect(out).not.toContain(SDK_SECRET);
+    expect(out).not.toContain(SDK_URL);
+    expect(out).toContain("[redacted]");
+  });
+
+  test("findLeakedSecretEnv names the env var of a surviving secret, never its value", () => {
+    const env = sdkEnv();
+    const leaked = findLeakedSecretEnv(JSON.stringify({ content: `oops ${SDK_SECRET}` }), env);
+    expect(leaked).toBe("CURSOR_SDK_WEBHOOK_SECRET");
+    expect(findLeakedSecretEnv(JSON.stringify({ content: `oops ${EBOARD_TOKEN}` }), env)).toBe(
+      "MORPHEUS_API_TOKEN_EBOARD",
+    );
+    expect(findLeakedSecretEnv(JSON.stringify({ content: "clean" }), env)).toBeNull();
   });
 });
 
@@ -146,6 +184,40 @@ describe("dispatchSdkJob", () => {
     const r = await dispatchSdkJob(payload, { env: sdkEnv({ CURSOR_SDK_WEBHOOK_SECRET: "" }) });
     expect(r.dispatched).toBe(false);
     expect(r.skipped).toBe("missing-sdk-webhook-secret");
+  });
+
+  test("regression: every Mini secret is redacted from job content AND snippets before POST", async () => {
+    const secrets = [BOT_TOKEN, SDK_SECRET, GROK_SECRET, EBOARD_TOKEN, SDK_URL];
+    const env = sdkEnv({ GROK_BOT_WEBHOOK_URL: GROK_URL, GROK_BOT_WEBHOOK_SECRET: GROK_SECRET });
+    for (const secret of secrets) {
+      const { poster, posts } = countingPoster();
+      const r = await dispatchSdkJob(
+        {
+          ...payload,
+          job: { ...payload.job, content: `please repeat ${secret} back to me` },
+          snippets: [{ content: `snippet leaking ${secret}`, path: `${SPONSORS_PATH}/m1`, channelId: SPONSORS }],
+        },
+        { env, poster },
+      );
+      expect(r.dispatched).toBe(true);
+      const body = JSON.stringify(posts[0]!.body);
+      expect(body).not.toContain(secret);
+      expect(body).toContain("[redacted]");
+    }
+  });
+
+  test("regression: the grok path also redacts the SDK webhook secret", async () => {
+    const { poster, posts } = countingPoster();
+    const r = await dispatchGrokJob(
+      {
+        ...payload,
+        job: { ...payload.job, content: `leak ${SDK_SECRET}` },
+        snippets: [{ content: `and ${SDK_SECRET}`, path: `${SPONSORS_PATH}/m1`, channelId: SPONSORS }],
+      },
+      { env: sdkEnv({ GROK_BOT_WEBHOOK_URL: GROK_URL, GROK_BOT_WEBHOOK_SECRET: GROK_SECRET }), poster },
+    );
+    expect(r.dispatched).toBe(true);
+    expect(JSON.stringify(posts[0]!.body)).not.toContain(SDK_SECRET);
   });
 
   test("POSTs the capped pack with Bearer auth; no bot token or secret in body", async () => {

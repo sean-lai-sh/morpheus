@@ -3,6 +3,7 @@ import { scopeFor } from "../context/namespace.ts";
 import { logger } from "../logger.ts";
 import {
   capGrokPayload,
+  findLeakedSecretEnv,
   grokDispatchAuthHeaders,
   type GrokJobPayload,
   type HttpsPoster,
@@ -114,6 +115,11 @@ export async function dispatchSdkJob(
       }
     });
   const capped = capGrokPayload(payload, env);
+  const leaked = findLeakedSecretEnv(JSON.stringify(capped), env);
+  if (leaked) {
+    logger.error({ leaked_env: leaked, job_id: payload.job.id }, "refusing SDK dispatch: a Mini secret survived redaction (fail closed)");
+    return { dispatched: false, skipped: "refused-secret-in-payload" };
+  }
   const result = await poster(url, capped, headers);
   if (!result.ok) {
     logger.error({ status: result.status }, "SDK dispatcher webhook POST failed");
