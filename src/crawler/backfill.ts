@@ -10,6 +10,26 @@ import {
 
 const PAGE_SIZE = 100;
 
+/** Paginate public or private archived threads (discord.js defaults type to public). */
+async function forEachArchivedThread(
+  ch: TextChannel,
+  type: "public" | "private",
+  fetchAll: boolean,
+  fn: (thread: AnyThreadChannel) => Promise<void>,
+): Promise<void> {
+  let hasMore = true;
+  let before: string | undefined;
+  while (hasMore) {
+    const archived = await ch.threads.fetchArchived({ type, fetchAll, limit: 100, before });
+    for (const [, t] of archived.threads) {
+      await fn(t);
+    }
+    hasMore = archived.hasMore;
+    const ids = [...archived.threads.keys()];
+    before = ids[ids.length - 1];
+  }
+}
+
 async function fetchTextChannel(client: Client, channelId: string): Promise<TextChannel | null> {
   try {
     const ch = await client.channels.fetch(channelId);
@@ -93,19 +113,18 @@ export async function backfillChannel(
         const r = await backfillThread(t, channel);
         threadIngested += r.ingested;
       }
-      // Paginate archived threads
-      let hasMore = true;
-      let before: string | undefined;
-      while (hasMore) {
-        const archived = await ch.threads.fetchArchived({ fetchAll: false, limit: 100, before });
-        for (const [, t] of archived.threads) {
-          const r = await backfillThread(t, channel);
-          threadIngested += r.ingested;
-        }
-        hasMore = archived.hasMore;
-        const ids = [...archived.threads.keys()];
-        before = ids[ids.length - 1];
-      }
+      // Public archived, then private archived. discord.js fetchArchived
+      // defaults type to 'public'; private auto-archived threads never appear
+      // there. fetchAll:true lists all private archived (Manage Threads). A
+      // throw must not mark the parent complete (#68 / #72).
+      await forEachArchivedThread(ch, "public", false, async (t) => {
+        const r = await backfillThread(t, channel);
+        threadIngested += r.ingested;
+      });
+      await forEachArchivedThread(ch, "private", true, async (t) => {
+        const r = await backfillThread(t, channel);
+        threadIngested += r.ingested;
+      });
     } catch (err) {
       threadsFailed = true;
       logger.warn({ err, channel_id: channel.id }, "thread backfill failed");

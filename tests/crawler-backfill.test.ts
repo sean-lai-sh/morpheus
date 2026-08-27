@@ -190,4 +190,95 @@ describe("backfillChannel include_threads", () => {
     expect(BigInt(getState(parentId)!.oldest_seen_id!)).toBeGreaterThan(BigInt(threadMsg));
     expect(result.complete).toBe(true);
   }, 20_000);
+
+  test("ingests a private archived thread that public fetchArchived omits", async () => {
+    const parentId = "4004";
+    const parentMsg = "400000000000002000";
+    const threadId = "400000000000002100";
+    const threadMsg = "400000000000002101";
+    const threadContent = "private-thread-unique-token snacks";
+    const thread = {
+      id: threadId,
+      name: "Private planning thread",
+      messages: {
+        fetch: fetchByBefore([threadMsg], threadId, () => threadContent),
+      },
+    };
+    const parentChannel = {
+      id: parentId,
+      type: ChannelType.GuildText,
+      messages: {
+        fetch: fetchByBefore([parentMsg], parentId, () => "dev parent for private archived thread"),
+      },
+      threads: {
+        fetchActive: async () => ({ threads: new Map() }),
+        fetchArchived: async (opts?: { type?: string }) => {
+          if (opts?.type === "private") {
+            return { threads: collectionOf([thread]), hasMore: false };
+          }
+          return { threads: new Map(), hasMore: false };
+        },
+      },
+    };
+    const client = {
+      channels: {
+        fetch: async (id: string) => {
+          if (id === parentId) return parentChannel;
+          return null;
+        },
+      },
+    } as unknown as Client;
+
+    const { backfillChannel } = await import("../src/crawler/backfill.ts");
+    const channel = getChannel(parentId)!;
+    expect(channel.include_threads).toBe(true);
+    const result = await backfillChannel(client, channel);
+
+    expect(getMessage(threadMsg)).not.toBeNull();
+    expect(getMessage(threadMsg)?.content).toBe(threadContent);
+    expect(getMessage(threadMsg)?.parent_channel_id).toBe(parentId);
+    expect(getMessage(threadMsg)?.thread_id).toBe(threadId);
+    expect(result.complete).toBe(true);
+    expect(getState(parentId)?.last_backfill_complete).toBe(1);
+  }, 20_000);
+
+  test("does not mark parent complete when private archived listing throws", async () => {
+    // Resume 2002 (left incomplete by the fetchActive-throw case). Parent id
+    // must be older than that run's oldest_seen or fetch({before}) skips it.
+    const parentId = "2002";
+    const parentMsg = "800000000000001000";
+    const parentChannel = {
+      id: parentId,
+      type: ChannelType.GuildText,
+      messages: {
+        fetch: fetchByBefore([parentMsg], parentId, () => "parent body for private-archived throw"),
+      },
+      threads: {
+        fetchActive: async () => ({ threads: new Map() }),
+        fetchArchived: async (opts?: { type?: string }) => {
+          if (opts?.type === "private") {
+            throw new Error("missing Manage Threads (simulated)");
+          }
+          return { threads: new Map(), hasMore: false };
+        },
+      },
+    };
+    const client = {
+      channels: {
+        fetch: async (id: string) => {
+          if (id === parentId) return parentChannel;
+          return null;
+        },
+      },
+    } as unknown as Client;
+
+    const { backfillChannel } = await import("../src/crawler/backfill.ts");
+    const channel = getChannel(parentId)!;
+    expect(channel.include_threads).toBe(true);
+    const result = await backfillChannel(client, channel);
+
+    expect(result.complete).toBe(false);
+    expect(getState(parentId)?.last_backfill_complete).not.toBe(1);
+    expect(getMessage(parentMsg)).not.toBeNull();
+  }, 20_000);
 });

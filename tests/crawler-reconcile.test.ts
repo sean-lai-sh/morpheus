@@ -416,4 +416,52 @@ describe("reconcileChannel", () => {
     expect(getMessage(mid)?.content).toBe(midContent);
     expect(getMessage(old)).not.toBeNull();
   }, 20_000);
+
+  test("reconcile last-N lists private archived threads", async () => {
+    const parentId = "1001";
+    const parentMsg = "100000000000020000";
+    const threadId = "100000000000029999";
+    const replyId = "100000000000029050";
+    const parentContent = "sponsors parent for private archived reconcile";
+    const replyContent = "private-archived-reconcile-unique snacks";
+
+    const thread = {
+      id: threadId,
+      name: "Private archived planning",
+      messages: {
+        fetch: async () => collectionOf([mockMsg(replyId, threadId, replyContent)]),
+      },
+    };
+    const parentChannel = {
+      id: parentId,
+      type: ChannelType.GuildText,
+      messages: {
+        fetch: async () => collectionOf([mockMsg(parentMsg, parentId, parentContent)]),
+      },
+      threads: {
+        fetchActive: async () => ({ threads: new Map(), hasMore: false }),
+        fetchArchived: async (opts?: { type?: string }) => {
+          if (opts?.type === "private") {
+            return { threads: collectionOf([thread]), hasMore: false };
+          }
+          return { threads: new Map(), hasMore: false };
+        },
+      },
+    };
+    const client = {
+      channels: {
+        fetch: async (id: string) => {
+          if (id === parentId) return parentChannel;
+          return { id, type: ChannelType.GuildVoice };
+        },
+      },
+    } as unknown as Client;
+
+    const { reconcileAll } = await import("../src/crawler/reconcile.ts");
+    await reconcileAll(client);
+
+    expect(getMessage(replyId)).not.toBeNull();
+    expect(getMessage(replyId)?.parent_channel_id).toBe(parentId);
+    expect(getMessage(replyId)?.thread_id).toBe(threadId);
+  });
 });
