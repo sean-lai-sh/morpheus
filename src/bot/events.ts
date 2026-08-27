@@ -52,7 +52,13 @@ export function registerLiveHandlers(client: Client): void {
       const full = await fetchIfPartial(m);
       if (!full) return;
       try {
-        const r = await ingestMessage(full, threadParentId(full), threadChannelName(full));
+        const parentId = threadParentId(full);
+        const r = await ingestMessage(
+          full,
+          parentId,
+          threadChannelName(full),
+          parentId ? { updateCrawlCursors: false } : undefined,
+        );
         if (r.action === "inserted" || r.action === "edited") {
           logger.debug(
             { message_id: full.id, channel_id: full.channelId, op: "live", action: r.action },
@@ -80,7 +86,13 @@ export function registerLiveHandlers(client: Client): void {
     try {
       const full = await fetchIfPartial(m as Message | PartialMessage);
       if (!full) return;
-      const r = await ingestMessage(full, threadParentId(full), threadChannelName(full));
+      const parentId = threadParentId(full);
+      const r = await ingestMessage(
+        full,
+        parentId,
+        threadChannelName(full),
+        parentId ? { updateCrawlCursors: false } : undefined,
+      );
       logger.debug(
         { message_id: full.id, channel_id: full.channelId, op: "live", action: r.action },
         "edit ingested",

@@ -347,4 +347,121 @@ describe("reconcileChannel", () => {
     expect(getMessage(mid)?.content).toBe(midContent);
     expect(getMessage(old)).not.toBeNull();
   }, 20_000);
+
+  test("live ingestMessage of a thread reply does not rewind parent oldest_seen_id", async () => {
+    // Same skip class as the reconcile fixture, without updateCrawlCursors:false.
+    // Live MessageCreate/Update calls ingestMessage(thread, parent, name) with defaults.
+    const parentId = "3003";
+    const oldestSeen = "300000000000000900";
+    const mid = "300000000000000500";
+    const old = "300000000000000100";
+    const threadId = "300000000000000250";
+    const threadMsg = "300000000000000200";
+    const parentRecent = "300000000000000950";
+    const parentContent = "mentorship parent for live cursor isolate";
+    const threadContent = "live thread edit unique-live-cursor-rewind snacks";
+    const midContent = "parent mid unique-live-unfetched-mid snacks";
+    const oldContent = "parent old unique-live-unfetched-old snacks";
+
+    setOldestSeen(parentId, oldestSeen);
+    expect(getState(parentId)?.last_backfill_complete).toBe(0);
+
+    const { ingestMessage } = await import("../src/bot/ingest.ts");
+    const r = await ingestMessage(
+      mockMsg(threadMsg, threadId, threadContent) as any,
+      parentId,
+      "Live archive thread",
+    );
+    expect(r.action).toBe("inserted");
+    expect(getState(parentId)?.oldest_seen_id).toBe(oldestSeen);
+
+    const contentFor = (id: string) => {
+      if (id === mid) return midContent;
+      if (id === old) return oldContent;
+      return parentContent;
+    };
+    const parentChannel = {
+      id: parentId,
+      type: ChannelType.GuildText,
+      messages: {
+        fetch: async ({ limit, before }: { limit: number; before?: string }) => {
+          if (!before) {
+            return collectionOf([mockMsg(parentRecent, parentId, parentContent)]);
+          }
+          const older = [parentRecent, oldestSeen, mid, old].filter((id) => BigInt(id) < BigInt(before));
+          const page = [...older].sort((a, b) => (BigInt(a) < BigInt(b) ? 1 : -1)).slice(0, limit);
+          return collectionOf(page.map((id) => mockMsg(id, parentId, contentFor(id))));
+        },
+      },
+      threads: {
+        fetchActive: async () => ({ threads: new Map(), hasMore: false }),
+        fetchArchived: async () => ({ threads: new Map(), hasMore: false }),
+      },
+    };
+    const client = {
+      channels: {
+        fetch: async (id: string) => {
+          if (id === parentId) return parentChannel;
+          return { id, type: ChannelType.GuildVoice };
+        },
+      },
+    } as unknown as Client;
+
+    const { backfillChannel } = await import("../src/crawler/backfill.ts");
+    const channel = getChannel(parentId)!;
+    expect(channel.include_threads).toBe(true);
+    await backfillChannel(client, channel);
+
+    expect(getMessage(mid)).not.toBeNull();
+    expect(getMessage(mid)?.content).toBe(midContent);
+    expect(getMessage(old)).not.toBeNull();
+  }, 20_000);
+
+  test("reconcile last-N lists private archived threads", async () => {
+    const parentId = "1001";
+    const parentMsg = "100000000000020000";
+    const threadId = "100000000000029999";
+    const replyId = "100000000000029050";
+    const parentContent = "sponsors parent for private archived reconcile";
+    const replyContent = "private-archived-reconcile-unique snacks";
+
+    const thread = {
+      id: threadId,
+      name: "Private archived planning",
+      messages: {
+        fetch: async () => collectionOf([mockMsg(replyId, threadId, replyContent)]),
+      },
+    };
+    const parentChannel = {
+      id: parentId,
+      type: ChannelType.GuildText,
+      messages: {
+        fetch: async () => collectionOf([mockMsg(parentMsg, parentId, parentContent)]),
+      },
+      threads: {
+        fetchActive: async () => ({ threads: new Map(), hasMore: false }),
+        fetchArchived: async (opts?: { type?: string }) => {
+          if (opts?.type === "private") {
+            return { threads: collectionOf([thread]), hasMore: false };
+          }
+          return { threads: new Map(), hasMore: false };
+        },
+      },
+    };
+    const client = {
+      channels: {
+        fetch: async (id: string) => {
+          if (id === parentId) return parentChannel;
+          return { id, type: ChannelType.GuildVoice };
+        },
+      },
+    } as unknown as Client;
+
+    const { reconcileAll } = await import("../src/crawler/reconcile.ts");
+    await reconcileAll(client);
+
+    expect(getMessage(replyId)).not.toBeNull();
+    expect(getMessage(replyId)?.parent_channel_id).toBe(parentId);
+    expect(getMessage(replyId)?.thread_id).toBe(threadId);
+  });
 });

@@ -13,7 +13,15 @@ import {
   withWorkspaceConfig,
 } from "./jobs-fixture.ts";
 import { handleHttpRequest } from "../src/http/health.ts";
-import { claimJob, enqueueJob, failJob, getJob, prepareComplete, requeueExpiredClaims } from "../src/storage/jobs.ts";
+import {
+  claimJob,
+  enqueueJob,
+  failJob,
+  getJob,
+  markJobSendError,
+  prepareComplete,
+  requeueExpiredClaims,
+} from "../src/storage/jobs.ts";
 import { parseEnv, resetEnvForTest } from "../src/config.ts";
 import { isJobTypingActive, startJobTyping, stopAllJobTyping } from "../src/bot/typing.ts";
 
@@ -209,6 +217,37 @@ describe("claim generation (claimed_at echo)", () => {
     // Current generation may still complete — the stale fail did not terminate it.
     const ok = prepareComplete(job.id, "grok-eboard", { reply: "B ok" }, Date.now(), second.claimed_at ?? undefined);
     expect(ok.ok).toBe(true);
+  });
+
+  // Guards the #75 merge resolution: main's #74 claimed_at refresh must NOT
+  // fire on the generation-gated path, or a gated worker's legitimate retry
+  // (echoing its original generation) would be wrongly rejected as stale.
+  test("gated retry after a send error still succeeds (claimed_at not refreshed under a generation gate)", async () => {
+    const job = queue("cas-gated-retry", EBOARD, SPONSORS);
+    const claimed = claimJob(job.id, "grok-eboard", Date.now())!;
+    const gen = claimed.claimed_at ?? undefined;
+
+    // First complete persists reply_text + completion_key (generation gated).
+    const first = prepareComplete(job.id, "grok-eboard", { reply: "answer" }, Date.now(), gen);
+    expect(first.ok).toBe(true);
+    // The generation stayed stable (refresh suppressed while gated).
+    expect(getJob(job.id)?.claimed_at).toBe(claimed.claimed_at);
+
+    // Simulate a Discord send failure that leaves the job claimed for retry.
+    markJobSendError(job.id, "discord 500", Date.now());
+
+    // The same worker retries with its ORIGINAL generation — still matches.
+    const retry = prepareComplete(job.id, "grok-eboard", { reply: "answer" }, Date.now(), gen);
+    expect(retry.ok).toBe(true);
+    expect(getJob(job.id)?.reply_text).toBe("answer");
+  });
+
+  test("legacy path (no generation) refreshes claimed_at on complete (#74)", async () => {
+    const job = queue("cas-legacy-refresh", EBOARD, SPONSORS);
+    const claimed = claimJob(job.id, "grok-eboard", Date.now() - 5_000)!;
+    prepareComplete(job.id, "grok-eboard", { reply: "legacy" }, Date.now());
+    // No generation supplied → claimed_at bumped forward so the sweeper leaves the in-flight send alone.
+    expect(getJob(job.id)!.claimed_at!).toBeGreaterThan(claimed.claimed_at!);
   });
 
   test("no claimed_at echo keeps the legacy Grok contract even across a reclaim", async () => {

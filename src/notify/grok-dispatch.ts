@@ -104,7 +104,11 @@ export function grokDispatchAuthHeaders(secret: string): Record<string, string> 
 }
 
 export interface HttpsPoster {
-  (url: string, body: unknown, headers?: Record<string, string>): Promise<{ ok: boolean; status: number }>;
+  (url: string, body: unknown, headers?: Record<string, string>): Promise<{
+    ok: boolean;
+    status: number;
+    skipped?: string;
+  }>;
 }
 
 const MAX_JOB_CONTENT = 4000;
@@ -258,6 +262,72 @@ export function capGrokPayload(payload: GrokJobPayload, env: Env = loadEnv()): G
   };
 }
 
+const TAILSCALE_CGNAT_V4 =
+  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])(\.(25[0-5]|2[0-4]\d|[01]?\d?\d)){2}$/;
+
+function resolveRedirectLocation(fromUrl: string, location: string | null): string | null {
+  if (!location?.trim()) return null;
+  try {
+    return new URL(location, fromUrl).href;
+  } catch {
+    return null;
+  }
+}
+
+/** Loopback, Tailscale CGNAT 100.64/10, and fd7a: — do not follow (#73). */
+function isUnsafeRedirectUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    const host = u.hostname.replace(/^\[|\]$/g, "").replace(/\.+$/, "").toLowerCase();
+    if (host === "localhost" || host === "::1" || host === "0:0:0:0:0:0:0:1") return true;
+    if (host === "127.0.0.1" || /^127(\.\d{1,3}){3}$/.test(host)) return true;
+    if (TAILSCALE_CGNAT_V4.test(host)) return true;
+    if (host.startsWith("fd7a:")) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function skippedForRedirect(fromUrl: string, locationHeader: string | null): string {
+  const resolved = resolveRedirectLocation(fromUrl, locationHeader);
+  if (resolved && isDiscordWebhookUrl(resolved)) return "refused-discord-incoming-webhook";
+  return "refused-redirect";
+}
+
+async function defaultGrokPoster(
+  url: string,
+  body: unknown,
+  headers: Record<string, string>,
+  timeoutMs: number,
+): Promise<{ ok: boolean; status: number; skipped?: string }> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+      redirect: "manual",
+    });
+    if (res.status >= 300 && res.status < 400) {
+      const resolved = resolveRedirectLocation(url, res.headers.get("location"));
+      const skipped = skippedForRedirect(url, res.headers.get("location"));
+      if (skipped === "refused-discord-incoming-webhook") {
+        logger.error("GROK_BOT_WEBHOOK_URL redirected to a Discord incoming webhook; refusing dispatch");
+      } else if (resolved && isUnsafeRedirectUrl(resolved)) {
+        logger.error("GROK_BOT_WEBHOOK_URL redirected to a loopback or private address; refusing dispatch");
+      } else {
+        logger.error({ status: res.status }, "Grok Bot webhook dispatch refused to follow redirect");
+      }
+      return { ok: false, status: res.status, skipped };
+    }
+    return { ok: res.ok, status: res.status };
+  } catch (err) {
+    logger.error({ err }, "Grok Bot webhook dispatch timed out or failed");
+    return { ok: false, status: 0 };
+  }
+}
+
 /**
  * Mini → Grok Bot: thin Discord job + first-pass snippets.
  * Official-bot `message.reply` is the @-path; Discord incoming webhooks are ops feed only.
@@ -307,22 +377,7 @@ export async function dispatchGrokJob(
   }
 
   const timeoutMs = env.GROK_DISPATCH_TIMEOUT_MS;
-  const poster =
-    opts.poster ??
-    (async (u, body, hdrs) => {
-      try {
-        const res = await fetch(u, {
-          method: "POST",
-          headers: hdrs ?? headers,
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(timeoutMs),
-        });
-        return { ok: res.ok, status: res.status };
-      } catch (err) {
-        logger.error({ err }, "Grok Bot webhook dispatch timed out or failed");
-        return { ok: false, status: 0 };
-      }
-    });
+  const poster = opts.poster ?? ((u, body, hdrs) => defaultGrokPoster(u, body, hdrs ?? headers, timeoutMs));
   let capped: GrokJobPayload;
   try {
     capped = capGrokPayload(payload, env);
@@ -338,6 +393,9 @@ export async function dispatchGrokJob(
     return { dispatched: false, skipped: "secret-redaction-unavailable" };
   }
   const result = await poster(url, capped, headers);
+  if (result.skipped) {
+    return { dispatched: false, status: result.status, skipped: result.skipped };
+  }
   if (!result.ok) {
     logger.error({ status: result.status }, "Grok Bot webhook dispatch failed");
   }
