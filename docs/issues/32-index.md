@@ -1,34 +1,30 @@
-This index is GitHub issue **#32** (create-only; #25–#31 could not be edited after filing). Owner close of stale issues: **#38**.
+This index is GitHub issue **#32** (create-only). Owner close of stale issues: **#38**. **Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).**
 
-Parent epic: #25. Grok Bot: #33. Park agent-v1: #34. Hosting: `docs/hosting.md`. Analysis: PR #24.
+Parent epic: #25. Grok Bot: #33. Host: #39. Live index: #40. Activation: #42. Park agent-v1: #34 / [`PARKED.md`](PARKED.md). Analysis: PR #24.
 
-**One cutover sequence** (#28 last). Relative links only (`docs/...`), not `blob/cursor/nia-migration-plan-9afa`.
+**One cutover** (#28 last). Relative links only — never `blob/cursor/nia-migration-plan-9afa`.
 
-## Implementation order (Cursor slices)
+## Implementation order
 
-- [ ] #26 ContextStore: SQLite FTS5; `namespaceForRow`; poll by change seq
-- [ ] #29 Discord mention → jobs (role gate, caps, trigger ≠ ingest)
-- [ ] #37 Mini → `GROK_BOT_WEBHOOK_URL` (`docs/hosting.md`)
+- [ ] **#41** product vision (locked — do not re-litigate)
+- [ ] #39 Mini host + Tailscale `tag:morpheus` (no public inbound, no `~` share)
+- [ ] #26 ContextStore FTS (`namespaceForRow`, `channelId`+`parentChannelId`, poll **seq**) — in-repo `01-context-store.md`, **not** the frozen GitHub body
+- [ ] #29 Discord mention → jobs (role gate, caps, trigger ≠ ingest). `/cmd` follow-up, still in-product (#41)
+- [ ] #37 Mini first-pass POST (`first_pass: true`, not a full-index dump)
+- [ ] **#42** Grok Bot **activated** at `GROK_BOT_WEBHOOK_URL` (queue with a worker)
+- [ ] #40 / #27 Tailscale vfs: `/v1/fs/tree|search|read`, scoped tokens
 - [ ] #30 Idempotent Discord replies; `claimed_by` mandatory; **Send Messages in Threads**
 - [ ] #36 Operational Discord webhooks `#sponsors` `#opportunities` `#speakers` `#inbox`
-- [ ] #31 GitHub implementation-only (optional `gh`; fail open; allowlisted repo; approval)
-- [ ] #27 HTTP `/v1` localhost-on-Mini; **scoped tokens**; namespace derived server-side
-- [ ] #35 `/v1/events` after PR #23 events + `grok_bot` in `EVENT_SOURCE_TYPES`
-- [ ] #28 **last** — feature-flag and delete Nia
+- [ ] #31 GitHub implementation-only (fail open; allowlisted repo; approval). **Not** how Grok receives work
+- [ ] #35 `/v1/events` after PR #23 + `grok_bot` enum
+- [ ] #28 **last** — feature-flag and delete Nia (acceptance = `rg`/`tsc`/`bun test`, no Doppler)
 
-## Do not implement (see #34 / #38)
+## Do not implement
 
-- #10 in-process Pi mention handler
-- #13 in-process AbortController router
-- #15 Nia retrieval
-- #19 Morpheus-side sandbox runtime
-- Self-bot / user-token Discord clients
+- #10 / #13 / #15 / #19 (owner: #38; in-repo marker: [`PARKED.md`](PARKED.md))
+- Fat webhook as the retrieval API
+- Homedir / SSHFS / NFS / SMB of the Mini
 - One shared `MORPHEUS_API_TOKEN` plus client-supplied `namespace`
-- Putting `DISCORD_BOT_TOKEN` or `NIA_API_KEY` on Grok Bot
-- Hosting Morpheus on AWS, Cursor VMs, or Grok Bot's shared computer
-- Assuming Grok always has `gh` credentials
-
-## Stale on main (owner close — #38)
-
-- #3 reconcile scheduling — already in `src/crawler/live.ts`
-- #5 thread attribution — largely done in PR #6
+- `DISCORD_BOT_TOKEN` on Grok Bot
+- AWS / Fly / Cursor VM as 24/7 host
+- Poll-loop #31 as the consumer contract

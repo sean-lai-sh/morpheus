@@ -90,7 +90,7 @@ export function loadEnv(): Env {
     const issues = parsed.error.issues.map((i) => `  ${i.path.join(".")}: ${i.message}`).join("\n");
     throw new Error(
       `Invalid environment. Check Doppler config and .env.example. Issues:\n${issues}\n\n` +
-        `Run with: doppler run -- bun src/index.ts <cmd>`,
+        `Run with: bun src/index.ts <cmd>  (Mini: doppler run -- bun src/index.ts <cmd>)`,
     );
   }
   _env = parsed.data;

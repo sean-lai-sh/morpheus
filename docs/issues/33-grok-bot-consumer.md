@@ -8,30 +8,32 @@ Name the **consumer** so later Cursor slices do not rebuild the May 2026 in-proc
 
 ## The loop (required)
 
-1. Official Discord bot on the Mini (`DISCORD_BOT_TOKEN`). Mentions / ingest in allowlisted channels. Not a self-bot.
-2. Mini reads SQLite context and **POSTs** `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL` (outbound only; no public inbound IP).
-3. Grok Bot (one-shot) then:
+1. Official Discord bot on the Mini (`DISCORD_BOT_TOKEN`). Not a self-bot.
+2. Mini **POSTs** a **first-pass** `{ job, snippets, first_pass: true }` to `GROK_BOT_WEBHOOK_URL`.
+3. Grok Bot (one-shot) **live-searches the Morpheus index** over Tailscale (`/v1/fs/tree|search|read`) if snippets are not enough. Index paths only — not the Mini homedir.
+4. Then Grok:
    - posts **operational FYIs** to Discord incoming webhooks (`#sponsors` / `#opportunities` / `#speakers` / `#inbox`)
-   - opens a **GitHub issue** only for implementation work, only if GitHub credentials exist **and** policy passes (allowlisted repo, approval). **Fail open** if `gh` is missing.
-4. Grok Bot never receives `DISCORD_BOT_TOKEN`.
-
-Leadership (`isolated: true`) jobs: Discord feed allowed; GitHub issue posting **off** by default.
+   - opens a **GitHub issue** only for implementation work (fail open if `gh` missing)
+5. Grok Bot never receives `DISCORD_BOT_TOKEN`.
 
 ## Do not build
 
 - Self-bot / user token
 - Running Morpheus on Grok Bot's box or Cursor cloud agents
-- AWS as the v1 host
+- AWS / Fly as the v1 host
+- SSHFS / NFS / SMB of `~` or any Mini filesystem mount
+- Fat webhook as the retrieval API
 - `nia-cli` or reading Nia filesystem dumps
 - `@mariozechner/pi-agent-core` mention handler (#10)
 - Nia-backed `search_discord` (#15)
-- Docker sandbox on the Mini as a Grok Bot dependency (#8 / #19)
 
 ## Implement in this order
 
-**One sequence** (`docs/context-layer.md` §7): #26 → #29 + #37 → #30 → #36 (parallel) → #31 (GitHub optional, fail open) → #27 scoped localhost `/v1` → #35 (`grok_bot` enum) → **#28 last**.
+**One sequence** (`docs/context-layer.md` §7): **#39** host → #26 FTS → #29 jobs → #37 first-pass POST → **#42 activate Grok Bot webhook** → **#40/#27 Tailscale vfs** → #30 replies → #36 webhooks → #31 GitHub optional → **#28 last**.
 
-`/v1` (#27) is localhost-on-Mini only; Grok does not poll it over the internet. Namespace comes from scoped tokens, not a client query param.
+Product vision (locked): [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
+
+#31 poll-over-internet is **not** how Grok receives work. Mini pushes; the worker is the Grok Bot URL (#42). Without #42 this is a queue with no consumer.
 
 ## Docs
 

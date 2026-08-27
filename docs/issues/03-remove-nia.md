@@ -1,4 +1,4 @@
-Parent: #25. Depends on #26 (FTS) and **#37 Mini→Grok dispatch**. **Last** in the cutover (do not delete Nia before Mini can retrieve SQLite context and POST it to Grok). AWS-as-host is **stale**. `/v1` (#27) is localhost-on-Mini, not a Grok internet dependency.
+Parent: #25. Depends on #26 (FTS), **#37 Mini→Grok dispatch**, and **#40/#27 live index**. **Last** in the cutover (do not delete Nia before Mini can retrieve SQLite context and Grok can live-search `/v1/fs`). AWS-as-host is **stale**. Product vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
 
 ## Goal
 
@@ -41,15 +41,19 @@ Optional follow-up (not required here): remove unused `openai` dependency and `N
 
 - Rewriting ingest or crawlers.
 - Embeddings.
+- `bun run live` on a Cursor cloud VM (needs `DISCORD_BOT_TOKEN` + Doppler + `channels.yml`). That is **not** an acceptance check.
 
-## Acceptance criteria
+## Acceptance criteria (cloud-VM / CI — no Doppler, no `DISCORD_TOKEN`)
 
-- [ ] `bun run live` with no `NIA_*` env starts (given Discord vars + scoped `MORPHEUS_API_TOKEN_*` if localhost `/v1` requires them).
-- [ ] `rg -i nia src scripts` has no remaining runtime references (docs history is fine).
-- [ ] `bun test` / `tsc` pass.
-- [ ] README no longer tells operators to run `bun run register-nia`.
+Do **not** require `bun run live` or `doppler`. Mini scripts wrap `doppler run --`; the Doppler-free entry is `bun src/index.ts <cmd>` when env is already in the process. For this slice, verify **statically**:
+
+- [ ] `rg -n "from ['\"].*nia/" src scripts` is empty
+- [ ] `rg -n "NIA_API_KEY|NIA_BASE_URL|NIA_DISCORD_|register-nia|startSyncer|flushNow" src scripts package.json` has no remaining runtime references (docs history is fine)
+- [ ] `rg -i nia src/nia` fails because `src/nia/` is gone
+- [ ] `bunx tsc --noEmit` and `bun test` pass with the default CI env (no Discord, no Doppler)
+- [ ] README no longer tells operators to run `bun run register-nia`
 
 ## Dependencies
 
 - ContextStore FTS (so search still exists).
-- Mini FTS (#26) + outbound Grok dispatch (#37) preferred before deleting, so Grok has a replacement without Nia or a public Mini IP. HTTP `/v1` is localhost-on-Mini only.
+- Mini FTS (#26) + first-pass dispatch (#37) + live vfs (#40/#27) preferred before deleting, so Grok has a replacement without Nia or a public Mini IP.

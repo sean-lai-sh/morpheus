@@ -42,7 +42,7 @@ Empty placeholders in `.env.example`:
 
 **Grok Bot (required for FYIs):** holds `DISCORD_WEBHOOK_*` and `POST`s JSON to Discord. No GitHub. Mini does not need a public inbound IP.
 
-**Mac Mini:** holds `DISCORD_BOT_TOKEN` + `GROK_BOT_WEBHOOK_URL`. It does not need channel webhook URLs unless you want Mini-originated digests.
+**Mac Mini:** holds `DISCORD_BOT_TOKEN` + `GROK_BOT_WEBHOOK_URL` (that URL **is** the Grok Bot worker — #42). It does not need channel webhook URLs unless you want Mini-originated digests.
 
 Do **not** put webhook URLs in `config/channels.yml` (that file is channel snowflakes for ingest, and is easy to commit by mistake).
 

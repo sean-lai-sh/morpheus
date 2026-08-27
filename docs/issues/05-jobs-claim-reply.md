@@ -1,8 +1,8 @@
-Parent: #25. Depends on #29. Host: Mac Mini. Localhost HTTP only.
+Parent: #25. Depends on #29. Host: Mac Mini. Official bot posts replies. Jobs go **out** via `GROK_BOT_WEBHOOK_URL` (#37); Grok is activated by that POST (#42). Product vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
 
 ## Goal
 
-Official bot **replies** when a job completes. Grok Bot does **not** poll these routes over the internet (no public inbound IP). Live jobs go out via `GROK_BOT_WEBHOOK_URL` (#37). If `/v1/jobs` exists, it binds **127.0.0.1** and uses **scoped** tokens (#27). Grok never receives `DISCORD_BOT_TOKEN`.
+Official bot **replies** when a job completes (`message.reply`). Grok Bot does **not** poll these routes over the public internet. If `/v1/jobs` exists for complete/fail, it binds the **Tailscale** address (`tag:morpheus`, Morpheus port only) with **scoped** tokens (#27). Grok never receives `DISCORD_BOT_TOKEN`.
 
 ## Bind claims to worker identity
 
@@ -37,7 +37,7 @@ Needs **Send Messages** and **Send Messages in Threads** (thread-origin jobs). A
 
 Cap `reply` at 2000 chars per message (Discord). Cap `github_issue_url` to a URL on the allowlisted repo (#31) or reject.
 
-## Routes (localhost; namespace from token + job row)
+## Routes (Tailscale; namespace from token + job row)
 
 ```
 GET  /v1/jobs?status=queued     → list in the *token’s* namespace only (no ?namespace=)
@@ -79,4 +79,5 @@ POST /v1/jobs/:id/fail          → body { error }
 ## Dependencies
 
 - #29 jobs enqueue.
-- #27 scoped HTTP auth if routes are served (localhost).
+- #27 scoped HTTP auth if routes are served (Tailscale bind, not a public NIC).
+- #42 Grok Bot actually running at `GROK_BOT_WEBHOOK_URL`.

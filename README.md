@@ -2,13 +2,13 @@
 
 Discord intelligence bot for the club's eboard. Ingests messages into SQLite, renders them as structured markdown, and syncs to Nia for semantic search.
 
-**Direction (2026-08):** Nia is a write-only derived index. **Host = Mac Mini** (Sean's network). **Grok Bot = consumer**, not the host. AWS / Cursor VMs / Grok's shared box are not 24/7. See [docs/hosting.md](docs/hosting.md).
+**Direction (2026-08):** Nia is a write-only derived index. **Host = Mac Mini.** **Grok Bot = consumer** with **live index search** over Tailscale (tree/grep/cat), not a Mini homedir mount. Thin Discord job POST + first-pass snippets; pull more via `/v1/fs`. See [docs/hosting.md](docs/hosting.md).
 
 - Plan: [docs/context-layer.md](docs/context-layer.md) · hosting: [docs/hosting.md](docs/hosting.md) · webhooks: [docs/discord-webhooks.md](docs/discord-webhooks.md)
-- Issue/PR audit vs Grok Bot: [docs/grok-bot-audit.md](docs/grok-bot-audit.md)
-- Grok Bot spec: [#33](https://github.com/sean-lai-sh/morpheus/issues/33) · Mini dispatch: [#37](https://github.com/sean-lai-sh/morpheus/issues/37) · park old agent-v1: [#34](https://github.com/sean-lai-sh/morpheus/issues/34)
-- Slices: [#32](https://github.com/sean-lai-sh/morpheus/issues/32) · **#28 last** · FTS → jobs → Mini dispatch → replies → webhooks → GitHub optional → localhost `/v1` → delete Nia · owner close stale issues: [#38](https://github.com/sean-lai-sh/morpheus/issues/38)
-
+- **Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41)** · Issue/PR audit: [docs/grok-bot-audit.md](docs/grok-bot-audit.md)
+- Grok Bot spec: [#33](https://github.com/sean-lai-sh/morpheus/issues/33) · activation: [docs/issues/42-grok-bot-activation.md](docs/issues/42-grok-bot-activation.md) · live index: [#40](https://github.com/sean-lai-sh/morpheus/issues/40) · Mini host: [#39](https://github.com/sean-lai-sh/morpheus/issues/39)
+- Parked agent-v1: [docs/issues/PARKED.md](docs/issues/PARKED.md) · owner close: [#38](https://github.com/sean-lai-sh/morpheus/issues/38)
+- Slices: [#32](https://github.com/sean-lai-sh/morpheus/issues/32) · **#28 last** · #39 host → FTS → jobs → first-pass POST → **activate Grok Bot** → Tailscale `/v1/fs` → webhooks → GitHub optional → delete Nia
 
 ## How Nia indexing works
 
@@ -82,6 +82,14 @@ Grok Bot (not Mini) holds `DISCORD_WEBHOOK_SPONSORS` / `_OPPORTUNITIES` / `_SPEA
 
 Run Morpheus on the **Mac Mini** (`docs/hosting.md`). Do not run `bun run live` on AWS, Cursor cloud agents, or Grok Bot's shared computer.
 
+`bun run live` / `bun run backfill` wrap `doppler run --` (Mini). **Doppler-free** (CI / cloud VM, env already in the process):
+
+```bash
+bun src/index.ts live
+```
+
+`bun run live` without Doppler/`DISCORD_BOT_TOKEN` is **not** an acceptance check for #28 — use `rg` + `bunx tsc --noEmit` + `bun test` (see `docs/issues/03-remove-nia.md`). `bun.lock` is tracked so `bun install --frozen-lockfile` does not float.
+
 ### 3. Discord bot
 
 1. Create an app at <https://discord.com/developers/applications> → Bot tab
@@ -131,4 +139,4 @@ bun run test:watch        # re-run tests on file change
 
 The suite in `tests/` covers storage (messages, users, links, crawl-state, sync-state), markdown hierarchy and thread routing, config validation, classifier prompt building, and ingest logic. Each file uses a fresh temp SQLite DB.
 
-CI runs `bunx tsc --noEmit` and `bun test` on every push — see `.github/workflows/ci.yml`.
+CI runs `bun install --frozen-lockfile`, `bunx tsc --noEmit`, and `bun test` on every push — see `.github/workflows/ci.yml`. No Doppler. No `DISCORD_TOKEN`. `backupDb()` follows `MORPHEUS_DB_PATH` (tests cover this).

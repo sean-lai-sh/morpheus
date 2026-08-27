@@ -23,6 +23,7 @@ describe("dispatchGrokJob", () => {
     job: { id: "j1", content: "summarize hello@" },
     snippets: [{ content: "Acme wants to sponsor" }],
     feed_hint: "sponsors",
+    first_pass: true as const,
   };
 
   test("skips when unset", async () => {
@@ -31,7 +32,7 @@ describe("dispatchGrokJob", () => {
     expect(r.skipped).toBe("missing-grok-webhook-url");
   });
 
-  test("POSTs job + snippets to the routine URL", async () => {
+  test("POSTs a first-pass job pack (not a full index dump)", async () => {
     const url = "https://example.com/grok-routine";
     let captured: unknown;
     const r = await dispatchGrokJob(payload, {
@@ -43,7 +44,7 @@ describe("dispatchGrokJob", () => {
       },
     });
     expect(r.dispatched).toBe(true);
-    expect(captured).toEqual(payload);
+    expect(captured).toEqual({ ...payload, first_pass: true });
   });
 
   test("caps job content and snippet count/bytes", async () => {
@@ -53,6 +54,7 @@ describe("dispatchGrokJob", () => {
       {
         job: { id: "j2", content: "x".repeat(8000) },
         snippets: Array.from({ length: 20 }, () => ({ content: "y".repeat(5000) })),
+        first_pass: true as const,
       },
       {
         env: { GROK_BOT_WEBHOOK_URL: url },
@@ -65,5 +67,6 @@ describe("dispatchGrokJob", () => {
     expect(captured?.job.content.length).toBe(4000);
     expect(captured?.snippets.length).toBe(12);
     expect(captured?.snippets.every((s) => s.content.length === 1200)).toBe(true);
+    expect((captured as { first_pass?: boolean }).first_pass).toBe(true);
   });
 });

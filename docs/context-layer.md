@@ -2,9 +2,9 @@
 
 Investigation of https://github.com/sean-lai-sh/morpheus (main @ `291a3ef`, after PR #6 `nia-index-overhaul`). This document is the source of truth for the Nia-exit and Discord-entry work. It is based on the current tree, not on earlier guesses.
 
-**Host (decided):** persistent **Mac Mini** on Sean's network — official Discord gateway + Morpheus. **Not AWS** (overkill / stale). **Not** a Cursor cloud-agent VM. **Not** Grok Bot's shared computer. See [`docs/hosting.md`](hosting.md).
+**Host (decided):** persistent **Mac Mini** on Sean's network — official Discord gateway + Morpheus **index**. **Not AWS**. **Not** a Cursor cloud-agent VM. **Not** Grok Bot's shared computer. Live Grok tools reach the index over **Tailscale only** (`tag:morpheus`, HTTP port, scoped token). Not a homedir mount. See [`docs/hosting.md`](hosting.md).
 
-**Filed issues:** tracking [#25](https://github.com/sean-lai-sh/morpheus/issues/25) · Grok Bot [#33](https://github.com/sean-lai-sh/morpheus/issues/33) · webhooks [#36](https://github.com/sean-lai-sh/morpheus/issues/36) · Mini→Grok dispatch [#37](https://github.com/sean-lai-sh/morpheus/issues/37) · park agent-v1 [#34](https://github.com/sean-lai-sh/morpheus/issues/34). Analysis PR: [#24](https://github.com/sean-lai-sh/morpheus/pull/24).
+**Filed issues:** tracking [#25](https://github.com/sean-lai-sh/morpheus/issues/25) · Grok Bot [#33](https://github.com/sean-lai-sh/morpheus/issues/33) · host slice [#39](https://github.com/sean-lai-sh/morpheus/issues/39) · live index VFS [#40](https://github.com/sean-lai-sh/morpheus/issues/40) · webhooks [#36](https://github.com/sean-lai-sh/morpheus/issues/36) · Mini first-pass dispatch [#37](https://github.com/sean-lai-sh/morpheus/issues/37) · park agent-v1 [#34](https://github.com/sean-lai-sh/morpheus/issues/34). Analysis PR: [#24](https://github.com/sean-lai-sh/morpheus/pull/24).
 
 **Corrections vs. the investigation brief**
 
@@ -16,7 +16,7 @@ Investigation of https://github.com/sean-lai-sh/morpheus (main @ `291a3ef`, afte
 | Discord is a future entry point | Discord is **already** the ingest entry point (official `discord.js` bot, not a self-bot). What is missing is mention→job, replies, and GitHub issue posting. |
 | Search/read of indexed artifacts lives here | **Not implemented.** Planned in open issue #15 as "SQLite FTS + Nia search", which this plan supersedes. |
 
-Existing `agent-v1` issues (#7–#22) assume an **in-process Pi/Claude agent** (`@mariozechner/pi-agent-core`) that still queries Nia. The consumer is now **Cursor Grok Bot** (Tech@NYU), via Discord → **Mac Mini** (Morpheus) → `GROK_BOT_WEBHOOK_URL`. Audit: [`docs/grok-bot-audit.md`](grok-bot-audit.md). Hosting: [`docs/hosting.md`](hosting.md). Do not implement #15's Nia retrieval path or #10's in-process mention reply.
+Existing `agent-v1` issues (#7–#22) assume an **in-process Pi/Claude agent** (`@mariozechner/pi-agent-core`) that still queries Nia. The consumer is now **Cursor Grok Bot** (Tech@NYU): Discord → **Mac Mini** (thin job POST) → Grok **live-searches the Morpheus index over Tailscale**. Audit: [`docs/grok-bot-audit.md`](grok-bot-audit.md). Hosting: [`docs/hosting.md`](hosting.md). Do not implement #15's Nia retrieval path or #10's in-process mention reply. Do not mount the Mini homedir.
 
 ---
 
@@ -24,22 +24,25 @@ Existing `agent-v1` issues (#7–#22) assume an **in-process Pi/Claude agent** (
 
 **Today (code on Mini once deployed):** Discord gateway → ingest → SQLite → optional Nia push.
 
-**Target loop (Mac Mini + Grok Bot consumer):**
+**Target loop (thin Discord job + live index tools):**
 
 ```
- Discord  --gateway WS (out from Mini)-->  Mac Mini
+ Discord  --gateway WS (out from Mini)-->  Mac Mini  tag:morpheus
                                              • official bot (DISCORD_BOT_TOKEN)
-                                             • Morpheus ingest + SQLite context
+                                             • Morpheus SQLite index (club only)
                                              • no public inbound IP
                       POST GROK_BOT_WEBHOOK_URL
-                                             • { job, snippets }
-                      -------------------->  Grok Bot (one-shot consumer)
+                                             • { job, first_pass snippets }
+                      -------------------->  Grok Bot (one-shot)
+                                             • if needed: Tailscale
+                                               GET/POST /v1/fs/tree|search|read
+                                               scoped token, index paths only
                                              • Discord incoming webhooks
                                                #sponsors #opportunities #speakers
                                              • GitHub issues = implementation only
 ```
 
-Do **not** run `bun run live` on Grok Bot's machine or on Cursor cloud agents.
+Do **not** run `bun run live` on Grok Bot's machine or on Cursor cloud agents. Do **not** share `~` over SSHFS/NFS/SMB.
 
 **In-process on the Mini today:**
 
@@ -102,7 +105,7 @@ Local (gitignored `data/`):
 ```
 data/
   morpheus.db              SQLite source of truth (override: MORPHEUS_DB_PATH)
-  backups/morpheus-*.db    nightly copy (03:17); also intended after Nia sync (#2, not wired)
+  backups/morpheus-*.db    nightly copy next to the live DB (honors MORPHEUS_DB_PATH; not hardcoded data/)
   discord/
     general/{category?}/{channel-slug-last4}/
       main.md
@@ -178,18 +181,19 @@ Discord gateway, ingest filters, SQLite schema for messages/links/users/crawl_st
 
 ## 3. Migration off Nia
 
-Goal: the **Mac Mini** can retrieve SQLite context for a Discord event and **push** it to Grok Bot. No Nia account. No public inbound IP. AWS is **stale**.
+Goal: Grok Bot can **live-search the Morpheus index** (tree / grep / cat) over Tailscale, after a thin Discord job POST. No Nia account. No public inbound IP. No Mini homedir share. AWS is **stale**.
 
 SQLite is already the source of truth. Nia is a derived, lossy, full-tree replica. The markdown tree can remain as an optional export; it must not be the retrieval API.
 
 ### Recommended shape
 
-Keep ingest as-is. Add a `ContextStore` in-process (FTS5). Mini uses it locally, then POSTs snippets to `GROK_BOT_WEBHOOK_URL`. Optional HTTP `/v1` from the same `Bun.serve` as `/health` binds to **127.0.0.1** for on-box tools — Grok does **not** poll it over the internet.
+Keep ingest as-is. Add a `ContextStore` in-process (FTS5). Mini POSTs a **first-pass** snippet pack to `GROK_BOT_WEBHOOK_URL`. Grok pulls more via **vfs HTTP** (`/v1/fs/*`) on Tailscale.
 
 ```
- Discord ingest  →  SQLite (messages + fts)  →  Mini POST GROK_BOT_WEBHOOK_URL  →  Grok Bot
+ Discord ingest  →  SQLite (messages + fts)
                          │
-                         ├── optional localhost /v1 (127.0.0.1 only)
+                         ├── Mini POST GROK_BOT_WEBHOOK_URL  { job, first_pass }
+                         ├── Tailscale /v1/fs/tree|search|read  (Grok live tools)
                          └── optional markdown export (no Nia push)
 ```
 
@@ -203,25 +207,33 @@ type Namespace = "general" | "leadership";
 export interface IndexDocument {
   id: string;                 // Discord message snowflake
   namespace: Namespace;
-  channelId: string;          // parent text channel for threads
+  /** messages.channel_id — the thread id for thread messages, NOT the parent. */
+  channelId: string;
+  /** messages.parent_channel_id — parent text channel, or null. */
+  parentChannelId: string | null;
   threadId: string | null;
   threadName: string | null;
   authorId: string;
   authorName: string;
   content: string;
-  createdAt: number;          // epoch ms
+  createdAt: number;          // epoch ms (Discord create; not a poll cursor)
   editedAt: number | null;
   deletedAt: number | null;
+  /** Monotonic ingest seq; bumped on upsert / edit / delete / reactions. Poll cursor. */
+  seq: number;
+  /** https://discord.com/channels/{guild}/{channelId}/{id} using row channel_id */
+  permalink: string;
 }
 
 export interface SearchQuery {
   query: string;
-  namespace: Namespace;       // REQUIRED. Never search across namespaces.
+  namespace: Namespace;       // REQUIRED in-process. HTTP derives this from the token.
+  pathPrefix?: string;        // index path, e.g. /general/eboard-teams/sponsors-xxxx
   channelHint?: string;       // channel id or name
   threadId?: string;
   sinceMs?: number;
   untilMs?: number;
-  includeDeleted?: boolean;   // default false
+  includeDeleted?: boolean;   // default false; HTTP must reject true
   limit?: number;             // 1..50, default 10
 }
 
@@ -229,24 +241,35 @@ export interface SearchHit {
   id: string;
   score: number;
   snippet: string;
-  channelId: string;
+  path: string;               // index path
+  channelId: string;          // row's own channel (thread id if thread)
+  parentChannelId: string | null;
   threadId: string | null;
   authorName: string;
   createdAt: number;
+  permalink: string;
 }
 
 export interface PollPage {
-  cursor: string;             // opaque; v1 = last seen indexed_at/change_seq + id
-                              // NOT created_at — edits/deletes must still poll out
+  cursor: string;             // opaque `${seq}:${id}` — NOT created_at
   documents: IndexDocument[];
+}
+
+export interface IndexNode {
+  path: string;
+  kind: "dir" | "doc";
+  name: string;
 }
 
 export interface ContextStore {
   index(doc: IndexDocument): void;
   search(q: SearchQuery): SearchHit[];
   readMessage(id: string, namespace: Namespace): IndexDocument | null;
+  readPath(path: string, namespace: Namespace): IndexDocument | IndexNode[] | null;
+  tree(path: string, namespace: Namespace): IndexNode[];
   readChannelWindow(opts: {
     namespace: Namespace;
+    /** Parent/allowlisted text channel id (effectiveChannelId). Includes threads. */
     channelId: string;
     afterId?: string;
     beforeId?: string;
@@ -260,21 +283,24 @@ export interface ContextStore {
 
 **Namespace isolation:** `isolated: true` in `channels.yml` → `leadership`. Resolve via `namespaceForRow` / `effectiveChannelId` (thread ids are not in `channels.yml`). A `general` search must not return leadership rows even on exact match. **HTTP does not take a client-chosen namespace** — see below.
 
-### HTTP (same process as the bot; localhost)
+### HTTP (Tailscale vfs over the index)
 
-Auth: bind to **127.0.0.1**. Grok Bot does not poll Mini over the internet. Context is pushed via `GROK_BOT_WEBHOOK_URL`.
+Bind to the **Tailscale** address (`tag:morpheus`, Morpheus port only). Grok holds `MORPHEUS_BASE_URL` (tailnet) + a **scoped** token. Public internet still has no inbound port. **Not** a homedir mount.
 
-**Namespace is not auth.** Do **not** ship one `MORPHEUS_API_TOKEN` that accepts `?namespace=leadership`. Issue scoped secrets `MORPHEUS_API_TOKEN_GENERAL` / `MORPHEUS_API_TOKEN_LEADERSHIP`. Derive namespace **server-side** from the bearer. Ignore or 403 a client-supplied namespace that does not match. Job routes take namespace from the **job row**, then check it against the token. Negative tests: general token cannot read a leadership message id even if it sends `namespace=leadership`.
+**Namespace is not auth.** Scoped secrets `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP`. Derive namespace **server-side**. Job routes take namespace from the **job row**. Negative tests: general token cannot read `/leadership/...` even if it sends `namespace=leadership`.
 
-| Method | Path | Purpose |
+| Method | Path | Tool |
 |---|---|---|
-| GET | `/health` | liveness + ingest freshness. Drop Nia fields once unused. |
-| POST | `/v1/search` | body = search text/filters; namespace from token |
-| GET | `/v1/messages/:id` | 404 if wrong token scope |
-| GET | `/v1/channels/:channelId/messages` | windowed read in token scope (parent channel for threads) |
-| GET | `/v1/poll?cursor=&limit=` | incremental catch-up in token scope |
+| GET | `/health` | liveness |
+| GET | `/v1/fs/tree?path=` | ls / tree |
+| POST | `/v1/fs/search` | grep (no `includeDeleted` on HTTP) |
+| GET | `/v1/fs/read?path=` | cat |
+| GET | `/v1/messages/:id` | cat by id |
+| GET | `/v1/poll?cursor=` | optional seq catch-up |
 
-Do not expose raw SQL, `data/` paths, or Discord tokens over this API.
+Poll cursor is monotonic **`seq`**, bumped on every write (`upsertMessage` / `markDeleted` / `setReactions`). Never `created_at` (backfill, edits, and deletes would be silent). Order snowflake ids with `CAST(id AS INTEGER)`.
+
+Do not expose raw SQL, Mini `data/` paths, `~`, or Discord tokens. Third-party egress: club Discord text leaves the Mini toward Cursor/xAI when Grok runs — snippets in the first-pass POST plus whatever Grok reads over Tailscale. Leadership isolation is necessary but not the whole privacy story; cap payloads; do not ship deleted messages.
 
 ### Why not keep Nia as the query engine
 
@@ -294,17 +320,18 @@ The bot is already official (`discord.js` + Bot token + privileged intents). Do 
 
 What exists: ingest-only gateway handlers. The bot never replies, has no slash commands, does not look at mentions (except as characters stripped in the too-short filter).
 
-What to add: Mini gathers context and **POSTs out** to `GROK_BOT_WEBHOOK_URL`. That is different from agent-v1's in-process Pi agent and from Grok **polling** Mini (which would need inbound).
+What to add: Mini POSTs a **thin** job (`first_pass` snippets) to `GROK_BOT_WEBHOOK_URL`. Grok then **live-searches the index** over Tailscale if needed. That is not agent-v1's in-process Pi agent, not a fat webhook dump, and not a Mini homedir share.
 
 ```
  User @Morpheus / hello@ / allowlisted ingest
         │
         ▼
- Mac Mini  ingest + SQLite snippets
+ Mac Mini  ingest + first-pass snippets
         │
-        POST GROK_BOT_WEBHOOK_URL   { job, snippets }
+        POST GROK_BOT_WEBHOOK_URL   { job, snippets, first_pass: true }
         ▼
  Grok Bot (one-shot)
+        ├─ Tailscale /v1/fs  search | read | tree   (if first-pass isn't enough)
         ├─ Discord incoming webhooks  #sponsors #opportunities #speakers
         └─ GitHub issue  (implementation only)
 ```
@@ -371,15 +398,16 @@ Restrict the bot to eboard channels at the Discord permission layer **and** via 
 | Item | Where it lives | Notes |
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | **Mac Mini** Doppler. Never git. | Official gateway. Legacy alias: `DISCORD_TOKEN`. **Not** Grok Bot. **Not** Cursor VMs. |
-| `GROK_BOT_WEBHOOK_URL` | **Mac Mini** | Mini POSTs jobs+snippets outbound. HTTPS. |
+| `GROK_BOT_WEBHOOK_URL` | **Mac Mini** | Thin job + first-pass snippets. Not the full index. |
 | `DISCORD_WEBHOOK_*` | **Grok Bot** secret store | Incoming webhooks for `#sponsors` / `#opportunities` / `#speakers` / `#inbox`. |
 | `DISCORD_GUILD_ID` | Mini | Snowflake. Don't commit real `channels.yml`. |
-| `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP` | Mini, localhost `/v1` only | Scoped HTTP. Namespace derived from which secret matched. **Not** a single shared token. |
+| `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP` | Mini + Grok (matching scope) | Tailscale `/v1/fs`. Namespace from which secret matched. |
+| `MORPHEUS_BASE_URL` | **Grok Bot** | Tailnet URL of Mini Morpheus HTTP. Not public. |
 | `NIA_*` | Mini Doppler until deleted | Not Grok Bot. |
 | `NVIDIA_API_KEY` | leftover | Unused. Drop. |
-| SQLite | Mini disk | Club messages. Time Machine / local backup. |
-| Gateway + Morpheus | **Mac Mini**, always-on | Outbound WS only. **AWS is overkill / stale. Do not deploy there.** |
-| Grok Bot | One-shot consumer | Not the host. Shared box / Cursor agent OK for a single job. |
+| SQLite | Mini disk | Club messages. **Not** a network filesystem share. |
+| Gateway + Morpheus | **Mac Mini**, always-on | Outbound Discord + Tailscale index HTTP. **AWS/Fly stale.** |
+| Homedir / personal projects | Mini only | **Off** the Morpheus index and off Tailscale file shares. |
 
 Single-process SQLite is fine for one bot replica. Multiple ingest replicas would need Postgres; do not split until you have to.
 
@@ -406,18 +434,20 @@ Issue drafts (same text filed on GitHub) live in [`docs/issues/`](issues/). Trac
 
 ## 7. Implementation order (one cutover sequence)
 
-**#28 is last.** Nia stays as rollback until Mini can retrieve SQLite context and POST it to Grok. Do not delete the vendor earlier. AWS-as-host is stale.
+**#28 is last.** Nia stays as rollback until live Tailscale search works. AWS/Fly as host is stale. Do **not** start GitHub #26 from its frozen body — implement in-repo `docs/issues/01-context-store.md` after #39.
 
-1. **#26** ContextStore + FTS5 (poll cursor = monotonic `indexed_at` / change seq, not `created_at`).
-2. **#29** mention → jobs (role gate, caps, `namespaceForRow`, trigger independent of ingest).
-3. **#37** Mini POST `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL` (outbound; no public inbound IP).
-4. **#30** idempotent official-bot replies (`claimed_by` mandatory; **Send Messages in Threads**).
-5. **#36** Discord incoming webhooks `#sponsors` `#opportunities` `#speakers` `#inbox` (parallel with 2–4).
-6. **#31** GitHub **only** for implementation; optional; **fail open** if `gh` is missing; allowlisted repo; approval required.
-7. **#27** HTTP `/v1` **localhost on Mini**, **scoped tokens** (optional for on-box tools; **not** Grok’s internet path).
-8. **#35** `/v1/events` after PR #23 events half + `grok_bot` in `EVENT_SOURCE_TYPES`.
-9. **#28 last** — flag off Nia, soak, then delete `src/nia/`.
+1. **#39** Mini host: launchd, Doppler, Tailscale `tag:morpheus`, no public inbound, no `~` share.
+2. **#26** ContextStore + FTS5 (`namespaceForRow`, `channelId`+`parentChannelId`, poll **seq** not `created_at`).
+3. **#29** mention → jobs (role gate, caps, trigger independent of ingest). `/cmd` is in-product (#41); mentions may ship first.
+4. **#37** Mini POST **first-pass** `{ job, snippets, first_pass: true }` (not a full-index dump).
+5. **#42** Grok Bot **activated** at `GROK_BOT_WEBHOOK_URL` (without this the queue has no worker).
+6. **#40 / #27** Tailscale vfs: `/v1/fs/tree|search|read`, scoped tokens. Grok live tools.
+7. **#30** idempotent official-bot replies (`claimed_by` mandatory; **Send Messages in Threads**).
+8. **#36** Discord incoming webhooks `#sponsors` `#opportunities` `#speakers` `#inbox` (parallel).
+9. **#31** GitHub **only** for implementation; **fail open** if `gh` is missing. Not how Grok receives work.
+10. **#35** `/v1/events` after PR #23 + `grok_bot` enum.
+11. **#28 last** — flag off Nia, soak, then delete `src/nia/`. Acceptance is `rg`/`tsc`/`bun test` (no Doppler).
 
-Use relative in-repo links (`docs/context-layer.md`), not `blob/cursor/nia-migration-plan-9afa/...` (those 404 after branch delete). Filed GitHub issue bodies that already pin the branch need an owner edit.
+Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41). Use relative in-repo links (`docs/context-layer.md`), not `blob/cursor/nia-migration-plan-9afa/...`. Filed GitHub #25/#26 still pin the branch; owner paste in #38.
 
 Markdown export (`appendBlock`) can stay until #28 so a rollback to Nia is possible; do not build new retrieval on it.

@@ -9,8 +9,11 @@ export interface GrokJobPayload {
     namespace?: string;
     content: string;
   };
-  snippets: Array<{ id?: string; channelId?: string; content: string }>;
+  /** First-pass only. Grok live-searches the index over Tailscale if this is not enough. */
+  snippets: Array<{ id?: string; channelId?: string; path?: string; content: string }>;
   feed_hint?: string;
+  /** Always true on Mini dispatch. Do not grow this into a full-index dump. */
+  first_pass: true;
 }
 
 export function grokBotWebhookUrl(env: NodeJS.ProcessEnv = process.env): string | null {
@@ -36,10 +39,11 @@ const MAX_JOB_CONTENT = 4000;
 const MAX_SNIPPETS = 12;
 const MAX_SNIPPET_CHARS = 1200;
 
-/** Cap untrusted Discord text before Mini POSTs it to Grok. Never include tokens. */
+/** Cap untrusted Discord text. This is a first-pass pack, not the retrieval API. */
 export function capGrokPayload(payload: GrokJobPayload): GrokJobPayload {
   return {
     ...payload,
+    first_pass: true,
     job: {
       ...payload.job,
       content: payload.job.content.slice(0, MAX_JOB_CONTENT),
@@ -52,8 +56,9 @@ export function capGrokPayload(payload: GrokJobPayload): GrokJobPayload {
 }
 
 /**
- * Mini → Grok Bot: outbound POST of a job plus context snippets.
- * Grok Bot is the consumer; this does not run Morpheus on Grok's machine.
+ * Mini → Grok Bot: thin Discord job + first-pass snippets.
+ * Grok live-searches the Morpheus index over Tailscale if it needs more.
+ * Never include DISCORD_BOT_TOKEN, webhook URLs, or Mini filesystem paths.
  */
 export async function dispatchGrokJob(
   payload: GrokJobPayload,

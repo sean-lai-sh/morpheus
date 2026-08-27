@@ -1,6 +1,6 @@
 ## Goal
 
-Once the events table from #7 / PR #23 is on main, expose it over **localhost HTTP on the Mac Mini** (same `/v1` as #27). On-box tools only — Grok does not poll this over the internet. Event context for Grok can ride in the Mini→`GROK_BOT_WEBHOOK_URL` POST (#37).
+Once the events table from #7 / PR #23 is on main, expose it over **the same Morpheus HTTP** as #27/#40 (Tailscale `tag:morpheus`, scoped tokens). Event context for Grok can also ride in the Mini→`GROK_BOT_WEBHOOK_URL` first-pass POST (#37). Grok does not poll this over the **public** internet.
 
 This **replaces** implementing #17 / #18 as `pi-agent-core` tools. Do **not** host this API on AWS, Cursor VMs, or Grok Bot’s shared computer.
 
@@ -41,7 +41,7 @@ PATCH /v1/events/:id            → body includes expectedVersion; source_type=g
 
 - [ ] `grok_bot` is in `EVENT_SOURCE_TYPES` (from PR #23 `177279e` or added here) and tested
 - [ ] General token cannot PATCH a leadership-scoped event
-- [ ] On-box `/v1/events` (localhost Mini) can list/get
+- [ ] On-box `/v1/events` (Mini Tailscale bind) can list/get
 - [ ] Version conflict returns 409 JSON, not a 500
 - [ ] No `DISCORD_BOT_TOKEN` or Nia env required for these routes
 

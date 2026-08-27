@@ -2,7 +2,8 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-function dbPath(): string {
+/** Resolved SQLite path. Honors `MORPHEUS_DB_PATH` (tests, non-default Mini volume). */
+export function dbPath(): string {
   return process.env.MORPHEUS_DB_PATH ?? resolve(process.cwd(), "data/morpheus.db");
 }
 

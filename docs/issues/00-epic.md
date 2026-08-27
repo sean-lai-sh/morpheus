@@ -28,20 +28,23 @@ Do **not** treat this issue as a rewrite. Land the slices below in separate PRs.
 
 Each child issue is written so a Cursor agent can implement it without this chat.
 
-- [ ] **A.** `ContextStore` + SQLite FTS5 (#26)
+- [ ] **#41** product vision (locked)
+- [ ] **#0 / #39** Mini host + Tailscale `tag:morpheus` (no `~` share)
+- [ ] **A.** `ContextStore` + SQLite FTS5 (#26) — in-repo `01-context-store.md` (not the frozen GitHub body)
 - [ ] **D.** Discord mention → `jobs` (role gate, caps) (#29)
-- [ ] **Mini dispatch** POST `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL` (#37)
-- [ ] **E.** Idempotent Discord replies; **Send Messages in Threads**; `claimed_by` mandatory (#30)
+- [ ] **Mini first-pass** POST `{ job, snippets, first_pass: true }` (#37)
+- [ ] **#42** Grok Bot activated at `GROK_BOT_WEBHOOK_URL` (queue with a worker)
+- [ ] **Live vfs** Tailscale `/v1/fs` tree/search/read (#40 / #27) — scoped tokens
+- [ ] **E.** Idempotent Discord replies (#30)
 - [ ] **Webhooks** `#sponsors` / `#opportunities` / `#speakers` / `#inbox` (#36)
-- [ ] **F.** GitHub implementation-only; fail open if `gh` missing; allowlisted repo; approval (#31)
-- [ ] **B.** HTTP `/v1` localhost Mini, **scoped tokens** (#27) — namespace derived server-side
+- [ ] **F.** GitHub implementation-only; fail open (#31). Not the job-delivery contract.
 - [ ] **#35** events HTTP after PR #23 + `grok_bot` enum
 - [ ] **C. last** Feature-flag Nia off, then delete `src/nia/` (#28)
 
 ## Constraints
 
 - Official Discord bot only (`DISCORD_BOT_TOKEN` on the **Mac Mini**). No user-token / self-bot.
-- Do not commit tokens, Doppler values, or a real `config/channels.yml`. Use relative links (`../context-layer.md`), not `blob/cursor/...` branch URLs.
+- Do not commit tokens, Doppler values, or a real `config/channels.yml`. Use relative links (`../context-layer.md`), not `blob/cursor/...` branch URLs. Filed GitHub #25/#26 still pin those; owner paste in #38.
 - Grok Bot gets `DISCORD_WEBHOOK_*` only. Mini gets `DISCORD_BOT_TOKEN` + `GROK_BOT_WEBHOOK_URL`. Never swap those.
 - HTTP uses **scoped** tokens; namespace is derived server-side. A client-supplied namespace is not auth.
 - Leadership (`isolated: true`) must never leak into general search/read/jobs.
@@ -51,8 +54,8 @@ Each child issue is written so a Cursor agent can implement it without this chat
 
 Must stay on the **Mac Mini** (Doppler / env, never git): `DISCORD_BOT_TOKEN`, `GROK_BOT_WEBHOOK_URL`, current `NIA_*` until C, SQLite volume. **AWS is stale / overkill.** Not Cursor VMs. Not Grok Bot’s shared computer.
 
-Must **not** be given to Grok Bot: `DISCORD_BOT_TOKEN`, `NIA_API_KEY`. Webhook URLs (`DISCORD_WEBHOOK_*`) **are** for Grok Bot's operational feed.
+Must **not** be given to Grok Bot: `DISCORD_BOT_TOKEN`, `NIA_API_KEY`. Webhook URLs (`DISCORD_WEBHOOK_*`) **are** for Grok Bot's operational feed. Grok also holds `MORPHEUS_BASE_URL` (tailnet) + a scoped `MORPHEUS_API_TOKEN_*`. Activation: #42.
 
-**Stale:** Grok Bot polling Mini `/v1` over the internet. Mini has no public inbound IP. Context rides in the outbound POST to `GROK_BOT_WEBHOOK_URL`. `/v1` if built is localhost-on-Mini.
+**Stale:** stuffing the whole index into `GROK_BOT_WEBHOOK_URL`. Mini POSTs a **first-pass** pack; Grok **live-searches** `/v1/fs` over **Tailscale** (`tag:morpheus`, HTTP port only). Public internet still has no inbound Morpheus port. Homedir is **not** shared.
 
 `NVIDIA_API_KEY` and the `openai` package are unused leftovers (classifier removed). Do not treat them as required.

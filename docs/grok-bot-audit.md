@@ -1,8 +1,8 @@
 # Audit: issues & PRs vs Discord → Morpheus → Grok Bot
 
-Consumer for this work: **Cursor Grok Bot** (Tech@NYU summary / implementation agent). **Host = Mac Mini** ([`docs/hosting.md`](hosting.md)): official Discord gateway + Morpheus SQLite. Grok Bot is a **one-shot consumer**, not the host. Mini **POSTs** `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL`. Grok Bot then posts FYIs to Discord incoming webhooks (`#sponsors` / `#opportunities` / `#speakers`) and files GitHub issues **only** for implementation work.
+Consumer for this work: **Cursor Grok Bot** (Tech@NYU). **Host = Mac Mini** ([`docs/hosting.md`](hosting.md)). Mini POSTs a **thin** `{ job, first_pass snippets }` to `GROK_BOT_WEBHOOK_URL`. Grok then **live-searches the Morpheus index** over Tailscale (`/v1/fs` tree/grep/cat). Index paths only — **not** the Mini homedir. Grok posts FYIs to Discord incoming webhooks (`#sponsors` / `#opportunities` / `#speakers`) and files GitHub issues **only** for implementation work.
 
-**Stale:** Grok Bot polling Mini `/v1` over the internet (needs a public inbound IP). **Stale:** AWS as the 24/7 host. **Stale:** running `bun run live` on Cursor cloud-agent VMs or on Grok Bot’s shared computer.
+**Stale:** fat-job-only retrieval (pre-retrieve everything into the webhook). **Stale:** Grok polling Mini `/v1` over the **public internet**. **Stale:** AWS/Fly as the 24/7 host. **Stale:** SSHFS/NFS/SMB of `~`. **Stale:** running `bun run live` on Cursor cloud-agent VMs or on Grok Bot’s shared computer.
 
 This is **not**:
 
@@ -17,12 +17,15 @@ Investigated: all GitHub issues (open + closed #9), PRs #6 (merged), #23 (open),
 ## Target loop (breaking vs older plans)
 
 ```
- Tech@NYU Discord  --official bot token-->  Mac Mini (Morpheus, 24/7)
+ Tech@NYU Discord  --official bot token-->  Mac Mini (Morpheus, 24/7, tag:morpheus)
         │                                         |
         │                                         | POST GROK_BOT_WEBHOOK_URL
+        │                                         | { job, first_pass snippets }
         │                                         v
         │                                   Grok Bot (one-shot consumer)
         │                                         |
+        │                    Tailscale /v1/fs     |  (search / read / tree)
+        │                    scoped token         |
         +----- Discord incoming webhooks <--------+
               (#sponsors #opportunities #speakers)
               GitHub issues = implementation only
@@ -30,7 +33,7 @@ Investigated: all GitHub issues (open + closed #9), PRs #6 (merged), #23 (open),
 
 **Breaking change vs agent-v1 (#10–#22):** mention does **not** call `runAgentTurn` in-process. Mention enqueues a **job**. Grok Bot is the model. Morpheus does not hold Anthropic/OpenAI keys for that path.
 
-**Breaking change vs Nia-index-overhaul (PR #6, on main):** markdown + Nia push remain until #28, but **retrieval for Grok Bot is Mini SQLite + outbound `GROK_BOT_WEBHOOK_URL`, never a folder of artifacts and never Grok polling Mini over the internet.**
+**Breaking change vs Nia-index-overhaul (PR #6, on main):** markdown + Nia push remain until #28, but **retrieval for Grok Bot is live Tailscale vfs over SQLite** (plus a thin first-pass webhook), never a folder of artifacts, never a Mini homedir mount, never Grok polling Mini over the public internet.
 
 ---
 
@@ -69,10 +72,10 @@ No commits vs `main`. Dead name, not a hidden architecture.
 |---|---|
 | #1 `clientReady` | Official bot, one-line. Independent. |
 | #4 `--channel` backfill | Human ops; still useful when adding a channel. Not the agent loop. |
-| #7 events schema | **Keep.** Implemented in PR #23. Optional localhost `/v1/events` later (#35); Grok does not poll Mini over the internet. |
+| #7 events schema | **Keep.** Implemented in PR #23. Optional Tailscale `/v1/events` later (#35); Grok does not poll Mini over the public internet. |
 | #14 resumeBackfill **pagination only** | Useful freshness before Grok sees a channel. **Drop** `flushNamespace` / Nia. |
 | #22 `bun run setup` | Human CLI for `channels.yml`. **Drop** the “then run register-nia” step. Keep interactive allowlist writer. |
-| #25–#32 | Nia-exit + job queue (this investigation). Refine: Grok Bot is the named consumer. |
+| #25–#32 | Nia-exit + job queue (this investigation). Refine: Grok Bot is the named consumer. **#41** is the locked vision. |
 
 ### Superseded / do not implement as written
 
@@ -94,7 +97,7 @@ No commits vs `main`. Dead name, not a hidden architecture.
 |---|---|
 | #8 sandbox **image** | Image-only; no runtime. Harmless on disk, not a deploy requirement. |
 | #11 triggers/permissions/freshness | Steal trigger *predicates* into #29; drop Pi tool-policy types. |
-| #12 context.ts from SQLite reply chain | Grok Bot can use `/v1/channels/:id/messages` + job content instead of an in-process history builder. Optional later. |
+| #12 context.ts from SQLite reply chain | Grok Bot uses first-pass snippets + Tailscale `/v1/fs/read` (#40), not an in-process history builder. Optional later. |
 | #16 Drive adapter | Valuable as **HTTP** `GET /v1/drive/...` for Grok, not a Pi tool. New issue when needed. |
 | #17–#18 event_status / event_update as Pi tools | Replace with `/v1/events` after #7 merges (#35). |
 
@@ -105,9 +108,9 @@ No commits vs `main`. Dead name, not a hidden architecture.
 Every new slice must assume:
 
 1. **Official Discord bot** (`discord.js` + `DISCORD_BOT_TOKEN` on the **Mac Mini** only). No self-bot. **Send Messages in Threads** required for thread replies.
-2. **Morpheus is SQLite on the Mini.** Mini POSTs capped `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL`. Grok does not poll Mini over the internet. `/v1` if present is localhost-only with **scoped** tokens (`MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP`); namespace is derived server-side.
-3. **Grok Bot** posts FYIs to Discord incoming webhooks (`#sponsors` / `#opportunities` / `#speakers` / `#inbox`) and files GitHub issues **only** for implementation work, **fail open** without `gh`, allowlisted repo, approval required. Leadership GitHub default off. Job content is untrusted.
-4. **Do not implement #10 / #13 / #15 / #19.** Owner close: [#38](https://github.com/sean-lai-sh/morpheus/issues/38). Meta #34 is not enough while those stay open.
+2. **Morpheus is SQLite on the Mini.** Mini POSTs a **first-pass** `{ job, snippets, first_pass: true }` to `GROK_BOT_WEBHOOK_URL`. Grok **live-searches** `/v1/fs` over **Tailscale** (`tag:morpheus`, HTTP port only, scoped tokens). Namespace from the bearer. Not a homedir share. Not a fat webhook.
+3. **Grok Bot** is **activated** by `GROK_BOT_WEBHOOK_URL` (#42) — a queue with no worker is not the loop. Posts FYIs to Discord incoming webhooks (`#sponsors` / `#opportunities` / `#speakers` / `#inbox`) and files GitHub issues **only** for implementation work, **fail open** without `gh`. Job content is untrusted.
+4. **Do not implement #10 / #13 / #15 / #19.** In-repo marker: [`docs/issues/PARKED.md`](issues/PARKED.md). Owner close: [#38](https://github.com/sean-lai-sh/morpheus/issues/38). Vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
 
 Do not add `ANTHROPIC_API_KEY` / `AGENT_MODEL` / pi-agent-core to the MVP path.
 

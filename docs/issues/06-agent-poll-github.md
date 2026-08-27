@@ -1,8 +1,10 @@
-Parent: #25. GitHub issue **#31**. Hosting: [`docs/hosting.md`](../hosting.md). Mini POSTs to Grok (#37); Grok does **not** poll Mini over the internet.
+Parent: #25. GitHub issue **#31**. Hosting: [`docs/hosting.md`](../hosting.md). Mini POSTs to Grok (#37). **Activation: [`42-grok-bot-activation.md`](42-grok-bot-activation.md).** Grok does **not** poll Mini over the public internet.
 
 ## Goal
 
 **GitHub issues = implementation work only.** Operational FYIs go to Discord incoming webhooks (`#sponsors` / `#opportunities` / `#speakers` / `#inbox`).
+
+This issue is **not** the consumer contract. Grok receives work because Mini POSTs to `GROK_BOT_WEBHOOK_URL` (#37) and that URL is a **live Grok Bot** (#42). Polling `GET /v1/jobs` over the internet is stale vs [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
 
 Do **not** assume Grok Bot has `gh` or GitHub credentials. If GitHub is unavailable, **fail open**: still post the Discord feed / let the Mini bot reply, store `github_issue_url` as null.
 
@@ -22,17 +24,17 @@ Minimum policy:
 
 ## Live path (not a poll loop)
 
-1. Mini POSTs `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL` (#37).
-2. Grok Bot (one-shot) posts FYIs to `DISCORD_WEBHOOK_*`.
+1. Mini POSTs `{ job, snippets, first_pass: true }` to `GROK_BOT_WEBHOOK_URL` (#37). That POST wakes Grok (#42).
+2. Grok live-searches `/v1/fs` if needed (#40), then posts FYIs to `DISCORD_WEBHOOK_*`.
 3. Implementation work **may** open one GitHub issue if policy (1–4) passes **and** credentials exist.
 4. Mini official bot `message.reply` for @mentions (#30).
 
-`docs/agent-poll-loop.md`, if written, is **localhost-on-Mini** only. No public `MORPHEUS_BASE_URL`.
+No public `MORPHEUS_BASE_URL`. Tailnet URL only, on Grok, never in the Discord webhook body.
 
 ## Secrets
 
-- Mini: `DISCORD_BOT_TOKEN`, `GROK_BOT_WEBHOOK_URL`.
-- Grok: `DISCORD_WEBHOOK_SPONSORS` / `_OPPORTUNITIES` / `_SPEAKERS` / `_INBOX`.
+- Mini: `DISCORD_BOT_TOKEN`, `GROK_BOT_WEBHOOK_URL`, `MORPHEUS_DB_PATH` (optional).
+- Grok: `DISCORD_WEBHOOK_SPONSORS` / `_OPPORTUNITIES` / `_SPEAKERS` / `_INBOX`, `MORPHEUS_BASE_URL`, scoped `MORPHEUS_API_TOKEN_*`.
 - Optional Grok: GitHub via the Cursor environment — not specified as always present.
 
 ## Out of scope

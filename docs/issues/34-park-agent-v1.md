@@ -2,7 +2,7 @@
 
 Stop accidental implementation of the **May 2026 agent-v1** plan (in-process Pi/Claude inside Morpheus + Nia retrieval). That plan does **not** account for Grok Bot.
 
-**#34 alone is not enough.** #10 / #15 / #19 remain open and labeled `agent-v1` until a human closes them. This token cannot mutate those issues (403). Owner paste: **[#38](https://github.com/sean-lai-sh/morpheus/issues/38)**.
+**#34 alone is not enough.** #10 / #13 / #15 / #19 remain open and labeled `agent-v1` with **no parked marker on GitHub**. #15 still says implement Nia retrieval. This token cannot mutate those issues (403). In-repo marker: [`PARKED.md`](PARKED.md). Owner paste: **[#38](https://github.com/sean-lai-sh/morpheus/issues/38)**. Product vision: **[#41](https://github.com/sean-lai-sh/morpheus/issues/41)**.
 
 Read `docs/grok-bot-audit.md` before picking up any `agent-v1` labeled issue.
 
@@ -23,7 +23,7 @@ Slash commands may later **enqueue a Grok Bot job**; that is a new issue, not #2
 - **#7** events table — merge via PR #23 (events half, including `grok_bot` in `EVENT_SOURCE_TYPES`). Then optional localhost HTTP (#35), not Pi tools #17/#18.
 - **#8** sandbox **image** — optional files on disk; **not** a deploy requirement for Grok Bot.
 - **#11** trigger predicates — reuse in #29; drop Pi `namespacePolicy` tool types. Add role gate + caps (#29).
-- **#12** SQLite reply-chain context — optional; snippets ride in the Mini→Grok POST.
+- **#12** SQLite reply-chain context — optional; first-pass snippets in the Mini→Grok POST, then live `/v1/fs` read (#40).
 - **#14** resumeBackfill pagination — keep; **delete** Nia `flushNamespace`.
 - **#16** Drive — later as localhost HTTP, not a Pi tool.
 - **#22** setup CLI — keep; remove `register-nia` from the happy path.
@@ -41,5 +41,5 @@ Slash commands may later **enqueue a Grok Bot job**; that is a new issue, not #2
 
 ## Acceptance
 
-- [ ] Owner has closed or `[PARKED]`-retitled #10, #13, #15, #19, #3, #5 (commands in #38)
-- [ ] A Cursor agent searching open issues for "agent" sees #33 / #34 / #38 and does **not** implement #10 or #15 as written
+- [ ] Owner has closed or `[PARKED]`-commented #10, #13, #15, #19, #3, #5 (commands in #38). Docs in this repo are not a substitute for those GitHub comments.
+- [ ] A Cursor agent searching open issues for "Nia retrieval" / "agent" is pointed at [`PARKED.md`](PARKED.md), #33 / #34 / #38 / #41 and does **not** implement #10 or #15 as written
