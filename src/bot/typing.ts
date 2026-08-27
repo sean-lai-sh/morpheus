@@ -57,6 +57,8 @@ interface TypingLoop {
   timer: unknown;
   deadline: number;
   stopped: boolean;
+  /** The scheduler that created `timer`; callers that only know the job id must clear with it. */
+  scheduler: TypingScheduler;
 }
 
 const loops = new Map<string, TypingLoop>();
@@ -83,15 +85,15 @@ export function activeTypingJobIds(): string[] {
   return [...loops.keys()];
 }
 
-export function stopJobTyping(jobId: string, scheduler: TypingScheduler = defaultTypingScheduler): void {
+export function stopJobTyping(jobId: string, scheduler?: TypingScheduler): void {
   const loop = loops.get(jobId);
   if (!loop) return;
   loop.stopped = true;
-  if (loop.timer != null) scheduler.clear(loop.timer);
+  if (loop.timer != null) (scheduler ?? loop.scheduler).clear(loop.timer);
   loops.delete(jobId);
 }
 
-export function stopAllJobTyping(scheduler: TypingScheduler = defaultTypingScheduler): void {
+export function stopAllJobTyping(scheduler?: TypingScheduler): void {
   for (const id of [...loops.keys()]) stopJobTyping(id, scheduler);
 }
 
@@ -189,6 +191,7 @@ export async function startJobTyping(
     timer: null,
     deadline: startedAt + maxMs,
     stopped: false,
+    scheduler,
   };
   loops.set(job.id, loop);
 

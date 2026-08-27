@@ -283,6 +283,59 @@ describe("typing vs job complete/fail", () => {
     expect(isJobTypingActive(job.id)).toBe(false);
   });
 
+  test("a failed Discord send leaves typing running so the retry still shows it", async () => {
+    const { job } = enqueueJob({
+      discordMessageId: "t-send-error",
+      discordChannelId: SPONSORS,
+      discordThreadId: null,
+      authorId: "u1",
+      namespace: EBOARD,
+      content: "q",
+    });
+    claimJob(job.id, "w1");
+    const clock = manualScheduler();
+    await startJobTyping(job, {
+      env: envFor(),
+      sendTyping: async () => {},
+      scheduler: clock.scheduler,
+    });
+    const throwing = {
+      channels: {
+        fetch: async () => {
+          throw new Error("discord down");
+        },
+      },
+    };
+    const res = await completeJobWithReply(job.id, "w1", { reply: "hello" }, {
+      client: throwing,
+      postReplies: true,
+    });
+    expect(res.ok).toBe(false);
+    // markJobSendError keeps the job claimed for a retry — the indicator must survive it.
+    expect(isJobTypingActive(job.id)).toBe(true);
+  });
+
+  test("missing Discord client leaves typing running", async () => {
+    const { job } = enqueueJob({
+      discordMessageId: "t-no-client",
+      discordChannelId: SPONSORS,
+      discordThreadId: null,
+      authorId: "u1",
+      namespace: EBOARD,
+      content: "q",
+    });
+    claimJob(job.id, "w1");
+    const clock = manualScheduler();
+    await startJobTyping(job, {
+      env: envFor(),
+      sendTyping: async () => {},
+      scheduler: clock.scheduler,
+    });
+    const res = await completeJobWithReply(job.id, "w1", { reply: "hello" }, { postReplies: true });
+    expect(res.status).toBe(503);
+    expect(isJobTypingActive(job.id)).toBe(true);
+  });
+
   test("complete with empty reply does not stop typing (job still claimed)", async () => {
     const { job } = enqueueJob({
       discordMessageId: "t-empty",
