@@ -171,7 +171,15 @@ export async function completeJobWithReply(
   let githubWorkspaces = opts.githubWorkspaces;
   let postReplies = opts.postReplies;
   const env = loadEnv();
-  const reply = redactSecrets(input.reply, env);
+  // Fail closed: if the redaction list cannot be built (workspace tokens failed
+  // to load), the reply must not reach Discord — it may contain those tokens.
+  let reply: string;
+  try {
+    reply = redactSecrets(input.reply, env);
+  } catch (err) {
+    logger.error({ err, job_id: id }, "refusing job reply: secret redaction unavailable");
+    return { ok: false, status: 500, error: "secret-redaction-unavailable" };
+  }
   githubRepo ??= env.GITHUB_ISSUE_REPO;
   githubWorkspaces ??= env.GITHUB_ISSUES_WORKSPACES;
   postReplies ??= env.DISCORD_POST_REPLIES;

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { parseEnv, type Env } from "../src/config.ts";
+import { parseEnv, resetEnvForTest, type Env } from "../src/config.ts";
 import {
   capGrokPayload,
   dispatchGrokJob,
@@ -15,6 +15,8 @@ import {
   EBOARD,
   EBOARD_TOKEN,
   LEADERSHIP,
+  LEADERSHIP_TOKEN,
+  TOKEN_ENV,
   LEADERSHIP_TEAM_PATH,
   MENTORSHIP_CHAT_PATH,
   PROGRAMS_DEV,
@@ -85,6 +87,51 @@ describe("redactSecrets", () => {
     const out = redactSecrets(`leaked ${EBOARD_TOKEN} here`, envFor());
     expect(out).not.toContain(EBOARD_TOKEN);
     expect(out).toContain("[redacted]");
+  });
+});
+
+describe("fail closed when workspace tokens cannot load", () => {
+  /** Two workspaces sharing one bearer makes loadWorkspaceTokens() throw. */
+  function withBrokenTokenEnv<T>(fn: () => T): T {
+    const saved = process.env[TOKEN_ENV.eboard];
+    process.env[TOKEN_ENV.eboard] = process.env[TOKEN_ENV.leadership];
+    resetEnvForTest();
+    try {
+      return fn();
+    } finally {
+      if (saved === undefined) delete process.env[TOKEN_ENV.eboard];
+      else process.env[TOKEN_ENV.eboard] = saved;
+      resetEnvForTest();
+    }
+  }
+
+  test("redactSecrets throws instead of silently redacting nothing", () => {
+    withBrokenTokenEnv(() => {
+      expect(() => redactSecrets(`leaked ${LEADERSHIP_TOKEN} here`, envFor())).toThrow(/distinct/);
+    });
+  });
+
+  test("dispatchGrokJob refuses dispatch; the poster is never called", async () => {
+    await withBrokenTokenEnv(async () => {
+      let posted = 0;
+      const result = await dispatchGrokJob(
+        {
+          job: { id: "j-fc", namespace: EBOARD, discord_channel_id: SPONSORS, content: `leak ${LEADERSHIP_TOKEN}` },
+          snippets: [],
+          first_pass: true,
+        },
+        {
+          env: liveEnv(EBOARD),
+          poster: async () => {
+            posted += 1;
+            return { ok: true, status: 200 };
+          },
+        },
+      );
+      expect(result.dispatched).toBe(false);
+      expect(result.skipped).toBe("secret-redaction-unavailable");
+      expect(posted).toBe(0);
+    });
   });
 });
 

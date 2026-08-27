@@ -72,6 +72,57 @@ describe("postJobReply", () => {
 });
 
 describe("completeJobWithReply", () => {
+  test("fail closed: unloadable workspace tokens block the reply from reaching Discord", async () => {
+    const { job } = enqueueJob({
+      discordMessageId: "c-failclosed",
+      discordChannelId: SPONSORS,
+      discordThreadId: null,
+      authorId: "u1",
+      namespace: EBOARD,
+      content: "q",
+    });
+    claimJob(job.id, "w1");
+    let replies = 0;
+    const stub = {
+      channels: {
+        fetch: async () => ({
+          isTextBased: () => true,
+          messages: {
+            fetch: async () => ({
+              reply: async () => {
+                replies += 1;
+                return { id: "leaked-1" };
+              },
+            }),
+          },
+          send: async () => ({ id: "leaked-2" }),
+        }),
+      },
+    };
+    // Two workspaces sharing one bearer makes loadWorkspaceTokens() throw, so
+    // the redaction list cannot be built. The reply may contain those bearers.
+    const savedEboard = process.env.MORPHEUS_API_TOKEN_EBOARD;
+    process.env.MORPHEUS_API_TOKEN_EBOARD = process.env.MORPHEUS_API_TOKEN_LEADERSHIP;
+    resetEnvForTest();
+    try {
+      const result = await completeJobWithReply(
+        job.id,
+        "w1",
+        { reply: `token is ${process.env.MORPHEUS_API_TOKEN_LEADERSHIP}` },
+        { client: stub },
+      );
+      expect(result.ok).toBe(false);
+      expect(result.status).toBe(500);
+      expect(result.error).toBe("secret-redaction-unavailable");
+      expect(replies).toBe(0);
+      expect(getJob(job.id)?.status).toBe("claimed");
+    } finally {
+      if (savedEboard === undefined) delete process.env.MORPHEUS_API_TOKEN_EBOARD;
+      else process.env.MORPHEUS_API_TOKEN_EBOARD = savedEboard;
+      resetEnvForTest();
+    }
+  });
+
   test("already-completed does not invoke Discord again", async () => {
     const { job } = enqueueJob({
       discordMessageId: "c-idemp",
