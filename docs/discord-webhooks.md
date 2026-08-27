@@ -1,6 +1,6 @@
 # Discord incoming webhooks (operational feed)
 
-Official **channel incoming webhooks** so **Grok Bot** can post workflow updates **without GitHub** (no GitHub MCP, no PAT, no connector). Not a self-bot. Not a replacement for the queryable index.
+Official **channel incoming webhooks** so **Grok Bot** can post **ops-feed** workflow updates **without GitHub** (no GitHub MCP, no PAT, no connector). Not a self-bot. Not a replacement for the queryable index. **Not** the @-reply path — member-facing answers are Mini `message.reply` (#30 / #41).
 
 GitHub issues stay for **implementation work**. These webhooks are the **operational feed**: morning digest, hello@ triage, FYIs.
 

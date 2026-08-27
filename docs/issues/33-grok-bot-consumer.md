@@ -12,9 +12,11 @@ Name the **consumer** so later Cursor slices do not rebuild the May 2026 in-proc
 2. Mini **POSTs** a **first-pass** `{ job, snippets, first_pass: true }` to `GROK_BOT_WEBHOOK_URL`.
 3. Grok Bot (one-shot) **live-searches the Morpheus index** over Tailscale (`/v1/fs/tree|search|read`) if snippets are not enough. Index paths only — not the Mini homedir.
 4. Then Grok:
-   - posts **operational FYIs** to Discord incoming webhooks (`#sponsors` / `#opportunities` / `#speakers` / `#inbox`)
+   - returns `{ reply }` to Mini (job complete)
+   - Mini posts the member-facing answer with discord.js `message.reply` as the official bot (#30)
+   - may post **operational FYIs** via Discord incoming webhooks (**#36 only**: `#sponsors` / `#opportunities` / `#speakers` / `#inbox` / hello@ inbound — not the @-reply)
    - opens a **GitHub issue** only for implementation work (fail open if `gh` missing)
-5. Grok Bot never receives `DISCORD_BOT_TOKEN`.
+5. Grok Bot never receives `DISCORD_TOKEN`. Incoming webhooks are not the conversational reply path.
 
 ## Do not build
 

@@ -1,4 +1,4 @@
-Parent: #33. Host: Mac Mini (`docs/hosting.md`). Live tools: [#40](https://github.com/sean-lai-sh/morpheus/issues/40). **Worker: [`42-grok-bot-activation.md`](42-grok-bot-activation.md).** Product vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
+Parent: #33. **Parent/superseded-by [#41](https://github.com/sean-lai-sh/morpheus/issues/41)** (locked vision). Host: Mac Mini (`docs/hosting.md`). Live tools: [#40](https://github.com/sean-lai-sh/morpheus/issues/40). **Worker: [`42-grok-bot-activation.md`](42-grok-bot-activation.md).**
 
 ## Goal
 
@@ -29,7 +29,9 @@ Grok Bot then **live-searches the Morpheus index** over Tailscale (`/v1/fs/searc
 
 ## After Grok receives it
 
-If snippets suffice: post Discord incoming webhooks / optional GitHub. If not: Tailscale vfs tools (#40), then post. GitHub = implementation only.
+Grok Bot returns `{ reply }` to Mini (job complete). Mini posts the member-facing answer with discord.js `message.reply` as the official bot (#30). Grok Bot never holds `DISCORD_TOKEN` and does **not** post via incoming webhooks on the @-reply path.
+
+Discord incoming webhooks are **#36 only**: ops feed (`#sponsors` `#opportunities` `#speakers` / hello@ inbound), not conversational replies. GitHub issues remain implementation-only (#31).
 
 ## Acceptance
 
@@ -38,3 +40,4 @@ If snippets suffice: post Discord incoming webhooks / optional GitHub. If not: T
 - [ ] Payload is marked `first_pass` and capped
 - [ ] Docs do **not** treat this webhook as “send the whole index”
 - [ ] Docs say missing URL = not activated (#42)
+- [ ] @-reply path is Mini `message.reply`, not `DISCORD_WEBHOOK_*`

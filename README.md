@@ -2,7 +2,7 @@
 
 Discord intelligence bot for the club's eboard. Ingests messages into SQLite, renders them as structured markdown, and syncs to Nia for semantic search.
 
-**Direction (2026-08):** Nia is a write-only derived index. **Host = Mac Mini.** **Grok Bot = consumer** with **live index search** over Tailscale (tree/grep/cat), not a Mini homedir mount. Thin Discord job POST + first-pass snippets; pull more via `/v1/fs`. See [docs/hosting.md](docs/hosting.md).
+**Direction (2026-08):** Nia is a write-only derived index. **Host = Mac Mini.** **Grok Bot = consumer** with **live index search** over Tailscale (tree/grep/cat), not a Mini homedir mount. Thin Discord job POST + first-pass snippets; pull more via `/v1/fs`. See [docs/hosting.md](docs/hosting.md). **PR #24 does not implement jobs, FTS, `/v1/fs`, or mention replies** — those are later slices. Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
 
 - Plan: [docs/context-layer.md](docs/context-layer.md) · hosting: [docs/hosting.md](docs/hosting.md) · webhooks: [docs/discord-webhooks.md](docs/discord-webhooks.md)
 - **Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41)** · Issue/PR audit: [docs/grok-bot-audit.md](docs/grok-bot-audit.md)

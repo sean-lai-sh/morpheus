@@ -4,7 +4,7 @@ Investigation of https://github.com/sean-lai-sh/morpheus (main @ `291a3ef`, afte
 
 **Host (decided):** persistent **Mac Mini** on Sean's network — official Discord gateway + Morpheus **index**. **Not AWS**. **Not** a Cursor cloud-agent VM. **Not** Grok Bot's shared computer. Live Grok tools reach the index over **Tailscale only** (`tag:morpheus`, HTTP port, scoped token). Not a homedir mount. See [`docs/hosting.md`](hosting.md).
 
-**Filed issues:** tracking [#25](https://github.com/sean-lai-sh/morpheus/issues/25) · Grok Bot [#33](https://github.com/sean-lai-sh/morpheus/issues/33) · host slice [#39](https://github.com/sean-lai-sh/morpheus/issues/39) · live index VFS [#40](https://github.com/sean-lai-sh/morpheus/issues/40) · webhooks [#36](https://github.com/sean-lai-sh/morpheus/issues/36) · Mini first-pass dispatch [#37](https://github.com/sean-lai-sh/morpheus/issues/37) · park agent-v1 [#34](https://github.com/sean-lai-sh/morpheus/issues/34). Analysis PR: [#24](https://github.com/sean-lai-sh/morpheus/pull/24).
+**This PR (#24) is investigation + hosting/webhook docs + `src/notify` ops-feed helpers.** Do not implement jobs enqueue, FTS ContextStore, `/v1/fs`, or mention replies here — sibling PRs take those slices. Locked vision: [#41](https://github.com/sean-lai-sh/morpheus/issues/41).
 
 **Corrections vs. the investigation brief**
 
@@ -37,8 +37,8 @@ Existing `agent-v1` issues (#7–#22) assume an **in-process Pi/Claude agent** (
                                              • if needed: Tailscale
                                                GET/POST /v1/fs/tree|search|read
                                                scoped token, index paths only
-                                             • Discord incoming webhooks
-                                               #sponsors #opportunities #speakers
+                                             • returns { reply } → Mini message.reply
+                                             • incoming webhooks = #36 ops feed only
                                              • GitHub issues = implementation only
 ```
 
@@ -332,7 +332,8 @@ What to add: Mini POSTs a **thin** job (`first_pass` snippets) to `GROK_BOT_WEBH
         ▼
  Grok Bot (one-shot)
         ├─ Tailscale /v1/fs  search | read | tree   (if first-pass isn't enough)
-        ├─ Discord incoming webhooks  #sponsors #opportunities #speakers
+        ├─ returns { reply } to Mini  →  Mini message.reply  (#30, official bot)
+        ├─ Discord incoming webhooks  #36 ops feed only (not the @-reply)
         └─ GitHub issue  (implementation only)
 ```
 

@@ -25,9 +25,9 @@ Minimum policy:
 ## Live path (not a poll loop)
 
 1. Mini POSTs `{ job, snippets, first_pass: true }` to `GROK_BOT_WEBHOOK_URL` (#37). That POST wakes Grok (#42).
-2. Grok live-searches `/v1/fs` if needed (#40), then posts FYIs to `DISCORD_WEBHOOK_*`.
-3. Implementation work **may** open one GitHub issue if policy (1–4) passes **and** credentials exist.
-4. Mini official bot `message.reply` for @mentions (#30).
+2. Grok live-searches `/v1/fs` if needed (#40) and **returns `{ reply }`**.
+3. Mini official bot `message.reply` for @mentions (#30). Incoming webhooks are **#36 only** (ops feed), not this path.
+4. Implementation work **may** open one GitHub issue if policy (1–4) passes **and** credentials exist.
 
 No public `MORPHEUS_BASE_URL`. Tailnet URL only, on Grok, never in the Discord webhook body.
 

@@ -13,8 +13,9 @@ This slice is the consumer **activation**, not another poll loop. Product vision
 3. On enqueue, Mini POSTs the thin first-pass pack (`first_pass: true`) — sketched in `src/notify/grok-dispatch.ts`.
 4. That POST **is** the wakeup. Grok then:
    - uses first-pass snippets if they suffice, else Tailscale `/v1/fs` (#40)
-   - returns `{ reply }` so Mini can `message.reply` (#30)
-   - may POST ops-feed webhooks (#36) and optionally a GitHub issue (#31, fail open)
+   - returns `{ reply }` so Mini can `message.reply` (#30) as the official bot
+   - does **not** post the @-reply via incoming webhooks
+   - may POST ops-feed webhooks (**#36 only**) and optionally a GitHub issue (#31, fail open)
 
 A scheduled “poll Mini every N minutes” Automation is **not** the primary contract.
 
