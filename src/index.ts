@@ -5,7 +5,6 @@ import { loginClient, shutdownClient } from "./bot/client.ts";
 import { backfillAll } from "./crawler/backfill.ts";
 import { reconcileAll } from "./crawler/reconcile.ts";
 import { startLive, stopLive } from "./crawler/live.ts";
-import { flushNow as flushNiaNow, startSyncer, stopSyncer } from "./nia/syncer.ts";
 import { startHealthServer, stopHealthServer } from "./http/health.ts";
 
 type Subcommand = "live" | "backfill" | "reconcile" | "reindex" | "rotate";
@@ -55,13 +54,10 @@ async function main(): Promise<void> {
     case "live": {
       const client = await loginClient();
       startLive(client);
-      startSyncer();
       startHealthServer();
       installShutdown(async () => {
         stopLive();
-        stopSyncer();
         stopHealthServer();
-        await flushNiaNow();
         await shutdownClient();
       });
       logger.info("running live; awaiting events. Ctrl-C to stop.");
@@ -71,7 +67,6 @@ async function main(): Promise<void> {
       const client = await loginClient();
       try {
         await backfillAll(client);
-        await flushNiaNow();
       } finally {
         await shutdownClient();
         closeDb();
@@ -82,7 +77,6 @@ async function main(): Promise<void> {
       const client = await loginClient();
       try {
         await reconcileAll(client);
-        await flushNiaNow();
       } finally {
         await shutdownClient();
         closeDb();

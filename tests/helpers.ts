@@ -24,6 +24,7 @@ export function withTempDb(): { cleanup: () => void; path: string } {
       resetEnvForTest();
       delete process.env.MORPHEUS_DB_PATH;
       delete process.env.DISCORD_TOKEN;
+      delete process.env.DISCORD_BOT_TOKEN;
       delete process.env.DISCORD_GUILD_ID;
       try {
         rmSync(dir, { recursive: true, force: true });

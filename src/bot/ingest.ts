@@ -5,7 +5,7 @@
  *   1. Hard pre-filter (drop bots, drop trivially-small messages, etc.)
  *   2. Upsert into SQLite (source of truth)
  *   3. Extract + persist GDrive links
- *   4. Mark operational and write to markdown (NIA indexes all content at query time)
+ *   4. Mark operational and write to local markdown (isolated: true → leadership dir)
  *
  * Thread messages: pass parentChannelId when the message is in a thread of an
  * allowed channel that has include_threads:true. The message is stored under its

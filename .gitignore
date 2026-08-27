@@ -1,6 +1,6 @@
 node_modules/
+# Binary lockfile (legacy). Text `bun.lock` is tracked so CI `--frozen-lockfile` is real.
 bun.lockb
-bun.lock
 
 # Runtime data — local dev volume; production hosts use a persistent volume
 data/

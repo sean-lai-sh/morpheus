@@ -3,20 +3,53 @@ import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
-const envSchema = z.object({
-  DISCORD_TOKEN: z.string().min(1),
-  DISCORD_GUILD_ID: z.string().regex(/^\d+$/, "must be a numeric snowflake"),
-  NVIDIA_API_KEY: z.string().min(1).optional(),
-  NIA_API_KEY: z.string().min(1).optional(),
-  NIA_BASE_URL: z.string().url().default("https://api.trynia.ai"),
-  NIA_DISCORD_SOURCE_ID: z.string().optional(),
-  NIA_DISCORD_LEADERSHIP_SOURCE_ID: z.string().optional(),
-  LOG_LEVEL: z.string().default("info"),
-  HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8080),
-  RETENTION_MONTHS: z
-    .preprocess((v) => (v === "" || v == null ? undefined : v), z.coerce.number().int().min(1).optional()),
-  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
-});
+const emptyToUndef = (v: unknown) => {
+  if (v == null) return undefined;
+  if (typeof v === "string" && v.trim() === "") return undefined;
+  return v;
+};
+
+const envSchema = z
+  .object({
+    /** Preferred name on the Mac Mini (Doppler). */
+    DISCORD_BOT_TOKEN: z.preprocess(emptyToUndef, z.string().min(1).optional()),
+    /** Legacy alias; still accepted. */
+    DISCORD_TOKEN: z.preprocess(emptyToUndef, z.string().min(1).optional()),
+    DISCORD_GUILD_ID: z.string().regex(/^\d+$/, "must be a numeric snowflake"),
+    GROK_BOT_WEBHOOK_URL: z.preprocess(
+      emptyToUndef,
+      z
+        .string()
+        .url()
+        .refine((u) => {
+          try {
+            return new URL(u).protocol === "https:";
+          } catch {
+            return false;
+          }
+        }, "must be https")
+        .optional(),
+    ),
+    NVIDIA_API_KEY: z.string().min(1).optional(),
+    LOG_LEVEL: z.string().default("info"),
+    HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8080),
+    /** Bind address for /health. Default loopback. Never 0.0.0.0. */
+    HEALTH_HOST: z.preprocess(
+      emptyToUndef,
+      z
+        .string()
+        .min(1)
+        .default("127.0.0.1")
+        .refine((h) => h !== "0.0.0.0" && h !== "::" && h !== "*", "must not bind all interfaces"),
+    ),
+    RETENTION_MONTHS: z
+      .preprocess((v) => (v === "" || v == null ? undefined : v), z.coerce.number().int().min(1).optional()),
+    NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+  })
+  .refine((e) => Boolean(e.DISCORD_BOT_TOKEN || e.DISCORD_TOKEN), {
+    message: "DISCORD_BOT_TOKEN (or legacy DISCORD_TOKEN) is required",
+    path: ["DISCORD_BOT_TOKEN"],
+  });
 
 export type Env = z.infer<typeof envSchema>;
 
@@ -62,11 +95,20 @@ export function loadEnv(): Env {
     const issues = parsed.error.issues.map((i) => `  ${i.path.join(".")}: ${i.message}`).join("\n");
     throw new Error(
       `Invalid environment. Check Doppler config and .env.example. Issues:\n${issues}\n\n` +
-        `Run with: doppler run -- bun src/index.ts <cmd>`,
+        `Run with: bun src/index.ts <cmd>  (Mini: doppler run -- bun src/index.ts <cmd>)`,
     );
   }
   _env = parsed.data;
   return _env;
+}
+
+/** Official bot token. Prefers DISCORD_BOT_TOKEN; accepts legacy DISCORD_TOKEN. Mini only. */
+export function discordBotToken(env: Env = loadEnv()): string {
+  const token = env.DISCORD_BOT_TOKEN ?? env.DISCORD_TOKEN;
+  if (!token) {
+    throw new Error("DISCORD_BOT_TOKEN (or legacy DISCORD_TOKEN) is not set");
+  }
+  return token;
 }
 
 export function loadChannels(): ChannelsConfig {
