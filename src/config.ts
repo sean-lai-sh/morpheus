@@ -104,6 +104,12 @@ const envSchema = z
       emptyToUndef,
       z.string().min(16, "must be at least 16 chars").optional(),
     ),
+    /**
+     * Sibling-only secret, but a shared Doppler config may inject it into the
+     * Mini too. The Mini never uses it — it is parsed solely so redactSecrets
+     * and the fail-closed payload scan can strip it from outbound packs.
+     */
+    CURSOR_API_KEY: z.preprocess(emptyToUndef, z.string().min(1).optional()),
     NVIDIA_API_KEY: z.string().min(1).optional(),
     LOG_LEVEL: z.string().default("info"),
     HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8080),

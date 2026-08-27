@@ -89,6 +89,18 @@ function scrub(text: string, redactValues: string[]): string {
   return out;
 }
 
+const MAX_FAIL_ERROR_CHARS = 500;
+
+/**
+ * SDK/transport error text is untrusted output: it can carry credentials
+ * (auth failures echo keys) or huge stacks. Scrub every sibling secret plus
+ * the job's bearer and cap it before it goes anywhere near /v1/jobs/:id/fail.
+ */
+function sanitizeErrorText(raw: string, redactValues: string[], token: string): string {
+  const scrubbed = scrub(raw, [...redactValues, token]).replace(/\s+/g, " ").trim();
+  return (scrubbed || "sdk run failed").slice(0, MAX_FAIL_ERROR_CHARS);
+}
+
 /**
  * The untrusted job data handed to the agent, as one JSON document. JSON
  * escaping is the embed boundary — there are no delimiters for hostile content
@@ -253,11 +265,12 @@ export class SdkDispatcher {
         return "completed-by-tool";
       }
       if (result.status === "finished" && result.result?.trim()) {
-        // The agent answered but forgot the tool — deliver its final text anyway.
+        // The agent answered but forgot the tool — deliver its final text anyway
+        // (scrubbed of sibling secrets; the Mini redacts its own on complete).
         const fallback = await this.postJson(
           `/v1/jobs/${encodeURIComponent(job.id)}/complete`,
           {
-            reply: result.result.trim().slice(0, MAX_FALLBACK_REPLY),
+            reply: scrub(result.result.trim(), [...(this.opts.redactValues ?? []), token]).slice(0, MAX_FALLBACK_REPLY),
             ...(claimedAt != null ? { claimed_at: claimedAt } : {}),
           },
           token,
@@ -284,12 +297,15 @@ export class SdkDispatcher {
     }
   }
 
-  /** Best-effort /fail. Never throws — settlement must not crash the pump. */
+  /** Best-effort /fail with sanitized error text. Never throws — settlement must not crash the pump. */
   private async failJob(jobId: string, token: string, claimedAt: number | null, error: string): Promise<void> {
     try {
       await this.postJson(
         `/v1/jobs/${encodeURIComponent(jobId)}/fail`,
-        { error, ...(claimedAt != null ? { claimed_at: claimedAt } : {}) },
+        {
+          error: sanitizeErrorText(error, this.opts.redactValues ?? [], token),
+          ...(claimedAt != null ? { claimed_at: claimedAt } : {}),
+        },
         token,
       );
     } catch (err) {

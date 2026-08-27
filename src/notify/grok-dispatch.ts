@@ -16,6 +16,7 @@ function knownSecrets(env: Env): Array<{ name: string; value: string | undefined
     { name: "GROK_BOT_WEBHOOK_SECRET", value: env.GROK_BOT_WEBHOOK_SECRET },
     { name: "CURSOR_SDK_WEBHOOK_URL", value: env.CURSOR_SDK_WEBHOOK_URL },
     { name: "CURSOR_SDK_WEBHOOK_SECRET", value: env.CURSOR_SDK_WEBHOOK_SECRET },
+    { name: "CURSOR_API_KEY", value: env.CURSOR_API_KEY },
     { name: "NVIDIA_API_KEY", value: env.NVIDIA_API_KEY },
   ];
 }

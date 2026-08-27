@@ -673,4 +673,38 @@ describe("run settlement", () => {
     h.runtime.sends[1]!.finish({ status: "finished", result: "ok" });
     await h.waitSettled(2);
   });
+
+  test("SDK error text is scrubbed and capped before it reaches /fail", async () => {
+    const h = makeHarness({ redactValues: [API_KEY, SIBLING_SECRET] });
+    h.dispatcher.enqueue(payloadFor("j1"));
+    await waitFor(() => h.runtime.sends.length === 1, "send");
+    const hugeStack = `auth failed for ${API_KEY} with bearer ${EBOARD_TOKEN}\n${"at frame\n".repeat(2_000)}`;
+    h.runtime.sends[0]!.finish({ status: "error", error: { message: hugeStack } });
+    await h.waitSettled(1);
+
+    const fail = h.requests.find((r) => r.url.endsWith("/v1/jobs/j1/fail"));
+    const body = JSON.parse(fail!.body!) as { error: string };
+    expect(body.error).not.toContain(API_KEY);
+    expect(body.error).not.toContain(EBOARD_TOKEN);
+    expect(body.error).toContain("[redacted]");
+    expect(body.error.length).toBeLessThanOrEqual(500);
+    expect(body.error).not.toContain("\n");
+  });
+
+  test("fallback reply is scrubbed of sibling secrets before /complete", async () => {
+    const h = makeHarness({ redactValues: [API_KEY] });
+    h.dispatcher.enqueue(payloadFor("j1"));
+    await waitFor(() => h.runtime.sends.length === 1, "send");
+    h.runtime.sends[0]!.finish({
+      status: "finished",
+      result: `The answer, brought to you by ${API_KEY} and ${EBOARD_TOKEN}.`,
+    });
+    await h.waitSettled(1);
+    expect(h.settled[0]!.outcome).toBe("completed-fallback");
+    const complete = h.requests.find((r) => r.url.endsWith("/v1/jobs/j1/complete"));
+    const body = JSON.parse(complete!.body!) as { reply: string };
+    expect(body.reply).not.toContain(API_KEY);
+    expect(body.reply).not.toContain(EBOARD_TOKEN);
+    expect(body.reply).toContain("[redacted]");
+  });
 });

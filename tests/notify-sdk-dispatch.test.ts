@@ -129,11 +129,14 @@ describe("redactSecrets / findLeakedSecretEnv (fail-closed tripwire)", () => {
   });
 
   test("findLeakedSecretEnv names the env var of a surviving secret, never its value", () => {
-    const env = sdkEnv();
+    const env = sdkEnv({ CURSOR_API_KEY: "cur_api_key_shared_doppler_config" });
     const leaked = findLeakedSecretEnv(JSON.stringify({ content: `oops ${SDK_SECRET}` }), env);
     expect(leaked).toBe("CURSOR_SDK_WEBHOOK_SECRET");
     expect(findLeakedSecretEnv(JSON.stringify({ content: `oops ${EBOARD_TOKEN}` }), env)).toBe(
       "MORPHEUS_API_TOKEN_EBOARD",
+    );
+    expect(findLeakedSecretEnv(JSON.stringify({ content: "oops cur_api_key_shared_doppler_config" }), env)).toBe(
+      "CURSOR_API_KEY",
     );
     expect(findLeakedSecretEnv(JSON.stringify({ content: "clean" }), env)).toBeNull();
   });
@@ -187,8 +190,13 @@ describe("dispatchSdkJob", () => {
   });
 
   test("regression: every Mini secret is redacted from job content AND snippets before POST", async () => {
-    const secrets = [BOT_TOKEN, SDK_SECRET, GROK_SECRET, EBOARD_TOKEN, SDK_URL];
-    const env = sdkEnv({ GROK_BOT_WEBHOOK_URL: GROK_URL, GROK_BOT_WEBHOOK_SECRET: GROK_SECRET });
+    const apiKey = "cur_api_key_shared_doppler_config";
+    const secrets = [BOT_TOKEN, SDK_SECRET, GROK_SECRET, EBOARD_TOKEN, SDK_URL, apiKey];
+    const env = sdkEnv({
+      GROK_BOT_WEBHOOK_URL: GROK_URL,
+      GROK_BOT_WEBHOOK_SECRET: GROK_SECRET,
+      CURSOR_API_KEY: apiKey,
+    });
     for (const secret of secrets) {
       const { poster, posts } = countingPoster();
       const r = await dispatchSdkJob(
