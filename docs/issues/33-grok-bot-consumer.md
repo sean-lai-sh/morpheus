@@ -10,6 +10,7 @@ Name the **consumer** so later Cursor slices do not rebuild the May 2026 in-proc
 
 1. Official Discord bot on the Mini (`DISCORD_BOT_TOKEN`). Not a self-bot.
 2. Mini **POSTs** a **first-pass** `{ job, snippets, first_pass: true }` to `GROK_BOT_WEBHOOK_URL`.
+   Honor `job.channel_ids` / `job.scope` (MVP channel scope, temporary until proper isolation): do not tree all of `/general` unless `scope` is `leadership`. Mini `/v1/fs` tokens stay namespace-scoped.
 3. Grok Bot (one-shot) **live-searches the Morpheus index** over Tailscale (`/v1/fs/tree|search|read`) if snippets are not enough. Index paths only — not the Mini homedir.
 4. Then Grok:
    - returns `{ reply }` to Mini (job complete)

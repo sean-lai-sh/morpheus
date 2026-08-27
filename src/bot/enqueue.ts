@@ -12,6 +12,7 @@ import {
   type ChannelResolver,
   type JobRow,
 } from "../storage/jobs.ts";
+import { mentionChannelIds, resolveJobChannelScope } from "./job-scope.ts";
 import { isMentionTrigger, isReplyToBot, memberRoleIds, mentionUserIds, threadParentId } from "./triggers.ts";
 
 export type { ChannelResolver };
@@ -41,6 +42,8 @@ export interface JobCandidate {
   mentionedBot: boolean;
   replyToBot: boolean;
   source: JobSource;
+  /** Discord `<#id>` / mentions.channels from the trigger. */
+  mentionedChannelIds?: string[];
 }
 
 export interface TryEnqueueOpts {
@@ -55,6 +58,11 @@ export interface TryEnqueueOpts {
   env?: Env;
   /** Tests inject a Map so this file does not mutate global channels.yml / cwd. */
   resolveChannel?: ChannelResolver;
+  /**
+   * ViewChannel for extra `#channel` mentions. Default fail-closed (false).
+   * Production wires discord.js `permissionsFor`.
+   */
+  canViewChannel?: (channelId: string) => boolean;
 }
 
 export interface TryEnqueueResult {
@@ -89,6 +97,7 @@ export function candidateFromMessage(message: Message, botUserId: string): JobCa
     mentionedBot: mentioned,
     replyToBot: reply,
     source: "mention",
+    mentionedChannelIds: mentionChannelIds(message),
   };
 }
 
@@ -161,6 +170,17 @@ export async function tryEnqueueJob(
     return { job: null, skipped: "rate-cap" };
   }
 
+  const mentionedIds =
+    candidate.mentionedChannelIds ?? mentionChannelIds({ content: candidate.content });
+  const { scope, channelIds } = resolveJobChannelScope({
+    namespace,
+    originatingChannelId: channelId,
+    threadId: candidate.discordThreadId,
+    mentionedChannelIds: mentionedIds,
+    canViewChannel: opts.canViewChannel ?? (() => false),
+    resolveChannel,
+  });
+
   const { job, duplicate } = enqueueJob(
     {
       discordMessageId: candidate.discordMessageId,
@@ -168,6 +188,8 @@ export async function tryEnqueueJob(
       discordThreadId: candidate.discordThreadId,
       authorId: candidate.authorId,
       namespace,
+      scope,
+      channelIds,
       content: candidate.content,
     },
     now,
@@ -178,6 +200,8 @@ export async function tryEnqueueJob(
     {
       job_id: job.id,
       namespace: job.namespace,
+      scope: job.scope,
+      channel_ids: job.channel_ids,
       discord_message_id: job.discord_message_id,
       source: candidate.source,
     },
@@ -209,6 +233,8 @@ export async function dispatchEnqueuedJob(
           discord_channel_id: job.discord_channel_id,
           author_id: job.author_id,
           namespace: job.namespace,
+          scope: job.scope,
+          channel_ids: job.channel_ids,
           content: job.content,
         },
         snippets,

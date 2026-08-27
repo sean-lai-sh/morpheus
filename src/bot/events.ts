@@ -3,6 +3,7 @@ import { logger } from "../logger.ts";
 import { ingestDelete, ingestMessage } from "./ingest.ts";
 import { handleReactionChange } from "./reactions.ts";
 import { candidateFromMessage, tryEnqueueJob } from "./enqueue.ts";
+import { authorCanViewChannel } from "./job-scope.ts";
 import { handleAskInteraction, registerAskOnReady } from "./commands.ts";
 
 async function fetchIfPartial(
@@ -64,7 +65,9 @@ export function registerLiveHandlers(client: Client): void {
       try {
         const botId = client.user?.id;
         if (!botId) return;
-        await tryEnqueueJob(candidateFromMessage(full, botId));
+        await tryEnqueueJob(candidateFromMessage(full, botId), {
+          canViewChannel: (id) => authorCanViewChannel(full, id),
+        });
       } catch (err) {
         logger.error({ err, id: m.id }, "MessageCreate job enqueue error");
       }

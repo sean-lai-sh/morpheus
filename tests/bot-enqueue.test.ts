@@ -9,10 +9,14 @@ const ROLE = "role-eboard";
 const BOT = "bot-1";
 const GENERAL = "111111111111111111";
 const LEADERSHIP = "222222222222222222";
+const MARKETING = "333333333333333333";
+const LEADERSHIP_B = "444444444444444444";
 
-const CHANNELS = new Map<string, { isolated?: boolean }>([
+const CHANNELS = new Map<string, { isolated?: boolean; include_threads?: boolean }>([
   [GENERAL, { isolated: false }],
   [LEADERSHIP, { isolated: true }],
+  [MARKETING, { isolated: false, include_threads: true }],
+  [LEADERSHIP_B, { isolated: true }],
 ]);
 const resolveChannel: ChannelResolver = (id) => CHANNELS.get(id);
 
@@ -209,7 +213,7 @@ describe("tryEnqueueJob grok dispatch", () => {
     expect(r.dispatched).toBe(false);
   });
 
-  test("leadership jobs stay queued and are not POSTed by default", async () => {
+  test("leadership jobs dispatch by default (full leadership, not skipped)", async () => {
     let posted = 0;
     const r = await tryEnqueueJob(
       candidate({
@@ -234,9 +238,11 @@ describe("tryEnqueueJob grok dispatch", () => {
       },
     );
     expect(r.job?.namespace).toBe("leadership");
+    expect(r.job?.scope).toBe("leadership");
+    expect(r.job?.channel_ids).toEqual([]);
     expect(r.job?.status).toBe("queued");
-    expect(r.dispatched).toBe(false);
-    expect(posted).toBe(0);
+    expect(r.dispatched).toBe(true);
+    expect(posted).toBe(1);
   });
 
   test("POSTs thin first_pass pack (not the whole index, no tokens)", async () => {
@@ -251,8 +257,8 @@ describe("tryEnqueueJob grok dispatch", () => {
     const token = "SUPER-SECRET-BOT-TOKEN-VALUE";
     let captured: {
       first_pass?: boolean;
-      job?: { content: string; id: string };
-      snippets?: Array<{ content: string; path?: string }>;
+      job?: { content: string; id: string; scope?: string; channel_ids?: string[] };
+      snippets?: Array<{ content: string; path?: string; channelId?: string }>;
     } = {};
     const r = await tryEnqueueJob(
       candidate({
@@ -287,7 +293,152 @@ describe("tryEnqueueJob grok dispatch", () => {
     expect(r.dispatched).toBe(true);
     expect(captured.first_pass).toBe(true);
     expect(captured.job?.id).toBe(r.job?.id);
+    expect(captured.job?.scope).toBe("channel");
+    expect(captured.job?.channel_ids).toEqual([GENERAL]);
     expect(captured.snippets?.length ?? 0).toBeGreaterThan(0);
     expect(captured.snippets?.every((s) => !s.path || s.path.startsWith("/general"))).toBe(true);
+  });
+});
+
+describe("MVP channel scope", () => {
+  beforeAll(() => {
+    upsertMessage({
+      id: "scope-gen",
+      channelId: GENERAL,
+      authorId: "u2",
+      authorName: "bob",
+      content: "general only secret",
+      createdAt: 200,
+    });
+    upsertMessage({
+      id: "scope-mkt",
+      channelId: MARKETING,
+      authorId: "u2",
+      authorName: "bob",
+      content: "marketing campaign notes",
+      createdAt: 201,
+    });
+    upsertMessage({
+      id: "scope-lead",
+      channelId: LEADERSHIP,
+      authorId: "u2",
+      authorName: "bob",
+      content: "leadership budget confidential",
+      createdAt: 202,
+    });
+    upsertMessage({
+      id: "scope-lead-b",
+      channelId: LEADERSHIP_B,
+      authorId: "u2",
+      authorName: "bob",
+      content: "other isolated channel",
+      createdAt: 203,
+    });
+  });
+
+  type Captured = {
+    job?: { scope?: string; channel_ids?: string[]; namespace?: string };
+    snippets?: Array<{ content: string; path?: string; channelId?: string }>;
+  };
+
+  async function dispatchScope(over: Partial<JobCandidate> & { discordMessageId: string }, canView?: (id: string) => boolean) {
+    let captured: Captured = {};
+    let posted = 0;
+    const result = await tryEnqueueJob(candidate({ authorId: `scope-${over.discordMessageId}`, ...over }), {
+      ...policy,
+      dispatch: true,
+      canViewChannel: canView,
+      env: parseEnv({
+        ...process.env,
+        GROK_BOT_WEBHOOK_URL: "https://example.com/grok-routine",
+        GROK_BOT_WEBHOOK_SECRET: "grok-sender-key-for-tests",
+      }),
+      poster: async (_url, body) => {
+        posted += 1;
+        captured = body as Captured;
+        return { ok: true, status: 200 };
+      },
+    });
+    return { result, captured, posted };
+  }
+
+  test("general @bot with no mentions → snippets/payload only originating channel", async () => {
+    const { result, captured } = await dispatchScope({ discordMessageId: "scope-no-mention" });
+    expect(result.job?.scope).toBe("channel");
+    expect(result.job?.channel_ids).toEqual([GENERAL]);
+    expect(captured.job?.channel_ids).toEqual([GENERAL]);
+    expect(captured.job?.scope).toBe("channel");
+    const ids = captured.snippets?.map((s) => s.channelId) ?? [];
+    expect(ids.every((id) => id === GENERAL)).toBe(true);
+    expect(captured.snippets?.some((s) => s.content.includes("general only"))).toBe(true);
+    expect(captured.snippets?.some((s) => s.content.includes("marketing"))).toBe(false);
+    expect(captured.snippets?.some((s) => s.content.includes("leadership"))).toBe(false);
+    expect(captured.snippets?.every((s) => !s.path || s.path.startsWith(`/general/${GENERAL}/`))).toBe(true);
+  });
+
+  test("general @bot with #marketing mention + ViewChannel → originating + marketing", async () => {
+    const { result, captured } = await dispatchScope(
+      {
+        discordMessageId: "scope-mkt-view",
+        content: `<@${BOT}> summarize here and also check <#${MARKETING}>`,
+        mentionedChannelIds: [MARKETING],
+      },
+      (id) => id === MARKETING,
+    );
+    expect(result.job?.channel_ids).toEqual([GENERAL, MARKETING]);
+    expect(captured.job?.channel_ids).toEqual([GENERAL, MARKETING]);
+    const ids = new Set(captured.snippets?.map((s) => s.channelId));
+    expect(ids.has(GENERAL)).toBe(true);
+    expect(ids.has(MARKETING)).toBe(true);
+    expect(ids.has(LEADERSHIP)).toBe(false);
+    expect(captured.snippets?.some((s) => s.content.includes("marketing campaign"))).toBe(true);
+  });
+
+  test("general @bot with #marketing but no ViewChannel → originating only", async () => {
+    const { result, captured } = await dispatchScope({
+      discordMessageId: "scope-mkt-noview",
+      content: `<@${BOT}> check <#${MARKETING}>`,
+      mentionedChannelIds: [MARKETING],
+    });
+    expect(result.job?.channel_ids).toEqual([GENERAL]);
+    expect(captured.job?.channel_ids).toEqual([GENERAL]);
+    expect(captured.snippets?.some((s) => s.channelId === MARKETING)).toBe(false);
+    expect(captured.snippets?.some((s) => s.content.includes("marketing campaign"))).toBe(false);
+  });
+
+  test("general @bot mentioning an isolated channel → isolated id NOT added", async () => {
+    const { result, captured } = await dispatchScope(
+      {
+        discordMessageId: "scope-iso-mention",
+        content: `<@${BOT}> also see <#${LEADERSHIP}>`,
+        mentionedChannelIds: [LEADERSHIP],
+      },
+      () => true,
+    );
+    expect(result.job?.channel_ids).not.toContain(LEADERSHIP);
+    expect(result.job?.channel_ids).toEqual([GENERAL]);
+    expect(captured.job?.channel_ids).toEqual([GENERAL]);
+    expect(captured.snippets?.some((s) => s.channelId === LEADERSHIP)).toBe(false);
+    expect(captured.snippets?.some((s) => s.content.includes("leadership budget"))).toBe(false);
+  });
+
+  test("leadership @bot → no channel_ids restriction / full leadership, and dispatch is not skipped", async () => {
+    const { result, captured, posted } = await dispatchScope({
+      discordMessageId: "scope-lead-full",
+      discordChannelId: LEADERSHIP,
+      parentChannelId: null,
+      content: `<@${BOT}> summarize leadership`,
+    });
+    expect(result.dispatched).toBe(true);
+    expect(posted).toBe(1);
+    expect(result.job?.namespace).toBe("leadership");
+    expect(result.job?.scope).toBe("leadership");
+    expect(result.job?.channel_ids).toEqual([]);
+    expect(captured.job?.scope).toBe("leadership");
+    expect(captured.job?.channel_ids).toEqual([]);
+    expect(captured.snippets?.some((s) => s.content.includes("leadership budget"))).toBe(true);
+    expect(captured.snippets?.some((s) => s.content.includes("other isolated"))).toBe(true);
+    expect(captured.snippets?.some((s) => s.content.includes("general only"))).toBe(false);
+    expect(captured.snippets?.every((s) => !s.path || s.path.startsWith("/leadership"))).toBe(true);
   });
 });

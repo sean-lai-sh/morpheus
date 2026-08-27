@@ -64,6 +64,15 @@ describe("storage/jobs enqueue", () => {
     expect(leadership.every((j) => j.namespace === "leadership")).toBe(true);
     expect(leadership.some((j) => j.discord_message_id === "m-lead-1")).toBe(true);
   });
+
+  test("defaults scope + channel_ids from namespace", () => {
+    const { job } = enqueue("m-scope-gen");
+    expect(job.scope).toBe("channel");
+    expect(job.channel_ids).toEqual(["c1"]);
+    const lead = enqueue("m-scope-lead", "u-scope-lead", "leadership");
+    expect(lead.job.scope).toBe("leadership");
+    expect(lead.job.channel_ids).toEqual([]);
+  });
 });
 
 describe("storage/jobs claim / complete / fail", () => {

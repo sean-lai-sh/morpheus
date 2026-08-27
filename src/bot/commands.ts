@@ -11,6 +11,7 @@ import {
 import { discordBotToken, loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 import { tryEnqueueJob, type JobCandidate } from "./enqueue.ts";
+import { authorCanViewChannel, mentionChannelIds } from "./job-scope.ts";
 
 export const ASK_COMMAND = new SlashCommandBuilder()
   .setName("ask")
@@ -91,9 +92,19 @@ export async function handleAskInteraction(interaction: Interaction): Promise<vo
     mentionedBot: true,
     replyToBot: false,
     source: "slash",
+    mentionedChannelIds: mentionChannelIds({ content: question }),
   };
 
-  const result = await tryEnqueueJob(candidate);
+  const result = await tryEnqueueJob(candidate, {
+    canViewChannel: (id) =>
+      authorCanViewChannel(
+        {
+          member: interaction.member,
+          guild: interaction.guild,
+        },
+        id,
+      ),
+  });
   if (result.skipped && result.skipped !== "duplicate") {
     logger.info(
       { skipped: result.skipped, user_id: interaction.user.id, channel_id: interaction.channelId },

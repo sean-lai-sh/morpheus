@@ -7,6 +7,7 @@ const TOKEN_KEYS = [
   "DISCORD_GUILD_ID",
   "GROK_BOT_WEBHOOK_URL",
   "GROK_BOT_WEBHOOK_SECRET",
+  "GROK_DISPATCH_LEADERSHIP",
   "HEALTH_HOST",
   "JOB_TRIGGER_ROLE_IDS",
 ] as const;
@@ -134,10 +135,10 @@ describe("job roles", () => {
     expect(jobTriggerRoleIds(loadEnv()).size).toBe(0);
   });
 
-  test("GROK_DISPATCH_LEADERSHIP defaults off", () => {
+  test("GROK_DISPATCH_LEADERSHIP defaults on", () => {
     isolateEnv();
     process.env.DISCORD_BOT_TOKEN = "bot-token";
     process.env.DISCORD_GUILD_ID = "123456789012345678";
-    expect(loadEnv().GROK_DISPATCH_LEADERSHIP).toBe(false);
+    expect(loadEnv().GROK_DISPATCH_LEADERSHIP).toBe(true);
   });
 });

@@ -4,9 +4,19 @@ import { effectiveChannelId, type MessageRow } from "./messages.ts";
 
 export type Namespace = "general" | "leadership";
 export type JobStatus = "queued" | "claimed" | "completed" | "failed" | "cancelled";
+export type JobScope = "channel" | "leadership";
+
+/** Cap persisted + dispatched allowlisted channel ids (MVP channel scope). */
+export const MAX_JOB_CHANNEL_IDS = 8;
+
+const FIRST_PASS_LOOKBACK_CHANNEL = 80;
+/** Scan enough recent rows to still find isolated-channel messages when general is busier. */
+const FIRST_PASS_LOOKBACK_LEADERSHIP = 2000;
 
 /** Channel lookup used for namespace + first-pass snippets. Tests inject a Map. */
-export type ChannelResolver = (channelId: string) => { isolated?: boolean } | undefined;
+export type ChannelResolver = (
+  channelId: string,
+) => { isolated?: boolean; include_threads?: boolean } | undefined;
 
 export interface JobRow {
   id: string;
@@ -15,6 +25,8 @@ export interface JobRow {
   discord_thread_id: string | null;
   author_id: string;
   namespace: Namespace;
+  scope: JobScope;
+  channel_ids: string[];
   content: string;
   status: JobStatus;
   claimed_by: string | null;
@@ -34,6 +46,8 @@ export interface EnqueueJobInput {
   discordThreadId: string | null;
   authorId: string;
   namespace: Namespace;
+  scope?: JobScope;
+  channelIds?: string[];
   content: string;
 }
 
@@ -54,8 +68,39 @@ export function namespaceForRow(
   return ch.isolated ? "leadership" : "general";
 }
 
-function mapJob(row: JobRow): JobRow {
-  return row;
+function parseChannelIds(raw: unknown): string[] {
+  if (raw == null || raw === "") return [];
+  if (Array.isArray(raw)) {
+    return raw.filter((id): id is string => typeof id === "string" && /^\d+$/.test(id));
+  }
+  try {
+    const parsed = JSON.parse(String(raw)) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is string => typeof id === "string" && /^\d+$/.test(id));
+  } catch {
+    return [];
+  }
+}
+
+function defaultScope(namespace: Namespace): JobScope {
+  return namespace === "leadership" ? "leadership" : "channel";
+}
+
+function mapJob(row: JobRow | Record<string, unknown>): JobRow {
+  const r = row as JobRow & { channel_ids?: unknown; scope?: unknown };
+  const namespace: Namespace = r.namespace === "leadership" ? "leadership" : "general";
+  const scope: JobScope =
+    r.scope === "leadership" || r.scope === "channel" ? r.scope : defaultScope(namespace);
+  let channel_ids = parseChannelIds(r.channel_ids);
+  if (channel_ids.length === 0 && scope === "channel") {
+    channel_ids = [String(r.discord_channel_id)];
+  }
+  return {
+    ...(r as JobRow),
+    namespace,
+    scope,
+    channel_ids,
+  };
 }
 
 export function getJob(id: string): JobRow | null {
@@ -121,13 +166,18 @@ export function enqueueJob(
   if (existing) return { job: existing, duplicate: true };
 
   const id = crypto.randomUUID();
+  const scope = input.scope ?? defaultScope(input.namespace);
+  const channelIds = (input.channelIds ?? (scope === "leadership" ? [] : [input.discordChannelId])).slice(
+    0,
+    MAX_JOB_CHANNEL_IDS,
+  );
   try {
     getDb()
       .query(
         `INSERT INTO jobs (
            id, discord_message_id, discord_channel_id, discord_thread_id,
-           author_id, namespace, content, status, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+           author_id, namespace, scope, channel_ids, content, status, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
       )
       .run(
         id,
@@ -136,6 +186,8 @@ export function enqueueJob(
         input.discordThreadId,
         input.authorId,
         input.namespace,
+        scope,
+        JSON.stringify(channelIds),
         input.content,
         now,
         now,
@@ -322,38 +374,80 @@ export interface FirstPassSnippet {
   content: string;
 }
 
-/** Recent SQLite messages in the job's channel/thread. Not the whole index. Not FTS. */
+function snippetAllowedForJob(
+  job: Pick<JobRow, "namespace" | "scope" | "channel_ids" | "discord_channel_id" | "discord_thread_id">,
+  row: Pick<MessageRow, "channel_id" | "parent_channel_id">,
+  resolveChannel: ChannelResolver,
+): boolean {
+  const ns = namespaceForRow(row, resolveChannel);
+  if (ns !== job.namespace) return false;
+  if (job.scope === "leadership" || job.namespace === "leadership") return true;
+  const allowed = new Set(
+    job.channel_ids.length > 0
+      ? job.channel_ids
+      : [job.discord_thread_id ?? job.discord_channel_id],
+  );
+  if (allowed.has(row.channel_id)) return true;
+  const parent = row.parent_channel_id;
+  if (parent && allowed.has(parent) && resolveChannel(parent)?.include_threads) return true;
+  return false;
+}
+
+/** Recent SQLite messages in the job's allowed channels. Not the whole /general tree. Not FTS. */
 export function firstPassSnippets(
-  job: Pick<JobRow, "namespace" | "discord_channel_id" | "discord_thread_id">,
+  job: Pick<JobRow, "namespace" | "scope" | "channel_ids" | "discord_channel_id" | "discord_thread_id">,
   limit = 12,
   resolveChannel: ChannelResolver = getChannel,
 ): FirstPassSnippet[] {
   const cap = Math.min(Math.max(1, limit), 12);
-  const channelId = job.discord_thread_id ?? job.discord_channel_id;
-  const rows = getDb()
-    .query<
-      Pick<MessageRow, "id" | "channel_id" | "parent_channel_id" | "content">,
-      [string, string, number]
-    >(
-      `SELECT id, channel_id, parent_channel_id, content
+  const leadership = job.scope === "leadership" || job.namespace === "leadership";
+  const lookback = leadership ? FIRST_PASS_LOOKBACK_LEADERSHIP : FIRST_PASS_LOOKBACK_CHANNEL;
+
+  type SnippetRow = Pick<MessageRow, "id" | "channel_id" | "parent_channel_id" | "content">;
+  let rows: SnippetRow[];
+
+  if (leadership) {
+    rows = getDb()
+      .query<SnippetRow, [number]>(
+        `SELECT id, channel_id, parent_channel_id, content
+         FROM messages
+         WHERE deleted_at IS NULL
+         ORDER BY created_at DESC
+         LIMIT ?`,
+      )
+      .all(lookback);
+  } else {
+    const allowed =
+      job.channel_ids.length > 0
+        ? job.channel_ids
+        : [job.discord_thread_id ?? job.discord_channel_id];
+    const threadParents = allowed.filter((id) => resolveChannel(id)?.include_threads);
+    const idPh = allowed.map(() => "?").join(",");
+    const args: unknown[] = [...allowed];
+    let sql = `SELECT id, channel_id, parent_channel_id, content
        FROM messages
        WHERE deleted_at IS NULL
-         AND (channel_id = ? OR parent_channel_id = ?)
-       ORDER BY created_at DESC
-       LIMIT ?`,
-    )
-    .all(channelId, channelId, cap);
+         AND (channel_id IN (${idPh})`;
+    if (threadParents.length > 0) {
+      sql += ` OR parent_channel_id IN (${threadParents.map(() => "?").join(",")})`;
+      args.push(...threadParents);
+    }
+    sql += `) ORDER BY created_at DESC LIMIT ?`;
+    args.push(lookback);
+    rows = getDb().query<SnippetRow, unknown[]>(sql).all(...args);
+  }
 
   const out: FirstPassSnippet[] = [];
   for (const row of rows) {
-    const ns = namespaceForRow(row, resolveChannel);
-    if (ns !== job.namespace) continue;
+    if (!snippetAllowedForJob(job, row, resolveChannel)) continue;
+    const pathChannel = effectiveChannelId(row as MessageRow);
     out.push({
       id: row.id,
       channelId: row.channel_id,
-      path: `/${job.namespace}/${row.channel_id}/${row.id}`,
+      path: `/${job.namespace}/${pathChannel}/${row.id}`,
       content: row.content,
     });
+    if (out.length >= cap) break;
   }
   return out;
 }

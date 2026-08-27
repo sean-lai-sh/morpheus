@@ -110,7 +110,9 @@ function migrate(db: Database): void {
       github_issue_url TEXT,
       error TEXT,
       created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      scope TEXT,
+      channel_ids TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_jobs_status_namespace_created
       ON jobs(status, namespace, created_at);
@@ -145,6 +147,8 @@ function migrateAlter(db: Database): void {
     )
   `);
   try { db.exec(`DROP TABLE IF EXISTS nia_sync_state`); } catch { /* ignore */ }
+  try { db.exec(`ALTER TABLE jobs ADD COLUMN scope TEXT`); } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE jobs ADD COLUMN channel_ids TEXT`); } catch { /* already exists */ }
   migrateSeqAndFts(db);
 }
 

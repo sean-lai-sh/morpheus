@@ -1,6 +1,6 @@
 import { loadEnv, type Env } from "../config.ts";
 import { logger } from "../logger.ts";
-import type { Namespace } from "../storage/jobs.ts";
+import { MAX_JOB_CHANNEL_IDS, type JobScope, type Namespace } from "../storage/jobs.ts";
 
 /** Strip Mini secrets from untrusted Discord text before it leaves the process. */
 export function redactSecrets(text: string, env: Env = loadEnv()): string {
@@ -28,6 +28,10 @@ export interface GrokJobPayload {
     discord_channel_id?: string;
     author_id?: string;
     namespace: Namespace;
+    /** `leadership` = whole isolated namespace. `channel` = honor `channel_ids`. */
+    scope?: JobScope;
+    /** Allowlisted Discord channel ids. Empty + scope leadership = unrestricted leadership. */
+    channel_ids?: string[];
     content: string;
   };
   /** First-pass only. Grok live-searches the index over Tailscale if this is not enough. */
@@ -71,33 +75,114 @@ function indexOnlyPath(path: string | undefined): string | undefined {
   return path.slice(0, MAX_PATH);
 }
 
-function capFeedHint(hint: string | undefined): string | undefined {
-  if (!hint) return undefined;
-  const t = hint.trim().slice(0, MAX_FEED_HINT);
-  return t || undefined;
+function capChannelIds(ids: string[] | undefined): string[] {
+  if (!ids) return [];
+  const out: string[] = [];
+  for (const raw of ids) {
+    if (typeof raw !== "string" || !/^\d+$/.test(raw)) continue;
+    if (out.includes(raw)) continue;
+    out.push(raw);
+    if (out.length >= MAX_JOB_CHANNEL_IDS) break;
+  }
+  return out;
 }
 
-/** Cap untrusted Discord text, index paths, and feed_hint. First-pass pack, not the retrieval API. */
+function jobScopeOf(job: GrokJobPayload["job"]): JobScope {
+  if (job.scope === "leadership" || job.scope === "channel") return job.scope;
+  return job.namespace === "leadership" ? "leadership" : "channel";
+}
+
+function allowedChannelIds(job: GrokJobPayload["job"], scope: JobScope): string[] {
+  const capped = capChannelIds(job.channel_ids);
+  if (scope === "leadership") return [];
+  if (capped.length > 0) return capped;
+  if (job.discord_channel_id && /^\d+$/.test(job.discord_channel_id)) return [job.discord_channel_id];
+  return [];
+}
+
+/** `/namespace/channelId/...` must stay inside the job's allowed set. */
+function pathInJobScope(
+  path: string | undefined,
+  namespace: Namespace,
+  scope: JobScope,
+  allowed: string[],
+): string | undefined {
+  const indexed = indexOnlyPath(path);
+  if (!indexed) return undefined;
+  const parts = indexed.split("/").filter(Boolean);
+  const ns = parts[0];
+  const channelId = parts[1];
+  if (scope === "leadership") {
+    return ns === "leadership" ? indexed : undefined;
+  }
+  if (ns !== namespace) return undefined;
+  if (allowed.length === 0) return undefined;
+  if (!channelId || !allowed.includes(channelId)) return undefined;
+  return indexed;
+}
+
+function snippetInJobScope(
+  snippet: { channelId?: string; path?: string },
+  namespace: Namespace,
+  scope: JobScope,
+  allowed: string[],
+): boolean {
+  if (snippet.path) {
+    const indexed = indexOnlyPath(snippet.path);
+    if (!indexed) return true;
+    return Boolean(pathInJobScope(snippet.path, namespace, scope, allowed));
+  }
+  if (scope === "leadership") return true;
+  if (snippet.channelId) return allowed.includes(snippet.channelId);
+  return true;
+}
+
+function capFeedHint(
+  hint: string | undefined,
+  namespace: Namespace,
+  scope: JobScope,
+  allowed: string[],
+): string | undefined {
+  if (!hint) return undefined;
+  const t = hint.trim().slice(0, MAX_FEED_HINT);
+  if (!t) return undefined;
+  if (t.startsWith("/")) {
+    return pathInJobScope(t, namespace, scope, allowed);
+  }
+  return t;
+}
+
+/** Cap untrusted Discord text, index paths, channel_ids, and feed_hint. First-pass pack, not the retrieval API. */
 export function capGrokPayload(payload: GrokJobPayload, env: Env = loadEnv()): GrokJobPayload {
   const job = payload.job;
-  const feedHint = capFeedHint(payload.feed_hint);
+  const scope = jobScopeOf(job);
+  const channelIds = allowedChannelIds(job, scope);
+  const feedHint = capFeedHint(payload.feed_hint, job.namespace, scope, channelIds);
   return {
     first_pass: true,
     ...(feedHint ? { feed_hint: feedHint } : {}),
     job: {
       id: job.id,
       namespace: job.namespace,
+      scope,
+      channel_ids: channelIds,
       content: redactSecrets(job.content, env).slice(0, MAX_JOB_CONTENT),
       ...(job.discord_message_id ? { discord_message_id: job.discord_message_id } : {}),
       ...(job.discord_channel_id ? { discord_channel_id: job.discord_channel_id } : {}),
       ...(job.author_id ? { author_id: job.author_id } : {}),
     },
-    snippets: payload.snippets.slice(0, MAX_SNIPPETS).map((s) => ({
-      ...(s.id ? { id: s.id } : {}),
-      ...(s.channelId ? { channelId: s.channelId } : {}),
-      ...(indexOnlyPath(s.path) ? { path: indexOnlyPath(s.path) } : {}),
-      content: redactSecrets(s.content, env).slice(0, MAX_SNIPPET_CHARS),
-    })),
+    snippets: payload.snippets
+      .slice(0, MAX_SNIPPETS)
+      .filter((s) => snippetInJobScope(s, job.namespace, scope, channelIds))
+      .map((s) => {
+        const path = pathInJobScope(s.path, job.namespace, scope, channelIds);
+        return {
+          ...(s.id ? { id: s.id } : {}),
+          ...(s.channelId ? { channelId: s.channelId } : {}),
+          ...(path ? { path } : {}),
+          content: redactSecrets(s.content, env).slice(0, MAX_SNIPPET_CHARS),
+        };
+      }),
   };
 }
 

@@ -36,9 +36,11 @@ Do **not** cancel other authors’ queued jobs in the same channel (that was #13
 3. Role gate (#1 above).
 4. Mention of `client.user.id` **or** reply to a bot message.
 5. Caps (#2–#3).
-6. Insert `status=queued`, namespace from `namespaceForRow`. Unique on `discord_message_id`.
+6. Insert `status=queued`, namespace from `namespaceForRow`. Unique on `discord_message_id`. Persist `scope` + `channel_ids` (MVP channel scope: originating channel only, plus same-namespace `#` mentions the author can ViewChannel). Leadership jobs are not channel-scoped.
 
 Do **not** post a Discord reply here (#30). Do **not** open GitHub issues here (#31). Logging `job_id` is enough. Mini later POSTs to `GROK_BOT_WEBHOOK_URL` (#37).
+
+**MVP channel scope (temporary until proper isolation).** First-pass snippets and the thin Grok payload must not dump the whole `/general` namespace. Grok should honor `job.channel_ids` as pathPrefix; `/v1/fs` tokens stay namespace-scoped.
 
 ## Out of scope
 

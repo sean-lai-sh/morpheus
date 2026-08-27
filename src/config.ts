@@ -46,8 +46,12 @@ const envSchema = z
         .optional(),
     ),
     GROK_BOT_WEBHOOK_SECRET: z.preprocess(emptyToUndef, z.string().min(1).optional()),
-    /** Off by default: do not POST leadership jobs to GROK_BOT_WEBHOOK_URL. */
-    GROK_DISPATCH_LEADERSHIP: z.preprocess(parseBoolish, z.boolean().default(false)),
+    /**
+     * Leadership jobs POST to GROK_BOT_WEBHOOK_URL (full isolated namespace).
+     * Default true: general is channel-scoped, so leadership can dispatch.
+     * Set false to skip Mini→Grok for isolated jobs.
+     */
+    GROK_DISPATCH_LEADERSHIP: z.preprocess(parseBoolish, z.boolean().default(true)),
     GROK_DISPATCH_TIMEOUT_MS: z.preprocess(
       emptyToUndef,
       z.coerce.number().int().min(1_000).max(120_000).default(10_000),
