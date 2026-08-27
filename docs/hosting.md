@@ -45,6 +45,7 @@ Documented empty in `.env.example`. Inject via Doppler **on the Mini** or the Gr
 | `DISCORD_BOT_TOKEN` | **Mini only** | Official bot token (Developer Portal → Bot). Code also accepts legacy `DISCORD_TOKEN`. **Never** on Grok Bot. |
 | `DISCORD_GUILD_ID` | Mini | Guild snowflake |
 | `GROK_BOT_WEBHOOK_URL` | **Mini** | HTTPS URL of the Grok Bot routine. Mini POSTs `{ job, snippets }`. |
+| `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP` | Mini localhost `/v1` | Namespace from which secret matched. Not a shared token. |
 | `DISCORD_WEBHOOK_SPONSORS` | **Grok Bot** | Incoming webhook for `#sponsors` |
 | `DISCORD_WEBHOOK_OPPORTUNITIES` | **Grok Bot** | `#opportunities` |
 | `DISCORD_WEBHOOK_SPEAKERS` | **Grok Bot** | `#speakers` |

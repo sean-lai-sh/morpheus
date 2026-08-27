@@ -77,7 +77,7 @@ export async function postFeed(
   const content = formatFeedContent(input);
   const payload = {
     content,
-    allowed_mentions: { parse: [] as string[] },
+    allowed_mentions: { parse: [] as string[], users: [] as string[], roles: [] as string[] },
   };
   const poster = opts.poster ?? defaultPoster;
   const result = await poster(url, payload);

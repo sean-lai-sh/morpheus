@@ -258,19 +258,21 @@ export interface ContextStore {
 
 `index()` is called from `ingest.ts` after upsert (same place that currently `appendBlock`s). Backfill/reindex rebuilds FTS from `messages`.
 
-**Namespace isolation:** `isolated: true` in `channels.yml` → `leadership`. A `general` search must not return leadership rows even on exact match. This is the same split Nia namespaces enforced by directory, now enforced by a column / join on channel config.
+**Namespace isolation:** `isolated: true` in `channels.yml` → `leadership`. Resolve via `namespaceForRow` / `effectiveChannelId` (thread ids are not in `channels.yml`). A `general` search must not return leadership rows even on exact match. **HTTP does not take a client-chosen namespace** — see below.
 
-### HTTP (same process as the bot)
+### HTTP (same process as the bot; localhost)
 
-Auth: if `/v1` exists on the Mini, bind to **127.0.0.1**. Grok Bot does not poll Mini over the internet (no public inbound IP). Context is pushed via `GROK_BOT_WEBHOOK_URL`.
+Auth: bind to **127.0.0.1**. Grok Bot does not poll Mini over the internet. Context is pushed via `GROK_BOT_WEBHOOK_URL`.
+
+**Namespace is not auth.** Do **not** ship one `MORPHEUS_API_TOKEN` that accepts `?namespace=leadership`. Issue scoped secrets `MORPHEUS_API_TOKEN_GENERAL` / `MORPHEUS_API_TOKEN_LEADERSHIP`. Derive namespace **server-side** from the bearer. Ignore or 403 a client-supplied namespace that does not match. Job routes take namespace from the **job row**, then check it against the token. Negative tests: general token cannot read a leadership message id even if it sends `namespace=leadership`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/health` | liveness + ingest freshness (`last_message_at`, crawl gaps). Drop Nia fields once unused. |
-| POST | `/v1/search` | body = `SearchQuery` |
-| GET | `/v1/messages/:id?namespace=` | read one message; 404 if wrong namespace |
-| GET | `/v1/channels/:channelId/messages` | windowed read (`after`, `before`, `limit`, `namespace`) |
-| GET | `/v1/poll?namespace=&cursor=&limit=` | incremental catch-up for agents |
+| GET | `/health` | liveness + ingest freshness. Drop Nia fields once unused. |
+| POST | `/v1/search` | body = search text/filters; namespace from token |
+| GET | `/v1/messages/:id` | 404 if wrong token scope |
+| GET | `/v1/channels/:channelId/messages` | windowed read in token scope (parent channel for threads) |
+| GET | `/v1/poll?cursor=&limit=` | incremental catch-up in token scope |
 
 Do not expose raw SQL, `data/` paths, or Discord tokens over this API.
 
@@ -313,7 +315,10 @@ Triggers (pure functions; reuse the intent of issue #11 without Pi):
 
 - Message contains a mention of the bot user **and** author is not a bot.
 - Message is a reply to a bot message (thread of a job).
-- Ignore if channel is not allowlisted (`isChannelAllowed`). Leadership vs general is recorded on the job, not mixed.
+- Author has a role in `JOB_TRIGGER_ROLE_IDS` (fail closed if unset in production).
+- Channel (or thread parent) is allowlisted. Leadership vs general from `namespaceForRow` (never fail-open unknown → general).
+- Outstanding-job and per-hour caps (#29).
+- Trigger check is **independent** of ingest too-short drops; job `content` is the raw Discord text.
 
 `jobs` table (sketch):
 
@@ -339,15 +344,15 @@ CREATE TABLE jobs (
 );
 ```
 
-Claim is compare-and-swap (`queued` → `claimed` with a lease, e.g. 10 minutes). Expired claims return to `queued`. Newest mention in the same channel can mark an older `queued` job `cancelled` (same "latest wins" idea as #13, without in-process AbortController).
+Claim is compare-and-swap (`queued` → `claimed` with a lease, e.g. 10 minutes). `claimed_by` is **mandatory** on complete/fail (409 otherwise). Expired claims return to `queued` only if no Discord send was recorded. Do **not** cancel other authors’ queued jobs in the same channel (that was #13’s in-process latest-wins and drops someone else’s question with no reply).
 
 ### Outbound
 
 Three different outputs. Do not collapse them.
 
-1. **Official bot reply** (`message.reply` in the Morpheus process, #30): answer the person who @mentioned the bot. Needs **Send Messages** and **Send Messages in Threads**. `allowedMentions: { parse: [] }`. Persist `reply_text` on the job as well as `result_discord_message_id`. Make complete **idempotent** (store a completion nonce / Discord message id before retrying send).
+1. **Official bot reply** (`message.reply` in the Morpheus process, #30): answer the person who @mentioned the bot. Needs **Send Messages** and **Send Messages in Threads**. `allowedMentions: { parse: [], users: [], roles: [], repliedUser: false }`. Persist `reply_text` on the job as well as `result_discord_message_id`. Make complete **idempotent** (store a completion nonce / Discord message id before retrying send).
 2. **Channel incoming webhooks** (`docs/discord-webhooks.md`): operational feed for `#sponsors`, `#opportunities`, `#speakers`, and proposed `#inbox`. Grok Bot POSTs here **without GitHub**. Morning digest + time-sensitive hello@ items go here instead of opening an issue for every FYI.
-3. **GitHub issues**: implementation work only. Do **not** assume Grok Bot has `gh` credentials in every environment; if GitHub is unavailable, still complete the Discord feed/reply and record `github_issue_url` as null. Do not put a PAT in this repo.
+3. **GitHub issues**: implementation work only. Do **not** assume Grok Bot has `gh` credentials. If GitHub is unavailable, still complete the Discord feed/reply and record `github_issue_url` as null. Allowlisted repo only; approval required; leadership GitHub default off. Do not put a PAT in this repo.
 
 Slash commands (`/event-status`, etc.) stay in the parked `agent-v1` series (#34).
 
@@ -355,7 +360,7 @@ Slash commands (`/event-status`, etc.) stay in the parked `agent-v1` series (#34
 
 Already required: Message Content, Server Members; View Channels + Read Message History.
 
-**Add for mention replies:** Send Messages, **Send Messages in Threads**, Embed Links (optional). Incoming webhooks do **not** use these; they are created per channel in Integrations → Webhooks.
+**Add for mention replies (required):** Send Messages **and Send Messages in Threads**, Embed Links (optional). Thread-origin jobs fail on delivery without the threads permission. Incoming webhooks do **not** use these; they are created per channel in Integrations → Webhooks.
 
 Restrict the bot to eboard channels at the Discord permission layer **and** via `channels.yml`.
 
@@ -369,6 +374,7 @@ Restrict the bot to eboard channels at the Discord permission layer **and** via 
 | `GROK_BOT_WEBHOOK_URL` | **Mac Mini** | Mini POSTs jobs+snippets outbound. HTTPS. |
 | `DISCORD_WEBHOOK_*` | **Grok Bot** secret store | Incoming webhooks for `#sponsors` / `#opportunities` / `#speakers` / `#inbox`. |
 | `DISCORD_GUILD_ID` | Mini | Snowflake. Don't commit real `channels.yml`. |
+| `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP` | Mini, localhost `/v1` only | Scoped HTTP. Namespace derived from which secret matched. **Not** a single shared token. |
 | `NIA_*` | Mini Doppler until deleted | Not Grok Bot. |
 | `NVIDIA_API_KEY` | leftover | Unused. Drop. |
 | SQLite | Mini disk | Club messages. Time Machine / local backup. |
@@ -387,13 +393,12 @@ Implementers should not blindly follow these:
 |---|---|
 | #1 `ready` → `clientReady` | Still valid. Tiny fix in `src/bot/client.ts`. |
 | #2 backup after Nia sync | Backup already runs nightly in `live.ts`. Wiring to Nia sync is moot if Nia is removed; backup after successful FTS index flush is the replacement. |
-| #3 schedule reconcile | **Done** in `src/crawler/live.ts` (`0 */N * * *`). Close it. |
+| #3 schedule reconcile | **Done** in `src/crawler/live.ts`. Owner close: #38. |
 | #4 `--channel` backfill flag | Still valid, independent. |
-| #5 thread attribution in markdown | **Mostly done** in PR #6 (`thread_id` / `thread_name`, separate thread files). Close or shrink. |
+| #5 thread attribution in markdown | **Done** in PR #6. Owner close: #38. |
 | #9 Nia-index pi-mono | Closed research; used `nia` CLI. Do not revive Nia indexing. |
 | #14 resumeBackfill + Nia flush | Catch-up pagination is still useful; **drop** `flushNamespace` / Nia dirty. |
-| #15 `search_discord` via Nia | **Superseded** by ContextStore FTS. Keep namespace isolation + freshness. |
-| #10–#13, #16–#22 | In-process Pi agent / Drive / events / sandbox. Orthogonal. Do not block Nia-exit on them. If Cursor/Grok-via-queue ships, #10's mention handler must not fight the job queue. |
+| #10–#13, #15, #19 | **Do not implement.** Owner close/retitle: [#38](https://github.com/sean-lai-sh/morpheus/issues/38). |
 
 ---
 
@@ -401,15 +406,18 @@ Issue drafts (same text filed on GitHub) live in [`docs/issues/`](issues/). Trac
 
 ## 7. Implementation order (one cutover sequence)
 
-Do **not** delete Nia (#28) until Mini can retrieve SQLite context and dispatch it to Grok. **AWS as host is stale.** Order:
+**#28 is last.** Nia stays as rollback until Mini can retrieve SQLite context and POST it to Grok. Do not delete the vendor earlier. AWS-as-host is stale.
 
-1. **#26** ContextStore + FTS5 (poll cursor = monotonic `indexed_at` / change seq, not `created_at` — edits/deletes must appear).
-2. **#29** mention → jobs.
+1. **#26** ContextStore + FTS5 (poll cursor = monotonic `indexed_at` / change seq, not `created_at`).
+2. **#29** mention → jobs (role gate, caps, `namespaceForRow`, trigger independent of ingest).
 3. **#37** Mini POST `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL` (outbound; no public inbound IP).
-4. **#30** idempotent official-bot replies.
-5. **#36 webhooks** — operational feed; can land in parallel with 2–4.
-6. **#31** GitHub issues **only** for implementation; optional; fail open if `gh` is missing.
-7. **#27** HTTP `/v1` **localhost on Mini** (optional for on-box tools; **not** Grok’s internet path).
-8. **#28 last** — flag off Nia, soak, then delete `src/nia/`.
+4. **#30** idempotent official-bot replies (`claimed_by` mandatory; **Send Messages in Threads**).
+5. **#36** Discord incoming webhooks `#sponsors` `#opportunities` `#speakers` `#inbox` (parallel with 2–4).
+6. **#31** GitHub **only** for implementation; optional; **fail open** if `gh` is missing; allowlisted repo; approval required.
+7. **#27** HTTP `/v1` **localhost on Mini**, **scoped tokens** (optional for on-box tools; **not** Grok’s internet path).
+8. **#35** `/v1/events` after PR #23 events half + `grok_bot` in `EVENT_SOURCE_TYPES`.
+9. **#28 last** — flag off Nia, soak, then delete `src/nia/`.
+
+Use relative in-repo links (`docs/context-layer.md`), not `blob/cursor/nia-migration-plan-9afa/...` (those 404 after branch delete). Filed GitHub issue bodies that already pin the branch need an owner edit.
 
 Markdown export (`appendBlock`) can stay until #28 so a rollback to Nia is possible; do not build new retrieval on it.

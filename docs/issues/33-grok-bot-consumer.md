@@ -12,7 +12,7 @@ Name the **consumer** so later Cursor slices do not rebuild the May 2026 in-proc
 2. Mini reads SQLite context and **POSTs** `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL` (outbound only; no public inbound IP).
 3. Grok Bot (one-shot) then:
    - posts **operational FYIs** to Discord incoming webhooks (`#sponsors` / `#opportunities` / `#speakers` / `#inbox`)
-   - opens a **GitHub issue** only for implementation work, and only if GitHub credentials exist
+   - opens a **GitHub issue** only for implementation work, only if GitHub credentials exist **and** policy passes (allowlisted repo, approval). **Fail open** if `gh` is missing.
 4. Grok Bot never receives `DISCORD_BOT_TOKEN`.
 
 Leadership (`isolated: true`) jobs: Discord feed allowed; GitHub issue posting **off** by default.
@@ -29,9 +29,9 @@ Leadership (`isolated: true`) jobs: Discord feed allowed; GitHub issue posting *
 
 ## Implement in this order
 
-#26 → #29 + Mini dispatch (#37) → webhooks (#36) → #31 (GitHub optional) → #28 last.
+**One sequence** (`docs/context-layer.md` §7): #26 → #29 + #37 → #30 → #36 (parallel) → #31 (GitHub optional, fail open) → #27 scoped localhost `/v1` → #35 (`grok_bot` enum) → **#28 last**.
 
-`/v1` (#27) is localhost-on-Mini only; Grok does not poll it over the internet.
+`/v1` (#27) is localhost-on-Mini only; Grok does not poll it over the internet. Namespace comes from scoped tokens, not a client query param.
 
 ## Docs
 

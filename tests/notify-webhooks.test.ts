@@ -76,8 +76,13 @@ describe("postFeed", () => {
       },
     );
     expect(r.posted).toBe(true);
-    const body = captured as { content: string; allowed_mentions: { parse: string[] } };
+    const body = captured as {
+      content: string;
+      allowed_mentions: { parse: string[]; users: string[]; roles: string[] };
+    };
     expect(body.allowed_mentions.parse).toEqual([]);
+    expect(body.allowed_mentions.users).toEqual([]);
+    expect(body.allowed_mentions.roles).toEqual([]);
     expect(body.content).toContain("OUTBOUND");
   });
 });

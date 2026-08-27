@@ -22,7 +22,7 @@ Do **not** have Grok Bot poll Mini `/v1` over the internet. Do **not** run `bun 
 }
 ```
 
-Cap snippet count and bytes. Do not include `DISCORD_BOT_TOKEN` or channel webhook URLs in the payload.
+Cap snippet count and bytes (`capGrokPayload` in `src/notify/grok-dispatch.ts`). Do not include `DISCORD_BOT_TOKEN` or channel webhook URLs in the payload.
 
 ## After Grok receives it
 

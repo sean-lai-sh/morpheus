@@ -45,4 +45,25 @@ describe("dispatchGrokJob", () => {
     expect(r.dispatched).toBe(true);
     expect(captured).toEqual(payload);
   });
+
+  test("caps job content and snippet count/bytes", async () => {
+    const url = "https://example.com/grok-routine";
+    let captured: { job: { content: string }; snippets: Array<{ content: string }> } | undefined;
+    await dispatchGrokJob(
+      {
+        job: { id: "j2", content: "x".repeat(8000) },
+        snippets: Array.from({ length: 20 }, () => ({ content: "y".repeat(5000) })),
+      },
+      {
+        env: { GROK_BOT_WEBHOOK_URL: url },
+        poster: async (_u, body) => {
+          captured = body as typeof captured;
+          return { ok: true, status: 200 };
+        },
+      },
+    );
+    expect(captured?.job.content.length).toBe(4000);
+    expect(captured?.snippets.length).toBe(12);
+    expect(captured?.snippets.every((s) => s.content.length === 1200)).toBe(true);
+  });
 });

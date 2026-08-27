@@ -72,7 +72,7 @@ Time-sensitive hello@ vs morning digest: **same webhooks**. Prefix `URGENT` vs `
 ## Payload rules (untrusted text)
 
 - Cap content at 2000 characters (Discord limit); truncate with a marker.
-- `allowed_mentions: { parse: [] }` so hello@ bodies cannot `@everyone`.
+- `allowed_mentions: { parse: [], users: [], roles: [] }` so hello@ bodies cannot `@everyone` or ping roles/users.
 - Never send `DISCORD_BOT_TOKEN`, `GROK_BOT_WEBHOOK_URL`, or channel webhook URLs in the message body.
 
 ## Code in this PR

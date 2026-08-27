@@ -16,32 +16,34 @@ Do **not** treat this issue as a rewrite. Land the slices below in separate PRs.
 
 | Issue | What to do |
 |---|---|
-| #3 schedule reconcile | Already implemented in `src/crawler/live.ts`. Close it. |
-| #5 thread attribution | Largely done in PR #6 (`thread_id` / `thread_name`, per-thread files). Close or shrink. |
+| #3 schedule reconcile | Already implemented in `src/crawler/live.ts`. Owner close: #38. |
+| #5 thread attribution | Largely done in PR #6. Owner close: #38. |
+| #10 mention handler | **Do not implement.** Parked. Owner close: #38. |
+| #15 search_discord via Nia | **Do not implement.** Superseded by #26. Owner close: #38. |
 | #2 backup after Nia sync | Nightly backup already exists. Do not wire new work to Nia success. |
 | #14 resumeBackfill | Keep pagination; **drop** Nia `flushNamespace`. |
-| #15 search_discord via Nia | **Superseded** by slice A (FTS ContextStore). Keep namespace isolation + freshness. |
-| #10 mention handler | Must not fight slice D's job queue. Coordinate or gate behind flags. |
 | #9 Nia-index pi-mono | Closed. Do not revive Nia indexing. |
 
 ## Checklist (implementation slices)
 
 Each child issue is written so a Cursor agent can implement it without this chat.
 
-- [ ] **A.** `ContextStore` + SQLite FTS5, namespace-isolated, ingest writes the index (#26)
-- [ ] **D.** Discord mention / reply-to-bot → `jobs` table (#29)
+- [ ] **A.** `ContextStore` + SQLite FTS5 (#26)
+- [ ] **D.** Discord mention → `jobs` (role gate, caps) (#29)
 - [ ] **Mini dispatch** POST `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL` (#37)
-- [ ] **E.** Idempotent Discord replies from the official bot (#30)
-- [ ] **Webhooks** operational feed `#sponsors` / `#opportunities` / `#speakers` / `#inbox` (Grok Bot posts; no GitHub for FYIs) (#36)
-- [ ] **F.** GitHub issues for **implementation work only** (fail open if `gh` missing) (#31)
-- [ ] **B.** HTTP `/v1` **localhost on Mini only** (#27) — not the Grok internet path
+- [ ] **E.** Idempotent Discord replies; **Send Messages in Threads**; `claimed_by` mandatory (#30)
+- [ ] **Webhooks** `#sponsors` / `#opportunities` / `#speakers` / `#inbox` (#36)
+- [ ] **F.** GitHub implementation-only; fail open if `gh` missing; allowlisted repo; approval (#31)
+- [ ] **B.** HTTP `/v1` localhost Mini, **scoped tokens** (#27) — namespace derived server-side
+- [ ] **#35** events HTTP after PR #23 + `grok_bot` enum
 - [ ] **C. last** Feature-flag Nia off, then delete `src/nia/` (#28)
 
 ## Constraints
 
 - Official Discord bot only (`DISCORD_BOT_TOKEN` on the **Mac Mini**). No user-token / self-bot.
-- Do not commit tokens, Doppler values, or a real `config/channels.yml`.
+- Do not commit tokens, Doppler values, or a real `config/channels.yml`. Use relative links (`../context-layer.md`), not `blob/cursor/...` branch URLs.
 - Grok Bot gets `DISCORD_WEBHOOK_*` only. Mini gets `DISCORD_BOT_TOKEN` + `GROK_BOT_WEBHOOK_URL`. Never swap those.
+- HTTP uses **scoped** tokens; namespace is derived server-side. A client-supplied namespace is not auth.
 - Leadership (`isolated: true`) must never leak into general search/read/jobs.
 - Markdown export may stay until C ships; do not build new retrieval on it.
 

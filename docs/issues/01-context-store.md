@@ -9,7 +9,7 @@ Read [`docs/context-layer.md`](../context-layer.md) §3 for the full interface. 
 ## Files to create / modify
 
 - `src/context/types.ts` (new) — `Namespace`, `IndexDocument`, `SearchQuery`, `SearchHit`, `PollPage`, `ContextStore` as specified in `docs/context-layer.md` §3.
-- `src/context/namespace.ts` (new) — `namespaceForChannel(channelId): Namespace` using `getChannel(id)?.isolated`.
+- `src/context/namespace.ts` (new) — `namespaceForRow(row): Namespace | null`. Use `effectiveChannelId(row)` / `parent_channel_id` then `getChannel(parent)?.isolated`. **Do not** `namespaceForChannel(channelId)` that treat unknown ids as `general` — thread ids are never in `channels.yml`, so leadership threads would fail open. Callers **must not enqueue or index** when the result is `null`.
 - `src/context/store.ts` (new) — SQLite implementation.
 - `src/storage/db.ts` — FTS5 virtual table + namespace-safe query helpers. Migration must be idempotent.
 - `src/bot/ingest.ts` — after successful upsert/delete, call `contextStore.index` (or `indexFromRow`). Keep `appendBlock` for now (Nia rollback).
@@ -42,7 +42,7 @@ Use an FTS content-sync trigger or explicit rebuild in `index()` — explicit is
 
 ## `ContextStore` behavior
 
-- `index(doc)`: upsert FTS + rely on existing `messages` row (ingest already wrote it). If `doc.namespace` disagrees with `namespaceForChannel(doc.channelId)`, throw.
+- `index(doc)`: upsert FTS + rely on existing `messages` row (ingest already wrote it). If `doc.namespace` disagrees with `namespaceForRow(row)`, throw.
 - `search(q)`: FTS match on `content`, `WHERE namespace = ?`, optional `channelHint` (id exact or name via `channels.yml`), optional `threadId`, time bounds, `LIMIT`. Return snippet (FTS `snippet()` or truncated content).
 - `readMessage(id, namespace)`: `SELECT` from `messages` joined with namespace; **return null** if the row exists in the other namespace (do not  leak).
 - `readChannelWindow`: chronological page, same namespace check (channel must belong to that namespace).
@@ -50,7 +50,7 @@ Use an FTS content-sync trigger or explicit rebuild in `index()` — explicit is
 
 ## Namespace isolation (hard requirement)
 
-A leadership-only message (`isolated: true` channel, e.g. `#leadership-team`) must **never** appear in `search` / `readMessage` / `poll` with `namespace: "general"`, even with a perfect keyword match. Add a negative test.
+A leadership-only message (`isolated: true` **parent** channel, including threads) must **never** appear in `search` / `readMessage` / `poll` with `namespace: "general"`, even with a perfect keyword match. Add a negative test for a **thread** whose `channel_id` is the thread snowflake (not in `channels.yml`) and whose `parent_channel_id` is leadership.
 
 ## Freshness (minimal)
 

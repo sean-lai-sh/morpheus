@@ -44,7 +44,7 @@ Optional follow-up (not required here): remove unused `openai` dependency and `N
 
 ## Acceptance criteria
 
-- [ ] `bun run live` with no `NIA_*` env starts (given Discord vars + `MORPHEUS_API_TOKEN` if HTTP v1 requires it).
+- [ ] `bun run live` with no `NIA_*` env starts (given Discord vars + scoped `MORPHEUS_API_TOKEN_*` if localhost `/v1` requires them).
 - [ ] `rg -i nia src scripts` has no remaining runtime references (docs history is fine).
 - [ ] `bun test` / `tsc` pass.
 - [ ] README no longer tells operators to run `bun run register-nia`.

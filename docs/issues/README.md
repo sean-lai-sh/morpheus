@@ -6,7 +6,7 @@ These markdown files are the implementation-slice bodies for the Nia-exit / Disc
 |---|---|---|
 | `00-epic.md` | Tracking epic + checklist | #25 |
 | `01-context-store.md` | FTS5 ContextStore | #26 |
-| `02-http-api.md` | `/v1` HTTP **localhost on Mini** (not Grok internet) | #27 |
+| `02-http-api.md` | `/v1` localhost Mini; **scoped tokens** | #27 |
 | `03-remove-nia.md` | Flag off + delete Nia | #28 |
 | `04-jobs-enqueue.md` | Mentions → jobs table | #29 |
 | `05-jobs-claim-reply.md` | Claim/complete + Discord replies | #30 |
@@ -17,5 +17,6 @@ These markdown files are the implementation-slice bodies for the Nia-exit / Disc
 | `35-events-http.md` | localhost `/v1/events` (optional; not Grok poll) | #35 |
 | `36-discord-webhooks.md` | Operational feed webhooks | #36 |
 | `37-mini-dispatch-grok.md` | Mini POST to GROK_BOT_WEBHOOK_URL | #37 |
+| `38-owner-close-stale.md` | Owner must close #10 #15 #19 #3 #5 | #38 |
 
 Do not put secrets in these files.

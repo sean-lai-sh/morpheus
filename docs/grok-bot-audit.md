@@ -79,13 +79,13 @@ No commits vs `main`. Dead name, not a hidden architecture.
 | Issue | Why it fights the loop |
 |---|---|
 | #2 backup after Nia sync | Nia-shaped. Nightly backup already exists in `live.ts`. |
-| #3 reconcile cron | **Already done** in `src/crawler/live.ts`. Close. |
-| #5 thread markdown attribution | **Mostly done** in PR #6. Close. |
+| #3 reconcile cron | **Already done** in `src/crawler/live.ts`. Owner close: #38. |
+| #5 thread markdown attribution | **Mostly done** in PR #6. Owner close: #38. |
 | #9 Nia-index pi-mono | Closed; used `nia` CLI. Do not revive. |
-| #10 in-process agent scaffold + mention reply | **Fights #29.** Mention must enqueue a job, not `runAgentTurn`. |
-| #13 AbortController router | In-process concurrency. Job CAS + cancel-queued-in-channel replaces it. |
-| #15 search_discord via **Nia** | **Superseded by #26.** Namespace isolation + FTS remain. |
-| #19 sandbox runtime + Discord attachments | In-process coding agent. Grok Bot is the coding agent. |
+| #10 in-process agent scaffold + mention reply | **Do not implement.** Fights #29. Owner close: #38. |
+| #13 AbortController router | **Do not implement.** Job CAS replaces it. Do not cancel other users' jobs. Owner close: #38. |
+| #15 search_discord via **Nia** | **Do not implement.** Superseded by #26. Owner close: #38. |
+| #19 sandbox runtime + Discord attachments | **Do not implement.** Grok Bot is the coding agent. Owner close: #38. |
 | #20–#21 skills + `/event-status` entering Pi | Slash can later **enqueue a job** for Grok Bot; do not build a second agent runtime first. |
 
 ### Park (maybe later, not Grok Bot MVP)
@@ -102,11 +102,12 @@ No commits vs `main`. Dead name, not a hidden architecture.
 
 ## What Grok Bot implementation slices assume
 
-Every new slice must assume all three:
+Every new slice must assume:
 
-1. **Official Discord bot** (`discord.js` + `DISCORD_BOT_TOKEN` on the **Mac Mini** only). No self-bot, no user token.
-2. **Morpheus is SQLite on the Mini.** Mini POSTs `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL`. Grok Bot does not poll Mini over the internet (no public inbound IP). `/v1` if present is localhost-only.
-3. **Grok Bot** posts operational FYIs to Discord incoming webhooks (`#sponsors` / `#opportunities` / `#speakers` / `#inbox`) and files GitHub issues **only** for implementation work. Grok Bot does **not** host Morpheus. Leadership jobs do not open public GitHub issues by default.
+1. **Official Discord bot** (`discord.js` + `DISCORD_BOT_TOKEN` on the **Mac Mini** only). No self-bot. **Send Messages in Threads** required for thread replies.
+2. **Morpheus is SQLite on the Mini.** Mini POSTs capped `{ job, snippets }` to `GROK_BOT_WEBHOOK_URL`. Grok does not poll Mini over the internet. `/v1` if present is localhost-only with **scoped** tokens (`MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP`); namespace is derived server-side.
+3. **Grok Bot** posts FYIs to Discord incoming webhooks (`#sponsors` / `#opportunities` / `#speakers` / `#inbox`) and files GitHub issues **only** for implementation work, **fail open** without `gh`, allowlisted repo, approval required. Leadership GitHub default off. Job content is untrusted.
+4. **Do not implement #10 / #13 / #15 / #19.** Owner close: [#38](https://github.com/sean-lai-sh/morpheus/issues/38). Meta #34 is not enough while those stay open.
 
 Do not add `ANTHROPIC_API_KEY` / `AGENT_MODEL` / pi-agent-core to the MVP path.
 

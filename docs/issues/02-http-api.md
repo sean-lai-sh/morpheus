@@ -1,58 +1,72 @@
-Parent: #25. Depends on #26.
+Parent: #25. Depends on #26. Host: Mac Mini (`docs/hosting.md`). Bind **127.0.0.1**.
 
 ## Goal
 
-Expose the `ContextStore` from the FTS slice over HTTP for **on-box tools on the Mac Mini**. Bind to **127.0.0.1**. This is **not** the Grok Bot internet path: Mini has no public inbound IP, and Grok Bot must not poll `/v1` over the network. Live context for Grok is pushed outbound via `GROK_BOT_WEBHOOK_URL` ([#37](https://github.com/sean-lai-sh/morpheus/issues/37), [`docs/hosting.md`](../hosting.md)).
+Expose the `ContextStore` over HTTP for **on-box tools on the Mac Mini**. This is **not** the Grok Bot internet path (Mini has no public inbound IP; Grok receives context via `GROK_BOT_WEBHOOK_URL`, #37).
 
-AWS / Cursor cloud-agent VMs / Grok Bot’s shared computer are **not** hosts for this server.
+AWS / Cursor cloud-agent VMs / Grok Bot’s shared computer are **not** hosts.
 
-Depends on the ContextStore / FTS5 issue (#26). Read `docs/context-layer.md` §3 HTTP table, §5 secrets, and `docs/hosting.md`.
+## Auth: namespace is not a client parameter
 
-## Files to create / modify
+**A client-supplied `namespace` query/body field is not authorization.** One shared `MORPHEUS_API_TOKEN` plus `namespace=leadership` would let any holder read leadership. That fails the dual-Nia isolation we are replacing.
 
-- `src/http/server.ts` (new or expand `health.ts`) — routes below.
-- `src/http/auth.ts` (new) — Bearer compare. **Namespace is not auth.** Issue **scoped** tokens (`MORPHEUS_API_TOKEN_GENERAL` / `MORPHEUS_API_TOKEN_LEADERSHIP`) or a single token with an embedded scope. Derive `namespace` from the credential; ignore or 403 a client-supplied namespace that does not match. Negative tests: general token cannot read a leadership message id.
-- `.env.example` — document scoped tokens as empty placeholders. **Do not put a real value.**
-- `README.md` — how to curl the API.
-- `tests/http-v1.test.ts` (new) — use `Bun.serve` on an ephemeral port + temp DB.
+**Required model:**
 
-## Routes
+- Issue **scoped** credentials: `MORPHEUS_API_TOKEN_GENERAL` and `MORPHEUS_API_TOKEN_LEADERSHIP` (empty placeholders in `.env.example`; never commit values).
+- `src/http/auth.ts`: Bearer compare (`crypto.timingSafeEqual` on hashed or padded buffers). Map the matching token → `Namespace`. Unknown/missing token → **401**.
+- **Derive `namespace` server-side from the credential.** Ignore a client-supplied namespace, or **403** if it is present and does not match the token’s scope.
+- Job-scoped routes (later, #30): namespace comes from the **job row**, then must match the token’s scope. Never from `?namespace=`.
+- Do **not** use `DISCORD_BOT_TOKEN` as this bearer.
+
+## Negative tests (hard requirement)
+
+These test the **principal**, not the query string:
+
+- [ ] General token + `GET /v1/messages/:leadershipId` → **404** (even if the client also sends `namespace=leadership`).
+- [ ] General token + `POST /v1/search` body `{ query: "<exact leadership text>", namespace: "leadership" }` → **no leadership hits** (server uses general).
+- [ ] General token + `GET /v1/poll` cannot return leadership documents.
+- [ ] Leadership token cannot be used to complete a general job (#30), and vice versa.
+- [ ] No token → 401 on every `/v1/*` except `/health`.
+
+## Files
+
+- `src/http/server.ts` (expand `health.ts`) — bind `127.0.0.1`.
+- `src/http/auth.ts` — scoped tokens as above.
+- `.env.example` — `MORPHEUS_API_TOKEN_GENERAL=` and `MORPHEUS_API_TOKEN_LEADERSHIP=` empty.
+- `tests/http-v1.test.ts` — ephemeral `Bun.serve` + temp DB + **cross-scope negatives**.
+
+## Routes (namespace from token, not from the client)
 
 | Method | Path | Auth | Behavior |
 |---|---|---|---|
-| GET | `/health` | none | `{ ok, last_message_at, fts_count }`. **Do not** add message bodies. Drop or stop relying on Nia fields (`nia_dirty` is currently keyed on the wrong folder anyway). |
-| POST | `/v1/search` | Bearer | JSON body = `SearchQuery` without a client-chosen namespace (or namespace must match token scope). 400 on missing `query`. |
-| GET | `/v1/messages/:id?namespace=` | Bearer | 404 if missing **or** wrong namespace. |
-| GET | `/v1/channels/:channelId/messages?namespace=&after=&before=&limit=` | Bearer | Windowed read. 403/404 if channel is not in that namespace. |
-| GET | `/v1/poll?namespace=&cursor=&limit=` | Bearer | Incremental page. |
-
-All `/v1/*` except `/health`: missing/invalid token → **401**. Do not use Discord token as this bearer.
-
-Constant-time compare for the token (`crypto.timingSafeEqual` on hashed or padded buffers).
+| GET | `/health` | none | `{ ok, last_message_at, fts_count }`. No message bodies. No Nia fields once FTS freshness exists. |
+| POST | `/v1/search` | Bearer | JSON body = search text/filters **without** a client-chosen namespace. Server sets namespace from token. 400 on missing `query`. |
+| GET | `/v1/messages/:id` | Bearer | 404 if missing **or** not in the token’s namespace. |
+| GET | `/v1/channels/:channelId/messages` | Bearer | Windowed read. 403/404 if the channel (use `effectiveChannelId` / parent for threads) is not in the token’s namespace. |
+| GET | `/v1/poll?cursor=&limit=` | Bearer | Incremental page **in the token’s namespace only**. |
 
 ## Implementation notes
 
-- Reuse `startHealthServer` / `stopHealthServer` from `src/index.ts` live mode so one port (`HEALTH_PORT`) hosts both.
+- Reuse `startHealthServer` / `stopHealthServer` so `HEALTH_PORT` hosts both.
 - `limit` capped at 50.
 - Never return SQL errors to clients; log internally, 500.
-- CORS: default deny. Localhost-on-Mini only; not a public API.
-- Bind `127.0.0.1` (not `0.0.0.0`). Mini does not need a public inbound IP.
-- Do not read `data/discord/**/*.md` in these handlers.
+- CORS: default deny. Localhost-on-Mini only.
+- Bind `127.0.0.1` (not `0.0.0.0`).
+- Do not read `data/discord/**/*.md`.
+- In-process `ContextStore` still takes `Namespace` as an argument (trusted caller). HTTP is the untrusted boundary.
 
 ## Out of scope
 
-- Job queue routes (`/v1/jobs`) — later slice.
-- Public TLS / reverse proxy / AWS load balancer (stale). Grok does not poll this over the internet.
-- Removing Nia syncer.
+- Job queue routes (`/v1/jobs`) — #30.
+- Public TLS / reverse proxy / AWS load balancer (stale).
+- Removing Nia.
 
 ## Acceptance criteria
 
-- [ ] No token → 401 on `/v1/search`.
-- [ ] Seeded general message is returned for `namespace=general` and omitted for `namespace=leadership`.
-- [ ] Leadership message id with `namespace=general` → 404.
+- [ ] Cross-scope negatives above all pass.
 - [ ] `/health` has no secrets and no Nia-only fields once FTS freshness exists.
-- [ ] README shows example `curl` with `$MORPHEUS_API_TOKEN` placeholder only.
+- [ ] README curl examples use `$MORPHEUS_API_TOKEN_GENERAL` placeholder only.
 
 ## Dependencies
 
-- ContextStore + FTS5 issue.
+- ContextStore + FTS5 (#26).

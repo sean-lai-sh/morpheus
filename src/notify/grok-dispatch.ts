@@ -32,6 +32,25 @@ export interface HttpsPoster {
   (url: string, body: unknown): Promise<{ ok: boolean; status: number }>;
 }
 
+const MAX_JOB_CONTENT = 4000;
+const MAX_SNIPPETS = 12;
+const MAX_SNIPPET_CHARS = 1200;
+
+/** Cap untrusted Discord text before Mini POSTs it to Grok. Never include tokens. */
+export function capGrokPayload(payload: GrokJobPayload): GrokJobPayload {
+  return {
+    ...payload,
+    job: {
+      ...payload.job,
+      content: payload.job.content.slice(0, MAX_JOB_CONTENT),
+    },
+    snippets: payload.snippets.slice(0, MAX_SNIPPETS).map((s) => ({
+      ...s,
+      content: s.content.slice(0, MAX_SNIPPET_CHARS),
+    })),
+  };
+}
+
 /**
  * Mini → Grok Bot: outbound POST of a job plus context snippets.
  * Grok Bot is the consumer; this does not run Morpheus on Grok's machine.
@@ -55,7 +74,7 @@ export async function dispatchGrokJob(
       });
       return { ok: res.ok, status: res.status };
     });
-  const result = await poster(url, payload);
+  const result = await poster(url, capGrokPayload(payload));
   if (!result.ok) {
     logger.error({ status: result.status }, "Grok Bot webhook dispatch failed");
   }
