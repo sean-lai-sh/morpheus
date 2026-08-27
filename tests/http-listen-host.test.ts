@@ -48,6 +48,9 @@ describe("resolveListenHost", () => {
     process.env.DISCORD_GUILD_ID = "123456789012345678";
     process.env.HEALTH_HOST = "0.0.0.0";
     expect(() => loadEnv()).toThrow(/all interfaces/);
+    resetEnvForTest();
+    process.env.HEALTH_HOST = "::0";
+    expect(() => loadEnv()).toThrow(/all interfaces/);
   });
 
   test("unset HEALTH_HOST defaults to 127.0.0.1 and never 0.0.0.0", () => {

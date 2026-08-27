@@ -40,7 +40,7 @@ const envSchema = z
         .string()
         .min(1)
         .default("127.0.0.1")
-        .refine((h) => h !== "0.0.0.0" && h !== "::" && h !== "*" && h !== "[::]", "must not bind all interfaces"),
+        .refine((h) => h !== "0.0.0.0" && h !== "::" && h !== "*" && h !== "[::]" && h !== "::0", "must not bind all interfaces"),
     ),
     MORPHEUS_API_TOKEN_GENERAL: z.preprocess(emptyToUndef, z.string().min(1).optional()),
     MORPHEUS_API_TOKEN_LEADERSHIP: z.preprocess(emptyToUndef, z.string().min(1).optional()),

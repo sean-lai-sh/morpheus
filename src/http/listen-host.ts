@@ -1,7 +1,7 @@
 import { loadEnv } from "../config.ts";
 
 function isWildcard(host: string): boolean {
-  return host === "0.0.0.0" || host === "::" || host === "[::]" || host === "*";
+  return host === "0.0.0.0" || host === "::" || host === "[::]" || host === "*" || host === "::0";
 }
 
 /**
