@@ -42,20 +42,31 @@ describe("resolveListenHost", () => {
     expect(resolveListenHost()).toBe("100.64.1.2");
   });
 
-  test("wildcard HEALTH_HOST is refused; binds 127.0.0.1", () => {
+  test("wildcard HEALTH_HOST is refused by loadEnv (never listen on 0.0.0.0)", () => {
     isolate();
     process.env.DISCORD_BOT_TOKEN = "bot-token";
     process.env.DISCORD_GUILD_ID = "123456789012345678";
     process.env.HEALTH_HOST = "0.0.0.0";
-    expect(resolveListenHost()).toBe("127.0.0.1");
+    expect(() => loadEnv()).toThrow(/all interfaces/);
   });
 
-  test("unset HEALTH_HOST does not bind 0.0.0.0", () => {
+  test("unset HEALTH_HOST defaults to 127.0.0.1 and never 0.0.0.0", () => {
     isolate();
     process.env.DISCORD_BOT_TOKEN = "bot-token";
     process.env.DISCORD_GUILD_ID = "123456789012345678";
-    const host = resolveListenHost();
-    expect(host).not.toBe("0.0.0.0");
-    expect(host === "127.0.0.1" || host.startsWith("100.")).toBe(true);
+    expect(loadEnv().HEALTH_HOST).toBe("127.0.0.1");
+    expect(resolveListenHost()).toBe("127.0.0.1");
+  });
+
+  test("MORPHEUS_API_TOKEN_* are consumed via loadEnv/zod", () => {
+    isolate();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.MORPHEUS_API_TOKEN_GENERAL = "tok-g";
+    process.env.MORPHEUS_API_TOKEN_LEADERSHIP = "tok-l";
+    const env = loadEnv();
+    expect(env.MORPHEUS_API_TOKEN_GENERAL).toBe("tok-g");
+    expect(env.MORPHEUS_API_TOKEN_LEADERSHIP).toBe("tok-l");
+    expect(env.HEALTH_HOST).toBe("127.0.0.1");
   });
 });

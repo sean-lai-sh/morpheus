@@ -1,7 +1,7 @@
 import { logger } from "../logger.ts";
 import { authorizeV1 } from "./auth.ts";
 import { contextStore, toFtsQuery } from "../context/store.ts";
-import { isForbiddenOsPath, normalizeIndexPath, parseIndexPath } from "../context/paths.ts";
+import { constrainIndexPath, parseIndexPath } from "../context/paths.ts";
 import type { Namespace } from "../context/types.ts";
 
 const SEARCH_LIMIT_MAX = 50;
@@ -35,16 +35,9 @@ async function readJsonBody(req: Request): Promise<Record<string, unknown> | nul
   }
 }
 
-function pathOutsideNamespace(path: string, namespace: Namespace): boolean {
-  const parsed = parseIndexPath(path);
-  if (!parsed) return true;
-  if (parsed.kind === "root") return false;
-  return parsed.namespace !== namespace;
-}
-
-function rejectPath(raw: string | null): Response | null {
+function rejectPath(raw: string | null, namespace: Namespace): Response | null {
   if (raw == null) return json({ error: "not found" }, 404);
-  if (isForbiddenOsPath(raw) || normalizeIndexPath(raw) == null) {
+  if (constrainIndexPath(raw, namespace) == null) {
     return json({ error: "not found" }, 404);
   }
   return null;
@@ -89,13 +82,14 @@ export async function handleV1(req: Request): Promise<Response> {
 
 function handleTree(url: URL, namespace: Namespace): Response {
   const raw = url.searchParams.get("path") ?? "/";
-  const bad = rejectPath(raw);
+  const bad = rejectPath(raw, namespace);
   if (bad) return bad;
-  if (pathOutsideNamespace(raw, namespace)) return json({ error: "not found" }, 404);
-  const parsed = parseIndexPath(raw);
+  const safe = constrainIndexPath(raw, namespace);
+  if (safe == null) return json({ error: "not found" }, 404);
+  const parsed = parseIndexPath(safe);
   if (!parsed) return json({ error: "not found" }, 404);
-  const nodes = contextStore.tree(raw, namespace).slice(0, TREE_LIMIT);
-  return json({ path: normalizeIndexPath(raw), nodes });
+  const nodes = contextStore.tree(safe, namespace).slice(0, TREE_LIMIT);
+  return json({ path: safe, nodes });
 }
 
 function handleSearch(url: URL, namespace: Namespace, body: Record<string, unknown>): Response {
@@ -108,10 +102,10 @@ function handleSearch(url: URL, namespace: Namespace, body: Record<string, unkno
   }
   const pathPrefix = typeof body.pathPrefix === "string" ? body.pathPrefix : undefined;
   if (pathPrefix != null) {
-    const bad = rejectPath(pathPrefix);
+    const bad = rejectPath(pathPrefix, namespace);
     if (bad) return bad;
-    if (pathOutsideNamespace(pathPrefix, namespace)) return json({ error: "not found" }, 404);
   }
+  const safePrefix = pathPrefix != null ? constrainIndexPath(pathPrefix, namespace) ?? undefined : undefined;
   const limitRaw = body.limit;
   const limit =
     typeof limitRaw === "number" && Number.isFinite(limitRaw)
@@ -120,7 +114,7 @@ function handleSearch(url: URL, namespace: Namespace, body: Record<string, unkno
   const hits = contextStore.search({
     query,
     namespace,
-    pathPrefix,
+    pathPrefix: safePrefix,
     limit,
     includeDeleted: false,
   });
@@ -130,12 +124,13 @@ function handleSearch(url: URL, namespace: Namespace, body: Record<string, unkno
 function handleRead(url: URL, namespace: Namespace): Response {
   const raw = url.searchParams.get("path");
   if (raw == null) return json({ error: "not found" }, 404);
-  const bad = rejectPath(raw);
+  const bad = rejectPath(raw, namespace);
   if (bad) return bad;
-  if (pathOutsideNamespace(raw, namespace)) return json({ error: "not found" }, 404);
-  const parsed = parseIndexPath(raw);
+  const safe = constrainIndexPath(raw, namespace);
+  if (safe == null) return json({ error: "not found" }, 404);
+  const parsed = parseIndexPath(safe);
   if (!parsed) return json({ error: "not found" }, 404);
-  const result = contextStore.readPath(raw, namespace);
+  const result = contextStore.readPath(safe, namespace);
   if (result == null) return json({ error: "not found" }, 404);
   if (Array.isArray(result)) {
     if (result.length === 0 && (parsed.kind === "message" || parsed.kind === "channel" || parsed.kind === "thread")) {
@@ -143,11 +138,11 @@ function handleRead(url: URL, namespace: Namespace): Response {
     }
     const first = result[0];
     if (first && typeof first === "object" && "kind" in first) {
-      return json({ path: normalizeIndexPath(raw), nodes: result });
+      return json({ path: safe, nodes: result });
     }
-    return json({ path: normalizeIndexPath(raw), documents: result });
+    return json({ path: safe, documents: result });
   }
-  return json({ path: normalizeIndexPath(raw), document: result });
+  return json({ path: safe, document: result });
 }
 
 function handleMessage(id: string, namespace: Namespace): Response {

@@ -5,7 +5,7 @@ import { resetChannelsForTest } from "../src/config.ts";
 import { withTempCwd, withTempDb } from "./helpers.ts";
 import { namespaceForRow, requireNamespace } from "../src/context/namespace.ts";
 import { contextStore, documentFromRow, ftsCount, indexFromRow, rebuildFts } from "../src/context/store.ts";
-import { isForbiddenOsPath, parseIndexPath } from "../src/context/paths.ts";
+import { isForbiddenOsPath, parseIndexPath, sanitizeIndexPath } from "../src/context/paths.ts";
 import { getMessage, markDeleted, setReactions, upsertMessage } from "../src/storage/messages.ts";
 import { reindexAll } from "../src/tasks/reindex.ts";
 
@@ -264,9 +264,9 @@ describe("seq poll (not created_at)", () => {
 describe("virtual paths", () => {
   test("rejects OS paths and ..", () => {
     expect(isForbiddenOsPath("/Users/sean")).toBe(true);
-    expect(isForbiddenOsPath("../")).toBe(true);
     expect(isForbiddenOsPath("~/src")).toBe(true);
     expect(isForbiddenOsPath("/data/discord/general")).toBe(true);
+    expect(sanitizeIndexPath("../")).toBeNull();
     expect(parseIndexPath("/Users/sean")).toBeNull();
     expect(parseIndexPath("../")).toBeNull();
   });

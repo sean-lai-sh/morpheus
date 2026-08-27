@@ -29,31 +29,109 @@ export type ParsedIndexPath =
       messageId: string;
     };
 
-/** True when the path looks like a Mini/OS path rather than an index path. */
+const OS_ROOTS = [
+  "/users",
+  "/home",
+  "/etc",
+  "/var",
+  "/tmp",
+  "/data",
+  "/private",
+  "/opt",
+  "/root",
+  "/mnt",
+  "/volumes",
+  "/system",
+  "/library",
+  "/proc",
+  "/dev",
+];
+
+/**
+ * Decode percent-encoding repeatedly so `%2e%2e` and `%252e%252e` become `..`.
+ * Malformed encoding → null (reject).
+ */
+export function decodeEncodedPath(raw: string): string | null {
+  let p = raw.trim();
+  for (let i = 0; i < 5; i++) {
+    if (/%[0-9a-fA-F]{2}/.test(p) === false) return p;
+    try {
+      const next = decodeURIComponent(p);
+      if (next === p) return p;
+      p = next;
+    } catch {
+      return null;
+    }
+  }
+  return p;
+}
+
+/** True after decode: Mini/OS/homedir/host paths, not index paths. */
 export function isForbiddenOsPath(path: string): boolean {
   const p = path.trim();
   if (p.includes("\0")) return true;
-  if (p.includes("..")) return true;
-  if (p === "~" || p.startsWith("~/") || p.includes("/~/") || p.startsWith("/~")) return true;
-  if (p === "/Users" || p.startsWith("/Users/") || p.toLowerCase().startsWith("/users/")) return true;
-  if (p === "/home" || p.startsWith("/home/")) return true;
-  if (p === "/etc" || p.startsWith("/etc/")) return true;
-  if (p === "/var" || p.startsWith("/var/")) return true;
-  if (p === "/tmp" || p.startsWith("/tmp/")) return true;
-  if (p === "/data" || p.startsWith("/data/")) return true;
-  if (p.includes("/data/discord")) return true;
+  if (p.includes("\\")) return true;
   if (/^[A-Za-z]:[\\/]/.test(p)) return true;
+  if (p === "~" || p.startsWith("~/") || p.startsWith("/~") || p.includes("/~/")) return true;
+  if (p.startsWith("//") || p.startsWith("\\\\")) return true;
+  const lower = p.toLowerCase();
+  for (const root of OS_ROOTS) {
+    if (lower === root || lower.startsWith(`${root}/`)) return true;
+  }
   return false;
 }
 
+/**
+ * POSIX-normalize an absolute index path: collapse slashes, resolve `.` and `..`.
+ * Returns null if the path is relative, would escape `/`, or is an OS/host path.
+ */
+export function posixNormalize(path: string): string | null {
+  if (path.includes("\0") || path.includes("\\")) return null;
+  if (!path.startsWith("/")) return null;
+  if (path.startsWith("//")) return null;
+  const out: string[] = [];
+  for (const part of path.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (out.length === 0) return null;
+      out.pop();
+      continue;
+    }
+    out.push(part);
+  }
+  return out.length === 0 ? "/" : `/${out.join("/")}`;
+}
+
+/**
+ * Decode → reject OS/host/`~`/`/Users` → POSIX normalize (resolve `..`) → reject OS again.
+ * Does not apply the token namespace prefix (see `constrainIndexPath`).
+ */
+export function sanitizeIndexPath(raw: string): string | null {
+  const decoded = decodeEncodedPath(raw);
+  if (decoded == null) return null;
+  if (isForbiddenOsPath(decoded)) return null;
+  const normalized = posixNormalize(decoded === "" ? "/" : decoded);
+  if (normalized == null) return null;
+  if (isForbiddenOsPath(normalized)) return null;
+  return normalized;
+}
+
+/** @deprecated use sanitizeIndexPath */
 export function normalizeIndexPath(path: string): string | null {
-  if (isForbiddenOsPath(path)) return null;
-  let p = path.trim();
-  if (p === "") p = "/";
-  if (!p.startsWith("/")) return null;
-  p = p.replace(/\/+/g, "/");
-  if (p.length > 1 && p.endsWith("/")) p = p.slice(0, -1);
-  return p;
+  return sanitizeIndexPath(path);
+}
+
+/**
+ * Token namespace is the access boundary. After sanitize, the path must be
+ * `/`, `/${namespace}`, or `/${namespace}/...`.
+ */
+export function constrainIndexPath(raw: string, namespace: Namespace): string | null {
+  const normalized = sanitizeIndexPath(raw);
+  if (normalized == null) return null;
+  if (normalized === "/") return "/";
+  const prefix = `/${namespace}`;
+  if (normalized === prefix || normalized.startsWith(`${prefix}/`)) return normalized;
+  return null;
 }
 
 export function channelIdsForNamespace(namespace: Namespace): string[] {
@@ -190,11 +268,11 @@ function parseChannelTail(
 }
 
 /**
- * Parse a virtual index path. Returns null for OS paths, `..`, or anything that
- * is not under `/general` or `/leadership`.
+ * Parse a virtual index path after sanitize. HTTP must call `constrainIndexPath`
+ * first so a general token cannot follow `/general/../leadership` into leadership.
  */
 export function parseIndexPath(raw: string): ParsedIndexPath | null {
-  const path = normalizeIndexPath(raw);
+  const path = sanitizeIndexPath(raw);
   if (path == null) return null;
   if (path === "/") return { kind: "root" };
 

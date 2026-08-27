@@ -191,6 +191,27 @@ describe("path isolation", () => {
     );
     expect(search.status).toBe(404);
   });
+
+  test("encoded .., ~, and host paths → 404", async () => {
+    expect((await get("/v1/fs/tree?path=%2e%2e", "tok-general")).status).toBe(404);
+    expect((await get("/v1/fs/tree?path=%252e%252e", "tok-general")).status).toBe(404);
+    expect(
+      (await get("/v1/fs/tree?path=/general/%2e%2e/%2e%2e/Users/sean", "tok-general")).status,
+    ).toBe(404);
+    expect((await get("/v1/fs/tree?path=/general/../leadership", "tok-general")).status).toBe(404);
+    expect((await get("/v1/fs/read?path=~/src", "tok-general")).status).toBe(404);
+    expect((await get("/v1/fs/read?path=/etc/passwd", "tok-general")).status).toBe(404);
+    expect(
+      (await post("/v1/fs/search", { query: "sponsors", pathPrefix: "%2e%2e" }, "tok-general")).status,
+    ).toBe(404);
+    expect(
+      (await post(
+        "/v1/fs/search",
+        { query: "sponsors", pathPrefix: "/general/../leadership" },
+        "tok-general",
+      )).status,
+    ).toBe(404);
+  });
 });
 
 describe("search HTTP", () => {

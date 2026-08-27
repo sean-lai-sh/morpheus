@@ -22,7 +22,7 @@ Paths name **indexed club context**, never OS files:
 /leadership/...
 ```
 
-- `..`, `/Users/…`, `~/…`, absolute Unix paths → **404**
+- Client `path` / `pathPrefix` is the general/leadership boundary. Decode encodings (`%2e%2e`, `%252e%252e`) → POSIX **normalize-then-prefix-check** → require `/` or `/${tokenNamespace}/…`. Reject encoded `..`, `/Users`, `~`, absolute host paths. `/general/../leadership` with a general token → **404**.
 - Markdown under `data/discord/` is a local Nia-era export, not the VFS
 - Personal Mini repos stay off this API
 

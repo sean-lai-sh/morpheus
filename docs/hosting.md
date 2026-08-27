@@ -47,7 +47,7 @@ Slice #0: [#39](https://github.com/sean-lai-sh/morpheus/issues/39). Live index t
 - Port: Morpheus HTTP (`HEALTH_PORT`) **only**
 - Auth: scoped `MORPHEUS_API_TOKEN_GENERAL` / `_LEADERSHIP` (namespace from the token)
 - ACL sketch: `tag:grok-bot` → `tag:morpheus` TCP that port. **No SSH.** No other ports.
-- Bind the HTTP server to the Tailscale address (not a public NIC, not a LAN-wide `0.0.0.0` without ACL).
+- Bind `HEALTH_HOST` (default `127.0.0.1` via `loadEnv()` / zod). Never listen on `0.0.0.0`. Set `HEALTH_HOST` to the Mini Tailscale IP for Grok. Not a public NIC.
 - Encrypted by Tailscale; do not publish a public hostname or AWS load balancer.
 
 **Not a filesystem mount.** Paths on `/v1/fs` are **index paths** (channels, threads, leadership notes). They are not `/Users/sean`, `~/src`, or `data/` on disk. Do not design SSHFS/NFS/SMB of the homedir.
