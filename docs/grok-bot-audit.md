@@ -104,4 +104,19 @@ Every new slice must assume all three:
 2. **Morpheus is HTTP + SQLite**, not `data/discord/**` and not Nia. Grok Bot polls `/v1/jobs`, `/v1/search`, `/v1/messages`, `/v1/poll` with `MORPHEUS_API_TOKEN`.
 3. **Grok Bot files GitHub issues** from Discord jobs (its GitHub identity). Morpheus posts Discord replies on `complete`. Leadership jobs do not open public GitHub issues by default.
 
-Do not add `ANTHROPIC_API_KEY` / `AGENT_MODEL` / pi-agent-core to the MVP path.
+---
+
+## Branch hygiene (2026-08-27)
+
+Inventory of `sean-lai-sh/morpheus` remotes after cleanup. Goal: next Cursor cloud agents launch onto a clean `cursor/*` namespace and are not tempted by leftover Nia/agent names.
+
+| Ref | Action |
+|---|---|
+| `main` | **Kept** |
+| `cursor/nia-migration-plan-9afa` + [PR #24](https://github.com/sean-lai-sh/morpheus/pull/24) | **Kept** — this analysis |
+| `claude/fix-issues-7-8-5VsDP` + [PR #23](https://github.com/sean-lai-sh/morpheus/pull/23) | **Kept** — not a `cursor/*` collision; events table is mergeable for Grok Bot. Sandbox half is parked in-tree (`docker/README.md`) |
+| `origin/agent` | **Deleted** — identical to `main`; abandoned name would look like an agent branch |
+| `origin/nia-index-overhaul` | **Deleted** — leftover of merged PR #6 (Nia filesystem dump). History remains on `main` |
+
+No other `cursor/*` remotes existed. No open PR was closed (the only other open PR is #23, which is worthwhile).
+
