@@ -28,14 +28,17 @@ POST /v1/jobs/:id/complete               → body {
 POST /v1/jobs/:id/fail                   → body { error: string } → status=failed, no Discord reply
 ```
 
-`complete` must:
+`complete` must be **idempotent**:
 
-1. Verify job is `claimed` (and optionally that `claimed_by` matches).
-2. Post `reply` via the **in-memory discord.js client** (live mode only). If the client is not logged in (unit tests), skip send but still persist when `DISCORD_POST_REPLIES=false`.
-3. Store `result_discord_message_id` when send succeeds.
-4. Set `status=completed`.
+1. Verify job is `claimed` **and** `claimed_by` matches the caller identity.
+2. Persist `reply_text` + a `completion_key` first (or in the same transaction as send metadata).
+3. Post `reply` via discord.js with `allowedMentions: { parse: [] }`. Split at 2000 chars. Needs **Send Messages in Threads** for thread jobs.
+4. Store `result_discord_message_id`. If Discord already accepted a send and the process dies, retry must **not** post a duplicate (look up completion_key / existing message id).
+5. Set `status=completed`.
 
-If Discord send fails, leave job `claimed` or `failed` with `error` — do not mark completed. Document which.
+If Discord send fails before any message id exists, leave job `claimed` with `error`. Cap outstanding jobs per author. Allowlist GitHub target repos if `github_issue_url` is later attached; do not create issues from untrusted Discord text without a policy check (#31).
+
+Claim CAS binds to `claimed_by`; a second worker with a different identity gets 409.
 
 ## Lease
 

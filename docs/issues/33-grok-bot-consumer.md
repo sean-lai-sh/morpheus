@@ -8,9 +8,10 @@ Name the **consumer** so later Cursor slices do not rebuild the May 2026 in-proc
 
 1. Official Discord bot (discord.js, `DISCORD_TOKEN` only on the Morpheus host). Mentions and replies-to-bot in allowlisted channels.
 2. Morpheus enqueues a **job** and keeps SQLite context. Exposes HTTP `/v1/search`, `/v1/messages`, `/v1/poll`, `/v1/jobs` with `MORPHEUS_API_TOKEN`.
-3. Grok Bot **polls** `/v1/jobs`, claims, searches/reads, then:
-   - opens a **GitHub issue** (Grok Bot's GitHub identity) with implementation suggestions when appropriate
-   - `POST /v1/jobs/:id/complete` with `{ reply, github_issue_url? }`
+3. Grok Bot **polls** `/v1/jobs` (or receives a job payload), searches/reads, then:
+   - posts **operational FYIs** to Discord **incoming webhooks** (`#sponsors` / `#opportunities` / `#speakers` / `#inbox`) — no GitHub required
+   - opens a **GitHub issue** only for implementation work, and only if GitHub credentials exist
+   - `POST /v1/jobs/:id/complete` with `{ reply, github_issue_url? }` for mention threads
 4. Morpheus posts the Discord reply. Grok Bot never receives `DISCORD_TOKEN`.
 
 Leadership (`isolated: true`) jobs: Discord reply allowed; GitHub issue posting **off** by default.

@@ -4,10 +4,10 @@ Discord intelligence bot for the club's eboard. Ingests messages into SQLite, re
 
 **Direction (2026-08):** Nia is a write-only derived index, not the source of truth. The consumer is **Cursor Grok Bot** (Tech@NYU): official Discord bot → Morpheus HTTP/SQLite → Grok Bot polls jobs and files GitHub issues.
 
-- Plan: [docs/context-layer.md](docs/context-layer.md)
+- Plan: [docs/context-layer.md](docs/context-layer.md) · webhooks: [docs/discord-webhooks.md](docs/discord-webhooks.md)
 - Issue/PR audit vs Grok Bot: [docs/grok-bot-audit.md](docs/grok-bot-audit.md)
 - Grok Bot spec: [#33](https://github.com/sean-lai-sh/morpheus/issues/33) · park old agent-v1: [#34](https://github.com/sean-lai-sh/morpheus/issues/34)
-- Slices: [#32](https://github.com/sean-lai-sh/morpheus/issues/32) index · [#26](https://github.com/sean-lai-sh/morpheus/issues/26) FTS → [#27](https://github.com/sean-lai-sh/morpheus/issues/27) HTTP → [#28](https://github.com/sean-lai-sh/morpheus/issues/28) delete Nia → [#29](https://github.com/sean-lai-sh/morpheus/issues/29) mention jobs → [#30](https://github.com/sean-lai-sh/morpheus/issues/30) replies → [#31](https://github.com/sean-lai-sh/morpheus/issues/31) agent poll / GitHub
+- Slices: [#32](https://github.com/sean-lai-sh/morpheus/issues/32) index · FTS → HTTP → jobs → replies · operational feed: webhooks (`bun run post-feed`) · GitHub only for implementation
 
 
 ## How Nia indexing works

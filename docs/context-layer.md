@@ -2,7 +2,7 @@
 
 Investigation of https://github.com/sean-lai-sh/morpheus (main @ `291a3ef`, after PR #6 `nia-index-overhaul`). This document is the source of truth for the Nia-exit and Discord-entry work. It is based on the current tree, not on earlier guesses.
 
-**Filed issues:** tracking [#25](https://github.com/sean-lai-sh/morpheus/issues/25) · Grok Bot consumer [#33](https://github.com/sean-lai-sh/morpheus/issues/33) · park agent-v1 [#34](https://github.com/sean-lai-sh/morpheus/issues/34) · index [#32](https://github.com/sean-lai-sh/morpheus/issues/32) · [#26](https://github.com/sean-lai-sh/morpheus/issues/26)–[#31](https://github.com/sean-lai-sh/morpheus/issues/31) slices · events HTTP [#35](https://github.com/sean-lai-sh/morpheus/issues/35). Analysis PR: [#24](https://github.com/sean-lai-sh/morpheus/pull/24).
+**Filed issues:** tracking [#25](https://github.com/sean-lai-sh/morpheus/issues/25) · Grok Bot [#33](https://github.com/sean-lai-sh/morpheus/issues/33) · webhooks [#36](https://github.com/sean-lai-sh/morpheus/issues/36) · park agent-v1 [#34](https://github.com/sean-lai-sh/morpheus/issues/34). Analysis PR: [#24](https://github.com/sean-lai-sh/morpheus/pull/24).
 
 **Corrections vs. the investigation brief**
 
@@ -215,7 +215,8 @@ export interface SearchHit {
 }
 
 export interface PollPage {
-  cursor: string;             // opaque; v1 = last seen created_at + id
+  cursor: string;             // opaque; v1 = last seen indexed_at/change_seq + id
+                              // NOT created_at — edits/deletes must still poll out
   documents: IndexDocument[];
 }
 
@@ -313,6 +314,8 @@ CREATE TABLE jobs (
   claimed_by TEXT,
   claimed_at INTEGER,
   result_discord_message_id TEXT,
+  reply_text TEXT,                     -- persist what we posted (audit / retry)
+  completion_key TEXT UNIQUE,          -- idempotent complete (Discord snowflake or hash)
   github_issue_url TEXT,
   error TEXT,
   created_at INTEGER NOT NULL,
@@ -324,16 +327,21 @@ Claim is compare-and-swap (`queued` → `claimed` with a lease, e.g. 10 minutes)
 
 ### Outbound
 
-- **Discord reply:** `channel.send` / `message.reply` via the already-logged-in client. Split at Discord's 2000-char limit. The complete-job handler runs **in the bot process** so the agent never holds `DISCORD_TOKEN`.
-- **GitHub issues:** prefer the **Cursor/Grok agent** opening issues with its existing GitHub identity (implementation suggestions, checklists). Optionally Morpheus can open issues as a GitHub App so the actor is the club bot — only if product wants that. Do not put a PAT in the repo. Env name if needed later: `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` or `GITHUB_TOKEN`, injected via Doppler, never committed.
+Three different outputs. Do not collapse them.
 
-Slash commands (`/event-status`, etc.) stay in the existing `agent-v1` series and are out of scope for the Nia-exit slices.
+1. **Official bot reply** (`message.reply` in the Morpheus process, #30): answer the person who @mentioned the bot. Needs **Send Messages** and **Send Messages in Threads**. `allowedMentions: { parse: [] }`. Persist `reply_text` on the job as well as `result_discord_message_id`. Make complete **idempotent** (store a completion nonce / Discord message id before retrying send).
+2. **Channel incoming webhooks** (`docs/discord-webhooks.md`): operational feed for `#sponsors`, `#opportunities`, `#speakers`, and proposed `#inbox`. Grok Bot POSTs here **without GitHub**. Morning digest + time-sensitive hello@ items go here instead of opening an issue for every FYI.
+3. **GitHub issues**: implementation work only. Do **not** assume Grok Bot has `gh` credentials in every environment; if GitHub is unavailable, still complete the Discord feed/reply and record `github_issue_url` as null. Do not put a PAT in this repo.
+
+Slash commands (`/event-status`, etc.) stay in the parked `agent-v1` series (#34).
 
 ### Permissions (Discord Developer Portal)
 
-Already required: Message Content, Server Members; View Channel + Read Message History.
+Already required: Message Content, Server Members; View Channels + Read Message History.
 
-**Add for replies:** Send Messages, Read Message History (already), Embed Links (optional). For slash commands later: `applications.commands`. Restrict the bot to eboard channels at the Discord permission layer **and** via `channels.yml`.
+**Add for mention replies:** Send Messages, **Send Messages in Threads**, Embed Links (optional). Incoming webhooks do **not** use these; they are created per channel in Integrations → Webhooks.
+
+Restrict the bot to eboard channels at the Discord permission layer **and** via `channels.yml`.
 
 ---
 
@@ -341,18 +349,15 @@ Already required: Message Content, Server Members; View Channel + Read Message H
 
 | Item | Where it lives | Notes |
 |---|---|---|
-| `DISCORD_TOKEN` | Server env (Doppler). Never git. | Required on the always-on gateway host only. Cursor agents must **not** get this. |
-| `DISCORD_GUILD_ID` | Server env | Snowflake, not a secret, but don't commit the real `channels.yml`. |
-| `NIA_*` | Doppler today | Remove after cutover. Do not add to Cursor agent env. |
+| `DISCORD_TOKEN` | Persistent Morpheus host env (Doppler). Never git. | Gateway only. **Not** Grok Bot, **not** a Cursor cloud-agent VM (those exit). |
+| `DISCORD_WEBHOOK_*` | Grok Bot secret store and/or Morpheus Doppler | Incoming webhook URLs for `#sponsors` / `#opportunities` / `#speakers` / `#inbox`. Token is in the URL path. |
+| `DISCORD_GUILD_ID` | Morpheus host env | Snowflake, not a secret, but don't commit the real `channels.yml`. |
+| `NIA_*` | Doppler today | Remove after cutover. Do not add to Grok Bot env. |
 | `NVIDIA_API_KEY` | Doppler leftover | Unused. Drop; do not document as required. |
-| `MORPHEUS_API_TOKEN` | Server env (new) | Bearer for `/v1/*`. Cursor agent gets this, not the Discord token. |
-| SQLite + WAL | Persistent volume on the bot host | Contains club message text. Not public. Not in git (`data/` gitignored). |
-| `data/discord/**` markdown | Same volume, optional after migration | Same sensitivity as the DB. |
-| `config/channels.yml` | Bot host (gitignored) | Channel snowflakes. Example file is committed. |
-| Doppler CLI | Dev laptops / bot host | Production can use a Doppler service token or native env; do not require Doppler inside Cursor Cloud Agents. |
-| Gateway process | **Always-on server** | Discord bots cannot be a sleeping serverless function. |
-| Cursor/Grok agent | Ephemeral | Polls `/v1/jobs`, searches `/v1/search`, posts results back. No local `data/`. |
-| `/health` | Public on HEALTH_PORT | Keep it non-sensitive. |
+| `MORPHEUS_API_TOKEN` | Morpheus host. Prefer **scoped** tokens (`general` vs `leadership`) rather than one token plus a client-supplied namespace. | Namespace is **not** auth. Derive from the credential; negative tests for cross-scope reads. |
+| SQLite + WAL | Persistent volume on the Morpheus host | Club message text. Not public. Not in git. |
+| Gateway process | **Persistent host** (always-on). Not a Cursor cloud-agent VM. | Discord gateway outbound WebSocket. |
+| Grok Bot | Ephemeral consumer | Posts to **incoming webhooks** for FYIs; GitHub only for implementation. Does not host Morpheus. |
 
 Single-process SQLite is fine for one bot replica. Multiple ingest replicas would need Postgres; do not split until you have to.
 
@@ -378,15 +383,16 @@ Implementers should not blindly follow these:
 
 Issue drafts (same text filed on GitHub) live in [`docs/issues/`](issues/). Tracking epic: **#25**. PR: **#24**.
 
-## 7. Implementation order
+## 7. Implementation order (one cutover sequence)
 
-Filed on `sean-lai-sh/morpheus` (bodies also in `docs/issues/`):
+Do **not** delete Nia (#28) until search HTTP is serving Grok Bot. Order:
 
-1. **#26** ContextStore + FTS5 + namespace isolation + tests (no HTTP yet; ingest writes the index).
-2. **#27** Authenticated HTTP `/v1/search|messages|poll` on the existing Bun server.
-3. **#28** Feature-flag Nia syncer off; stop requiring Nia env; fix `/health`; then delete `src/nia/`.
-4. **#29** `jobs` table + mention/reply enqueue (no LLM).
-5. **#30** Job claim/complete HTTP + Discord reply posting in-process.
-6. **#31** Document Cursor/Grok poll loop + optional GitHub issue posting (agent-side).
+1. **#26** ContextStore + FTS5 (poll cursor = monotonic `indexed_at` / change seq, not `created_at` — edits/deletes must appear).
+2. **#27** HTTP `/v1` with **scoped** credentials (namespace derived server-side).
+3. **#29** mention → jobs.
+4. **#30** claim/complete + idempotent bot replies.
+5. **Webhooks** (`docs/discord-webhooks.md`) — operational feed; can land in parallel with 3–4.
+6. **#31** GitHub issues **only** for implementation; optional; fail open if `gh` is missing.
+7. **#28 last** — flag off Nia, soak, then delete `src/nia/`.
 
-Markdown export (`appendBlock`) can stay until #28 so a rollback to Nia is possible; do not build new features on it.
+Markdown export (`appendBlock`) can stay until #28 so a rollback to Nia is possible; do not build new retrieval on it.

@@ -104,6 +104,8 @@ Every new slice must assume all three:
 2. **Morpheus is HTTP + SQLite**, not `data/discord/**` and not Nia. Grok Bot polls `/v1/jobs`, `/v1/search`, `/v1/messages`, `/v1/poll` with `MORPHEUS_API_TOKEN`.
 3. **Grok Bot files GitHub issues** from Discord jobs (its GitHub identity). Morpheus posts Discord replies on `complete`. Leadership jobs do not open public GitHub issues by default.
 
+Do not add `ANTHROPIC_API_KEY` / `AGENT_MODEL` / pi-agent-core to the MVP path.
+
 ---
 
 ## Branch hygiene (2026-08-27)

@@ -1,4 +1,4 @@
-Parent: #25. Depends on #26 (and preferably #27).
+Parent: #25. Depends on #26 and **#27 serving Grok Bot**. **Last** in the cutover (do not delete Nia before search HTTP works).
 
 ## Goal
 

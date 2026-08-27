@@ -4,7 +4,7 @@ Parent: #25. Next: #27.
 
 Replace Nia as the retrieval engine with an in-process `ContextStore` backed by SQLite FTS5. Ingest already upserts `messages`; this slice adds search/read/poll **without HTTP** and **without Nia**.
 
-Read [`docs/context-layer.md`](https://github.com/sean-lai-sh/morpheus/blob/cursor/nia-migration-plan-9afa/docs/context-layer.md) §3 for the full interface. This issue **supersedes the Nia half of #15**. Keep #15's requirements that still apply: namespace isolation, freshness, abort-friendly design (sync FTS is fine).
+Read [`docs/context-layer.md`](../context-layer.md) §3 for the full interface. This issue **supersedes the Nia half of #15**. Keep #15's requirements that still apply: namespace isolation, freshness, abort-friendly design (sync FTS is fine).
 
 ## Files to create / modify
 
@@ -46,7 +46,7 @@ Use an FTS content-sync trigger or explicit rebuild in `index()` — explicit is
 - `search(q)`: FTS match on `content`, `WHERE namespace = ?`, optional `channelHint` (id exact or name via `channels.yml`), optional `threadId`, time bounds, `LIMIT`. Return snippet (FTS `snippet()` or truncated content).
 - `readMessage(id, namespace)`: `SELECT` from `messages` joined with namespace; **return null** if the row exists in the other namespace (do not  leak).
 - `readChannelWindow`: chronological page, same namespace check (channel must belong to that namespace).
-- `poll(namespace, cursor, limit)`: messages with `(created_at, id)` after cursor in that namespace only. Cursor v1: `${created_at}:${id}`. Empty cursor = oldest or newest? **Newest-forward from "now minus 0"** is wrong for backfill. Define: `null` cursor returns the latest page (descending) plus a cursor for the next older page **or** document both. Prefer: `null` means "give me documents with created_at > last_seen"; for bootstrap, client passes `sinceMs`. Pick one, test it, document it in the method JSDoc.
+- `poll(namespace, cursor, limit)`: use a monotonic **`indexed_at` / change sequence**, not `(created_at, id)`. Edits and deletes must appear after a client has already passed the original create cursor. `null` cursor + `sinceMs` bootstrap is documented in JSDoc; tests cover edit-after-poll.
 
 ## Namespace isolation (hard requirement)
 
