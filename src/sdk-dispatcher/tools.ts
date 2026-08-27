@@ -73,7 +73,11 @@ export function pathInJobScope(rawPath: string, scope: JobAccessScope): boolean 
   return trailingIds.some((id) => scope.channelIds.includes(id));
 }
 
-/** Drop `hits`/`nodes`/`documents` entries whose path is outside the job scope. */
+/**
+ * Drop `hits`/`nodes`/`documents`/`links` entries whose path is outside the job
+ * scope. Filtering is by entry, never by field — surviving search hits keep
+ * their full #50/#51 shape (`match: strict|loose`, `links[]`, permalink, …).
+ */
 export function filterListingForScope(bodyText: string, scope: JobAccessScope): string {
   if (scope.kind === "workspace") return bodyText;
   let parsed: unknown;
@@ -85,7 +89,7 @@ export function filterListingForScope(bodyText: string, scope: JobAccessScope): 
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return bodyText;
   const obj = { ...(parsed as Record<string, unknown>) };
-  for (const key of ["hits", "nodes", "documents"]) {
+  for (const key of ["hits", "nodes", "documents", "links"]) {
     const list = obj[key];
     if (!Array.isArray(list)) continue;
     obj[key] = list.filter((item) => {
@@ -214,6 +218,50 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
         if (!path) return errorResult("path is required");
         if (!pathInJobScope(path, deps.scope)) return errorResult(OUT_OF_SCOPE);
         const result = await get(`/v1/fs/read?path=${encodeURIComponent(path)}`);
+        if ("isError" in result) return result;
+        return textResult(filterListingForScope(result.content[0]?.text ?? "", deps.scope));
+      },
+    },
+    morpheus_fs_links: {
+      description:
+        "Enumerate Google Docs/Drive/Sheets/Slides/Forms links shared in this job's scope " +
+        "(newest first, deduped by file). Use when the question mentions 'the doc', 'the sheet', " +
+        "'the tracker', or shared files. Kinds: drive|docs|sheets|slides|forms.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          kind: { type: "string", description: "drive|docs|sheets|slides|forms" },
+          since: { type: "number", description: "Only links posted at/after this epoch ms" },
+          until: { type: "number", description: "Only links posted at/before this epoch ms" },
+          limit: { type: "number" },
+          channel: { type: "string", description: "Discord channel id to restrict to" },
+        },
+      },
+      async execute(args) {
+        const params = new URLSearchParams();
+        const kind = str(args.kind);
+        if (kind) params.set("kind", kind);
+        for (const name of ["since", "until", "limit"] as const) {
+          const v = args[name];
+          if (typeof v === "number" && Number.isFinite(v)) params.set(name, String(Math.trunc(v)));
+        }
+        let channel = str(args.channel);
+        if (deps.scope.kind === "channel") {
+          if (channel != null) {
+            // Server-side `channel` also resolves names across the whole token
+            // subtree — under channel scope only allowlisted numeric ids pass.
+            if (!/^\d+$/.test(channel) || !deps.scope.channelIds.includes(channel)) {
+              return errorResult(OUT_OF_SCOPE);
+            }
+          } else if (deps.scope.channelIds.length === 1) {
+            channel = deps.scope.channelIds[0];
+          }
+          // Multiple allowed ids without an explicit channel: the response
+          // post-filter below is the boundary (entries carry their index path).
+        }
+        if (channel) params.set("channel", channel);
+        const qs = params.toString();
+        const result = await get(`/v1/links${qs ? `?${qs}` : ""}`);
         if ("isError" in result) return result;
         return textResult(filterListingForScope(result.content[0]?.text ?? "", deps.scope));
       },

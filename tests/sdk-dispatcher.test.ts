@@ -428,13 +428,19 @@ describe("job scope enforcement (channel vs workspace)", () => {
         { content: "drop-pathless" },
       ],
       nodes: [{ path: SPONSORS_PATH }, { path: "/eboard" }],
+      links: [
+        { url: "https://docs.google.com/d/keep", path: `${SPONSORS_PATH}/m1` },
+        { url: "https://docs.google.com/d/drop", path: `${GENERAL_PATH}/m9` },
+      ],
     });
     const filtered = JSON.parse(filterListingForScope(body, scope)) as {
       hits: Array<{ content: string }>;
       nodes: Array<{ path: string }>;
+      links: Array<{ url: string }>;
     };
     expect(filtered.hits.map((hit) => hit.content)).toEqual(["keep"]);
     expect(filtered.nodes.map((n) => n.path)).toEqual([SPONSORS_PATH]);
+    expect(filtered.links.map((l) => l.url)).toEqual(["https://docs.google.com/d/keep"]);
   });
 
   test("jobAccessScope derives from the pack and fails closed to channel scope", () => {
@@ -454,10 +460,11 @@ describe("custom tools", () => {
     return h.runtime.sends[0]!;
   }
 
-  test("agent gets exactly the four morpheus tools", async () => {
+  test("agent gets exactly the five morpheus tools", async () => {
     const h = makeHarness();
     const run = await startJob(h);
     expect(Object.keys(run.customTools ?? {}).sort()).toEqual([
+      "morpheus_fs_links",
       "morpheus_fs_read",
       "morpheus_fs_search",
       "morpheus_fs_tree",
@@ -539,6 +546,116 @@ describe("custom tools", () => {
     expect(text).not.toContain("sibling-channel-leak");
     expect(text).not.toContain("descendant-leak");
 
+    run.finish({ status: "finished", result: "x" });
+    await h.waitSettled(1);
+  });
+
+  test("search hits keep the #51 shape: match tag and links[] survive scope filtering", async () => {
+    const h = makeHarness({
+      route: (url) =>
+        url.endsWith("/v1/fs/search")
+          ? {
+              status: 200,
+              body: JSON.stringify({
+                hits: [
+                  {
+                    id: "m1",
+                    path: `${SPONSORS_PATH}/m1`,
+                    snippet: "tracker update",
+                    match: "strict",
+                    links: ["https://docs.google.com/spreadsheets/d/abc123"],
+                    permalink: "https://discord.com/channels/1/1001/m1",
+                  },
+                  {
+                    id: "m2",
+                    path: `${SPONSORS_PATH}/m2`,
+                    snippet: "loose lead",
+                    match: "loose",
+                    links: [],
+                  },
+                  { id: "m3", path: `${GENERAL_PATH}/m3`, snippet: "other channel", match: "strict", links: [] },
+                ],
+              }),
+            }
+          : undefined,
+    });
+    const run = await startJob(h);
+    const result = (await run.customTools!.morpheus_fs_search!.execute({ query: "tracker" }, {})) as {
+      content: Array<{ text: string }>;
+    };
+    const parsed = JSON.parse(result.content[0]!.text) as {
+      hits: Array<{ id: string; match: string; links: string[] }>;
+    };
+    // In-scope hits keep their full shape — match and links are not stripped.
+    expect(parsed.hits.map((hit) => hit.id)).toEqual(["m1", "m2"]);
+    expect(parsed.hits[0]!.match).toBe("strict");
+    expect(parsed.hits[0]!.links).toEqual(["https://docs.google.com/spreadsheets/d/abc123"]);
+    expect(parsed.hits[1]!.match).toBe("loose");
+    run.finish({ status: "finished", result: "x" });
+    await h.waitSettled(1);
+  });
+
+  test("morpheus_fs_links: channel scope injects the job's channel and post-filters the listing", async () => {
+    const h = makeHarness({
+      route: (url) =>
+        url.includes("/v1/links")
+          ? {
+              status: 200,
+              body: JSON.stringify({
+                links: [
+                  { url: "https://docs.google.com/d/in-scope", kind: "docs", path: `${SPONSORS_PATH}/m1` },
+                  { url: "https://docs.google.com/d/leak", kind: "docs", path: `${GENERAL_PATH}/m9` },
+                ],
+              }),
+            }
+          : undefined,
+    });
+    const run = await startJob(h);
+    const result = (await run.customTools!.morpheus_fs_links!.execute({ kind: "docs", limit: 5 }, {})) as {
+      content: Array<{ text: string }>;
+    };
+    const req = h.requests.find((r) => r.url.includes("/v1/links"))!;
+    const url = new URL(req.url);
+    expect(url.searchParams.get("kind")).toBe("docs");
+    expect(url.searchParams.get("limit")).toBe("5");
+    // Single allowlisted channel is injected so the server narrows in SQL too.
+    expect(url.searchParams.get("channel")).toBe("1001");
+    expect(req.headers.Authorization).toBe(`Bearer ${EBOARD_TOKEN}`);
+    const parsed = JSON.parse(result.content[0]!.text) as { links: Array<{ url: string }> };
+    expect(parsed.links.map((l) => l.url)).toEqual(["https://docs.google.com/d/in-scope"]);
+    run.finish({ status: "finished", result: "x" });
+    await h.waitSettled(1);
+  });
+
+  test("morpheus_fs_links: a channel-scoped job cannot list another channel's links", async () => {
+    const h = makeHarness();
+    const run = await startJob(h);
+    const before = h.requests.length;
+    for (const channel of ["5005", "4004", "sponsors", "../etc"]) {
+      const result = (await run.customTools!.morpheus_fs_links!.execute({ channel }, {})) as {
+        isError?: boolean;
+      };
+      expect(result.isError).toBe(true);
+    }
+    // Out-of-scope requests never left the process.
+    expect(h.requests.length).toBe(before);
+    run.finish({ status: "finished", result: "x" });
+    await h.waitSettled(1);
+  });
+
+  test("morpheus_fs_links: workspace scope passes params through (channel included)", async () => {
+    const h = makeHarness();
+    const run = await startJob(h, payloadFor("j1", { scope: "workspace", channel_ids: [] }));
+    await run.customTools!.morpheus_fs_links!.execute(
+      { kind: "sheets", since: 1_700_000_000_000, until: 1_800_000_000_000, limit: 10, channel: "dev-chat" },
+      {},
+    );
+    const req = h.requests.find((r) => r.url.includes("/v1/links"))!;
+    const url = new URL(req.url);
+    expect(url.searchParams.get("kind")).toBe("sheets");
+    expect(url.searchParams.get("since")).toBe("1700000000000");
+    expect(url.searchParams.get("until")).toBe("1800000000000");
+    expect(url.searchParams.get("channel")).toBe("dev-chat");
     run.finish({ status: "finished", result: "x" });
     await h.waitSettled(1);
   });
@@ -643,6 +760,14 @@ describe("prompt construction (untrusted content)", () => {
     expect(prompt).toContain("UNTRUSTED");
     expect(prompt).toContain("morpheus_job_complete");
     expect(prompt).toContain("Do not post to Discord yourself");
+  });
+
+  test("the prompt teaches the #50/#51 search contract", () => {
+    const prompt = buildJobPrompt(payloadFor("j1"));
+    expect(prompt).toContain("match: strict|loose");
+    expect(prompt).toContain("rarest keywords");
+    expect(prompt).toContain("morpheus_fs_links");
+    expect(prompt).toContain("Never conclude the");
   });
 });
 
