@@ -2,6 +2,7 @@ import { loadWorkspaceTokens, reloadChannels } from "./config.ts";
 import { logger } from "./logger.ts";
 import { closeDb, getDb } from "./storage/db.ts";
 import { loginClient, shutdownClient } from "./bot/client.ts";
+import { stopAllJobTyping } from "./bot/typing.ts";
 import { backfillAll } from "./crawler/backfill.ts";
 import { reconcileAll } from "./crawler/reconcile.ts";
 import { startLive, stopLive } from "./crawler/live.ts";
@@ -58,6 +59,7 @@ async function main(): Promise<void> {
       startLive(client);
       startHealthServer();
       installShutdown(async () => {
+        stopAllJobTyping();
         stopLive();
         stopHealthServer();
         await shutdownClient();

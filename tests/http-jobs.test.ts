@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { withTempDb } from "./helpers.ts";
 import {
   DEV_CHAT,
@@ -14,7 +14,8 @@ import {
 } from "./jobs-fixture.ts";
 import { handleHttpRequest } from "../src/http/health.ts";
 import { claimJob, enqueueJob, getJob } from "../src/storage/jobs.ts";
-import { resetEnvForTest } from "../src/config.ts";
+import { parseEnv, resetEnvForTest } from "../src/config.ts";
+import { isJobTypingActive, startJobTyping, stopAllJobTyping } from "../src/bot/typing.ts";
 
 const db = withTempDb();
 let cfg: ReturnType<typeof withWorkspaceConfig>;
@@ -33,6 +34,10 @@ afterAll(() => {
     else process.env[k] = v;
   }
   db.cleanup();
+});
+
+afterEach(() => {
+  stopAllJobTyping();
 });
 
 function req(
@@ -245,5 +250,51 @@ describe("HTTP GET /v1/jobs listing", () => {
   test("status must be queued", async () => {
     const res = await handleHttpRequest(req("GET", "/v1/jobs?status=claimed"));
     expect(res.status).toBe(400);
+  });
+});
+
+describe("HTTP jobs typing", () => {
+  test("POST /v1/jobs/:id/typing is not a route (Mini types after webhook 2xx)", async () => {
+    const job = queue("h-no-typing-route", EBOARD, SPONSORS);
+    const res = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/typing`, { body: { claimed_by: "grok-eboard" } }),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test("HTTP complete stops Mini-side typing for that job", async () => {
+    const job = queue("h-stop-typing", EBOARD, SPONSORS);
+    claimJob(job.id, "grok-eboard");
+    await startJobTyping(job, {
+      env: parseEnv({ ...process.env }),
+      sendTyping: async () => {},
+      isFinished: () => false,
+    });
+    expect(isJobTypingActive(job.id)).toBe(true);
+    const res = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/complete`, {
+        body: { claimed_by: "grok-eboard", reply: "done" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(isJobTypingActive(job.id)).toBe(false);
+  });
+
+  test("HTTP fail stops Mini-side typing for that job", async () => {
+    const job = queue("h-fail-typing", EBOARD, SPONSORS);
+    claimJob(job.id, "grok-eboard");
+    await startJobTyping(job, {
+      env: parseEnv({ ...process.env }),
+      sendTyping: async () => {},
+      isFinished: () => false,
+    });
+    expect(isJobTypingActive(job.id)).toBe(true);
+    const res = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/fail`, {
+        body: { claimed_by: "grok-eboard", error: "nope" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(isJobTypingActive(job.id)).toBe(false);
   });
 });

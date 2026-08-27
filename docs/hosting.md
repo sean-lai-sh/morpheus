@@ -29,6 +29,7 @@ Slice #0: [#39](https://github.com/sean-lai-sh/morpheus/issues/39). Live index t
  Grok Bot  (one-shot consumer)
    • if first-pass isn't enough: Tailscale search / read / tree
    • returns { reply } → Mini message.reply as the official bot
+   • Mini shows Discord typing in the job channel after webhook 2xx (`DISCORD_TYPING_ON_DISPATCH`, default on)
    • ops-feed FYIs via Discord incoming webhooks (#36 only; not the @-reply)
    • GitHub issues only for implementation work
 ```
