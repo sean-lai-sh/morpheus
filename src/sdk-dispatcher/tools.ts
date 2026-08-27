@@ -227,10 +227,12 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
 
   /**
    * Merge fan-out responses correctly (Sol #2): scope-filter EVERY item first,
-   * dedupe, order globally, and only THEN apply the item limit. Per-response
-   * order and the server LIMIT no longer decide who survives, so a quiet
-   * allowed channel cannot be starved by a busier allowed/sibling channel, and
-   * an out-of-scope item can never consume a slot and then be filtered away.
+   * dedupe by keeping the BEST copy (per `compare`, not first-wins), order
+   * globally, and only THEN apply the item limit. Per-response order and the
+   * server LIMIT no longer decide who survives — so a duplicate id/fileId that
+   * appears older in the first-queried channel cannot drop the newer copy from
+   * a quieter allowed channel, and an out-of-scope item can never consume a
+   * slot and then be filtered away.
    */
   function mergeScopedListings(
     bodies: string[],
@@ -239,8 +241,7 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
     compare: (a: Record<string, unknown>, b: Record<string, unknown>) => number,
     limit: number,
   ): string {
-    const seen = new Set<string>();
-    const all: Record<string, unknown>[] = [];
+    const best = new Map<string, Record<string, unknown>>();
     for (const body of bodies) {
       let parsed: unknown;
       try {
@@ -256,12 +257,12 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
         // Scope-filter BEFORE dedupe/cap so invalid items never hold a slot.
         if (typeof rec.path !== "string" || !pathInJobScope(rec.path, deps.scope)) continue;
         const id = idOf(rec);
-        if (seen.has(id)) continue;
-        seen.add(id);
-        all.push(rec);
+        const existing = best.get(id);
+        // Keep the better-ranked / newer copy, regardless of fan-out order.
+        if (!existing || compare(rec, existing) < 0) best.set(id, rec);
       }
     }
-    all.sort(compare);
+    const all = [...best.values()].sort(compare);
     return JSON.stringify({ [key]: all.slice(0, limit) });
   }
 

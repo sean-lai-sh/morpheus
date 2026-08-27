@@ -917,6 +917,56 @@ describe("custom tools", () => {
     await h.waitSettled(1);
   });
 
+  test("links fan-out: a shared fileId keeps the NEWER copy even when the older one is queried first", async () => {
+    const h = makeHarness({
+      route: (url) => {
+        if (!url.includes("/v1/links")) return undefined;
+        const channel = new URL(url).searchParams.get("channel");
+        // Same fileId in both allowed channels: OLDER in the first-queried (1001),
+        // NEWER in the second (5005). First-wins dedupe would wrongly keep the old one.
+        if (channel === "1001") {
+          return { status: 200, body: JSON.stringify({ links: [{ url: "u-old", fileId: "shared", path: `${SPONSORS_PATH}/m1`, createdAt: 1_000 }] }) };
+        }
+        return { status: 200, body: JSON.stringify({ links: [{ url: "u-new", fileId: "shared", path: `${GENERAL_CHAT_PATH}/m2`, createdAt: 9_000 }] }) };
+      },
+    });
+    const run = await startJob(h, payloadFor("j1", { channel_ids: ["1001", "5005"] }));
+    const result = (await run.customTools!.morpheus_fs_links!.execute({ kind: "docs", limit: 1 }, {})) as {
+      content: Array<{ text: string }>;
+    };
+    const parsed = JSON.parse(result.content[0]!.text) as { links: Array<{ url: string; createdAt: number }> };
+    expect(parsed.links.length).toBe(1);
+    expect(parsed.links[0]!.url).toBe("u-new");
+    expect(parsed.links[0]!.createdAt).toBe(9_000);
+    run.finish({ status: "finished", result: "x" });
+    await h.waitSettled(1);
+  });
+
+  test("search fan-out: a hit id colliding across channels keeps the better-ranked copy", async () => {
+    const h = makeHarness({
+      route: (url, init) => {
+        if (!url.endsWith("/v1/fs/search")) return undefined;
+        const body = JSON.parse(init.body ?? "{}") as { pathPrefix?: string };
+        // Same id in both channels: LOOSE copy in the first-queried channel,
+        // STRICT (better) copy in the second. Keep-best must win over first-wins.
+        if (body.pathPrefix === SPONSORS_PATH) {
+          return { status: 200, body: JSON.stringify({ hits: [{ id: "dup", path: `${SPONSORS_PATH}/m1`, match: "loose", score: 9, links: [] }] }) };
+        }
+        return { status: 200, body: JSON.stringify({ hits: [{ id: "dup", path: `${GENERAL_CHAT_PATH}/m2`, match: "strict", score: 1, links: [] }] }) };
+      },
+    });
+    const run = await startJob(h, payloadFor("j1", { channel_ids: ["1001", "5005"] }));
+    const result = (await run.customTools!.morpheus_fs_search!.execute({ query: "q", limit: 1 }, {})) as {
+      content: Array<{ text: string }>;
+    };
+    const parsed = JSON.parse(result.content[0]!.text) as { hits: Array<{ id: string; match: string; path: string }> };
+    expect(parsed.hits.length).toBe(1);
+    expect(parsed.hits[0]!.match).toBe("strict");
+    expect(parsed.hits[0]!.path).toBe(`${GENERAL_CHAT_PATH}/m2`);
+    run.finish({ status: "finished", result: "x" });
+    await h.waitSettled(1);
+  });
+
   test("links fan-out at limit 1: the newer link in the second channel wins the slot", async () => {
     const h = makeHarness({
       route: (url) => {
