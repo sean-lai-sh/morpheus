@@ -6,6 +6,7 @@ import {
   lastMessageAt,
   markDeleted,
   nonDeletedMessageIds,
+  nonDeletedThreadMessageIds,
   recentMessages,
   setClassification,
   upsertMessage,
@@ -122,5 +123,36 @@ describe("storage/messages", () => {
     expect(ids).toContain("m1");
     expect(ids).not.toContain("thread-reply-live");
     expect(ids).not.toContain("m2"); // deleted
+  });
+
+  test("nonDeletedThreadMessageIds is one thread only", () => {
+    upsertMessage({
+      id: "thread-1-gone",
+      channelId: "thread-1",
+      parentChannelId: "c1",
+      authorId: "u1",
+      authorName: "alice",
+      content: "deleted thread reply",
+      createdAt: 12_000,
+      threadId: "thread-1",
+      threadName: "A thread",
+    });
+    expect(markDeleted("thread-1-gone", 12_100)).toBe(true);
+    upsertMessage({
+      id: "thread-2-live",
+      channelId: "thread-2",
+      parentChannelId: "c1",
+      authorId: "u1",
+      authorName: "alice",
+      content: "sibling thread reply",
+      createdAt: 12_200,
+      threadId: "thread-2",
+      threadName: "Other thread",
+    });
+    const ids = nonDeletedThreadMessageIds("thread-1");
+    expect(ids).toContain("thread-reply-live");
+    expect(ids).not.toContain("thread-1-gone");
+    expect(ids).not.toContain("thread-2-live");
+    expect(ids).not.toContain("parent-live");
   });
 });
