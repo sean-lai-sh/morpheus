@@ -2,6 +2,8 @@
 
 Discord intelligence bot for the club's eboard. Ingests messages into SQLite, renders them as structured markdown, and syncs to Nia for semantic search.
 
+**Direction (2026-08):** Nia is a write-only derived index, not the source of truth. The next work is to stop depending on Nia and expose a queryable context API so an official Discord bot can feed a Cursor/Grok agent. Full architecture map, coupling inventory, and migration plan: [docs/context-layer.md](docs/context-layer.md).
+
 ## How Nia indexing works
 
 Morpheus maintains two independent Nia filesystem namespaces:
