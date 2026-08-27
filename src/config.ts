@@ -33,15 +33,17 @@ const envSchema = z
     NVIDIA_API_KEY: z.string().min(1).optional(),
     LOG_LEVEL: z.string().default("info"),
     HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8080),
-    /** Bind address for /health. Default loopback. Never 0.0.0.0. */
+    /** Bind address for Morpheus HTTP. Default loopback. Never 0.0.0.0. */
     HEALTH_HOST: z.preprocess(
       emptyToUndef,
       z
         .string()
         .min(1)
         .default("127.0.0.1")
-        .refine((h) => h !== "0.0.0.0" && h !== "::" && h !== "*", "must not bind all interfaces"),
+        .refine((h) => h !== "0.0.0.0" && h !== "::" && h !== "*" && h !== "[::]", "must not bind all interfaces"),
     ),
+    MORPHEUS_API_TOKEN_GENERAL: z.preprocess(emptyToUndef, z.string().min(1).optional()),
+    MORPHEUS_API_TOKEN_LEADERSHIP: z.preprocess(emptyToUndef, z.string().min(1).optional()),
     RETENTION_MONTHS: z
       .preprocess((v) => (v === "" || v == null ? undefined : v), z.coerce.number().int().min(1).optional()),
     NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
@@ -49,7 +51,17 @@ const envSchema = z
   .refine((e) => Boolean(e.DISCORD_BOT_TOKEN || e.DISCORD_TOKEN), {
     message: "DISCORD_BOT_TOKEN (or legacy DISCORD_TOKEN) is required",
     path: ["DISCORD_BOT_TOKEN"],
-  });
+  })
+  .refine(
+    (e) =>
+      !e.MORPHEUS_API_TOKEN_GENERAL ||
+      !e.MORPHEUS_API_TOKEN_LEADERSHIP ||
+      e.MORPHEUS_API_TOKEN_GENERAL !== e.MORPHEUS_API_TOKEN_LEADERSHIP,
+    {
+      message: "MORPHEUS_API_TOKEN_GENERAL and MORPHEUS_API_TOKEN_LEADERSHIP must differ",
+      path: ["MORPHEUS_API_TOKEN_LEADERSHIP"],
+    },
+  );
 
 export type Env = z.infer<typeof envSchema>;
 

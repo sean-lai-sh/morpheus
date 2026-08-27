@@ -118,6 +118,68 @@ function migrateAlter(db: Database): void {
     )
   `);
   try { db.exec(`DROP TABLE IF EXISTS nia_sync_state`); } catch { /* ignore */ }
+  migrateSeqAndFts(db);
+}
+
+/**
+ * Additive: monotonic ingest seq + FTS5 over messages.content.
+ * Namespace is resolved at query time from channels.yml (not stored in FTS).
+ */
+function migrateSeqAndFts(db: Database): void {
+  try {
+    db.exec(`ALTER TABLE messages ADD COLUMN seq INTEGER NOT NULL DEFAULT 0`);
+  } catch {
+    /* already exists */
+  }
+  try {
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_seq ON messages(seq)`);
+  } catch {
+    /* already exists */
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ingest_seq (
+      k INTEGER PRIMARY KEY CHECK (k = 1),
+      value INTEGER NOT NULL
+    )
+  `);
+  db.exec(`INSERT OR IGNORE INTO ingest_seq (k, value) VALUES (1, 0)`);
+  db.exec(`UPDATE messages SET seq = rowid WHERE seq = 0`);
+  const maxSeq =
+    db.query<{ n: number | null }, []>(`SELECT MAX(seq) AS n FROM messages`).get()?.n ?? 0;
+  db.query(`UPDATE ingest_seq SET value = MAX(value, ?) WHERE k = 1`).run(maxSeq);
+
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+      content,
+      content='messages',
+      content_rowid='rowid',
+      tokenize='porter unicode61'
+    )
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+      INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+    END
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+    END
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE OF content ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+      INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+    END
+  `);
+
+  const ftsN =
+    db.query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM messages_fts`).get()?.n ?? 0;
+  const msgN =
+    db.query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM messages`).get()?.n ?? 0;
+  if (msgN > 0 && ftsN === 0) {
+    db.exec(`INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')`);
+  }
 }
 
 export function vacuum(): void {

@@ -1,8 +1,9 @@
 import { loadChannels, loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
+import { rebuildFts, ftsCount } from "../context/store.ts";
 import { removeLegacyFlatFiles, rerenderChannel } from "../storage/markdown.ts";
 
-/** Rebuild every channel's markdown from SQLite. Used after schema changes or to recover. */
+/** Rebuild markdown from SQLite and rebuild the FTS index. */
 export function reindexAll(): void {
   // Remove stale flat .md files left over from the pre-hierarchy layout.
   removeLegacyFlatFiles();
@@ -14,5 +15,6 @@ export function reindexAll(): void {
     total += written;
     logger.info({ channel_id: channel.id, written }, "channel re-rendered");
   }
-  logger.info({ total }, "reindex complete");
+  rebuildFts();
+  logger.info({ total, fts: ftsCount() }, "reindex complete");
 }
