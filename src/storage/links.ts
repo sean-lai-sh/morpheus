@@ -45,6 +45,36 @@ function extractFileId(url: string): string | null {
   return null;
 }
 
+/**
+ * docs.google.com hosts every editor product; the path decides which one.
+ * Only called for docs.google.com — drive.google.com stays "drive".
+ */
+function refineDocsKind(url: string, fallback: LinkKind): LinkKind {
+  let path: string;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    return fallback;
+  }
+  if (path.startsWith("/spreadsheets/")) return "sheets";
+  if (path.startsWith("/presentation/")) return "slides";
+  if (path.startsWith("/forms/")) return "forms";
+  if (path.startsWith("/document/")) return "docs";
+  return fallback;
+}
+
+/**
+ * SQL expression normalizing `kind` for rows persisted before path-based
+ * classification existed (canonical docs.google.com/spreadsheets|presentation|forms
+ * URLs were stored as "docs").
+ */
+const KIND_SQL = `CASE
+  WHEN l.url LIKE 'https://docs.google.com/spreadsheets/%' THEN 'sheets'
+  WHEN l.url LIKE 'https://docs.google.com/presentation/%' THEN 'slides'
+  WHEN l.url LIKE 'https://docs.google.com/forms/%' THEN 'forms'
+  ELSE l.kind
+END`;
+
 export function extractLinks(content: string): ExtractedLink[] {
   const matches = content.match(URL_REGEX);
   if (!matches) return [];
@@ -61,8 +91,9 @@ export function extractLinks(content: string): ExtractedLink[] {
     } catch {
       continue;
     }
-    const kind = HOST_TO_KIND[host];
+    let kind = HOST_TO_KIND[host];
     if (!kind) continue;
+    if (host === "docs.google.com") kind = refineDocsKind(url, kind);
     out.push({ url, kind, fileId: extractFileId(url) });
   }
   return out;
@@ -123,7 +154,7 @@ export interface LinkQuery {
   untilMs?: number;
   /** Restrict to one parent channel (matches the channel itself or threads under it). */
   channelId?: string;
-  /** Row cap for the raw query; callers dedupe/filter afterwards. */
+  /** Row cap after dedupe by file_id (or url); callers still post-filter by scope. */
   limit: number;
 }
 
@@ -133,35 +164,49 @@ export type LinkWithMessage = LinkRow & { message: MessageRow };
 /**
  * Links whose message lives in one of `channelIds` (by effective/parent channel,
  * never `links.channel_id`, which holds the thread id for thread messages).
- * Deleted messages are always excluded. Callers must still post-filter with
- * `rowInScope` and map to an index path.
+ * Deleted messages are always excluded. Rows are deduped by file_id (falling
+ * back to url) keeping the newest, *before* `limit` is applied, so a frequently
+ * reshared file cannot crowd out older unique files. Callers must still
+ * post-filter with `rowInScope` and map to an index path.
  */
 export function queryLinks(q: LinkQuery): LinkWithMessage[] {
   if (q.channelIds.length === 0) return [];
   const params: (string | number)[] = [...q.channelIds];
-  let sql = `
-    SELECT l.*, m.*, l.channel_id AS link_channel_id
-    FROM links l
-    JOIN messages m ON m.id = l.message_id
+  let where = `
     WHERE COALESCE(m.parent_channel_id, m.channel_id) IN (${q.channelIds.map(() => "?").join(", ")})
       AND m.deleted_at IS NULL`;
   if (q.kind) {
-    sql += ` AND l.kind = ?`;
+    where += ` AND ${KIND_SQL} = ?`;
     params.push(q.kind);
   }
   if (q.sinceMs != null) {
-    sql += ` AND l.first_seen_at >= ?`;
+    where += ` AND l.first_seen_at >= ?`;
     params.push(q.sinceMs);
   }
   if (q.untilMs != null) {
-    sql += ` AND l.first_seen_at <= ?`;
+    where += ` AND l.first_seen_at <= ?`;
     params.push(q.untilMs);
   }
   if (q.channelId) {
-    sql += ` AND (m.channel_id = ? OR m.parent_channel_id = ?)`;
+    where += ` AND (m.channel_id = ? OR m.parent_channel_id = ?)`;
     params.push(q.channelId, q.channelId);
   }
-  sql += ` ORDER BY l.first_seen_at DESC, l.link_id DESC LIMIT ?`;
+  const sql = `
+    SELECT * FROM (
+      SELECT l.link_id, l.message_id, l.url, l.file_id, l.first_seen_at,
+             ${KIND_SQL} AS kind,
+             l.channel_id AS link_channel_id,
+             m.*,
+             ROW_NUMBER() OVER (
+               PARTITION BY COALESCE(l.file_id, l.url)
+               ORDER BY l.first_seen_at DESC, l.link_id DESC
+             ) AS rn
+      FROM links l
+      JOIN messages m ON m.id = l.message_id${where}
+    )
+    WHERE rn = 1
+    ORDER BY first_seen_at DESC, link_id DESC
+    LIMIT ?`;
   params.push(q.limit);
   type Raw = MessageRow & {
     link_id: number;
@@ -171,10 +216,11 @@ export function queryLinks(q: LinkQuery): LinkWithMessage[] {
     kind: LinkKind;
     file_id: string | null;
     first_seen_at: number;
+    rn: number;
   };
   const rows = getDb().query<Raw, (string | number)[]>(sql).all(...params);
   return rows.map((r) => {
-    const { link_id, message_id, link_channel_id, url, kind, file_id, first_seen_at, ...message } = r;
+    const { link_id, message_id, link_channel_id, url, kind, file_id, first_seen_at, rn: _rn, ...message } = r;
     return { link_id, message_id, channel_id: link_channel_id, url, kind, file_id, first_seen_at, message: message as MessageRow };
   });
 }

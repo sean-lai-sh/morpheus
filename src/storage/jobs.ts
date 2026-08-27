@@ -1,7 +1,7 @@
 import { getChannel, getWorkspace, type Channel } from "../config.ts";
 import { rowInScope, scopeFor, type ChannelResolver } from "../context/namespace.ts";
 import { toFtsQuery, toFtsQueryLoose } from "../context/store.ts";
-import { messagePath } from "../context/paths.ts";
+import { channelIdsForScope, messagePath } from "../context/paths.ts";
 import type { Namespace, Scope } from "../context/types.ts";
 import { logger } from "../logger.ts";
 import { getDb } from "./db.ts";
@@ -462,12 +462,51 @@ function stripLeadingMentions(content: string): string {
   return content.replace(/^(\s*<@!?\d+>\s*)+/, "").trim();
 }
 
+type ScopePredicate = { sql: string; args: string[] };
+
 /**
- * FTS candidates for the job text, best bm25 rank first. Strict (AND) hits come
- * before loose (OR) hits. Rows are NOT yet filtered by job scope. An empty or
- * malformed expression yields no rows — never throws.
+ * SQL predicate (over alias `m`) narrowing `messages` to the rows a job may see,
+ * so both the FTS and recency queries rank only in-scope rows before LIMIT.
+ * Workspace jobs: every configured channel in the job's subtree (threads fold
+ * into their parent). Channel jobs: the allowed ids, plus threads of any allowed
+ * channel that includes them. `null` when nothing can match. This is a coarse
+ * pre-filter; `snippetAllowedForJob` remains the authority row by row.
  */
-function ftsCandidates(content: string): SnippetRow[] {
+function scopePredicateForJob(
+  job: JobScopeRef,
+  resolveChannel: ChannelResolver,
+): ScopePredicate | null {
+  const ph = (ids: string[]) => ids.map(() => "?").join(",");
+  if (job.scope === "workspace") {
+    const scope = scopeFor(job.namespace);
+    if (!scope) return null;
+    const ids = channelIdsForScope(scope);
+    if (ids.length === 0) return null;
+    return { sql: `COALESCE(m.parent_channel_id, m.channel_id) IN (${ph(ids)})`, args: ids };
+  }
+  const allowed = (
+    job.channel_ids.length > 0
+      ? job.channel_ids
+      : [job.discord_thread_id ?? job.discord_channel_id]
+  ).filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (allowed.length === 0) return null;
+  const threadParents = allowed.filter((id) => resolveChannel(id)?.include_threads);
+  let sql = `(m.channel_id IN (${ph(allowed)})`;
+  const args = [...allowed];
+  if (threadParents.length > 0) {
+    sql += ` OR m.parent_channel_id IN (${ph(threadParents)})`;
+    args.push(...threadParents);
+  }
+  return { sql: `${sql})`, args };
+}
+
+/**
+ * FTS candidates for the job text within `scope`, best bm25 rank first. Strict
+ * (AND) hits come before loose (OR) hits. Rows still go through
+ * `snippetAllowedForJob`. An empty or malformed expression yields no rows —
+ * never throws.
+ */
+function ftsCandidates(content: string, scope: ScopePredicate): SnippetRow[] {
   const cleaned = stripLeadingMentions(content);
   if (!cleaned) return [];
   const exprs: string[] = [];
@@ -479,16 +518,17 @@ function ftsCandidates(content: string): SnippetRow[] {
   for (const expr of exprs) {
     try {
       const rows = getDb()
-        .query<SnippetRow, [string, number]>(
+        .query(
           `SELECT m.id, m.channel_id, m.parent_channel_id, m.thread_id, m.thread_name, m.content
            FROM messages_fts
            JOIN messages m ON m.rowid = messages_fts.rowid
            WHERE messages_fts MATCH ?
              AND m.deleted_at IS NULL
+             AND ${scope.sql}
            ORDER BY bm25(messages_fts)
            LIMIT ?`,
         )
-        .all(expr, FIRST_PASS_FTS_CANDIDATES);
+        .all(expr, ...scope.args, FIRST_PASS_FTS_CANDIDATES) as SnippetRow[];
       out.push(...rows);
     } catch (err) {
       logger.warn({ err, expr }, "first-pass fts query failed; skipping");
@@ -499,8 +539,9 @@ function ftsCandidates(content: string): SnippetRow[] {
 
 /**
  * Seed snippets for a job: FTS hits for the job text (bm25 order) first, then the
- * remainder from the recent window of the job's allowed channels. Both passes go
- * through the same job-scope filter. Not a whole workspace tree.
+ * remainder from the recent window of the job's allowed channels. Both queries
+ * are pre-narrowed by the same scope predicate and both go through the same
+ * job-scope filter. Not a whole workspace tree.
  */
 export function firstPassSnippets(
   job: JobScopeRef,
@@ -510,6 +551,9 @@ export function firstPassSnippets(
   const cap = Math.min(Math.max(1, limit), 12);
   const wide = job.scope === "workspace";
   const lookback = wide ? FIRST_PASS_LOOKBACK_WORKSPACE : FIRST_PASS_LOOKBACK_CHANNEL;
+
+  const scope = scopePredicateForJob(job, resolveChannel);
+  if (!scope) return [];
 
   const out: FirstPassSnippet[] = [];
   const seen = new Set<string>();
@@ -529,45 +573,21 @@ export function firstPassSnippets(
   };
 
   if (job.content) {
-    for (const row of ftsCandidates(job.content)) {
+    for (const row of ftsCandidates(job.content, scope)) {
       if (take(row, "fts")) return out;
     }
   }
 
-  let rows: SnippetRow[];
-
-  if (wide) {
-    // An injected resolver cannot enumerate channels, so scan a recent window and
-    // let snippetAllowedForJob apply the workspace boundary row by row.
-    rows = getDb()
-      .query<SnippetRow, [number]>(
-        `SELECT id, channel_id, parent_channel_id, thread_id, thread_name, content
-         FROM messages
-         WHERE deleted_at IS NULL
-         ORDER BY created_at DESC
-         LIMIT ?`,
-      )
-      .all(lookback);
-  } else {
-    const allowed =
-      job.channel_ids.length > 0
-        ? job.channel_ids
-        : [job.discord_thread_id ?? job.discord_channel_id];
-    const threadParents = allowed.filter((id) => resolveChannel(id)?.include_threads);
-    const idPh = allowed.map(() => "?").join(",");
-    const args: Array<string | number> = [...allowed];
-    let sql = `SELECT id, channel_id, parent_channel_id, thread_id, thread_name, content
-       FROM messages
-       WHERE deleted_at IS NULL
-         AND (channel_id IN (${idPh})`;
-    if (threadParents.length > 0) {
-      sql += ` OR parent_channel_id IN (${threadParents.map(() => "?").join(",")})`;
-      args.push(...threadParents);
-    }
-    sql += `) ORDER BY created_at DESC LIMIT ?`;
-    args.push(lookback);
-    rows = getDb().query(sql).all(...args) as SnippetRow[];
-  }
+  const rows = getDb()
+    .query(
+      `SELECT m.id, m.channel_id, m.parent_channel_id, m.thread_id, m.thread_name, m.content
+       FROM messages m
+       WHERE m.deleted_at IS NULL
+         AND ${scope.sql}
+       ORDER BY m.created_at DESC
+       LIMIT ?`,
+    )
+    .all(...scope.args, lookback) as SnippetRow[];
 
   for (const row of rows) {
     if (take(row, "recent")) break;

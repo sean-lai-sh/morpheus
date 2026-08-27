@@ -389,6 +389,7 @@ describe("firstPassSnippets", () => {
 
 describe("firstPassSnippets FTS relevance pass", () => {
   const RECENT_COUNT = 20;
+  const OUT_OF_SCOPE_COUNT = 250;
   // Snippet-only content words, so nothing else in this file's DB matches them.
   const KEYWORD = "zephyrite";
   const job = (scope: "channel" | "workspace", content: string, channelIds: string[] = []) => ({
@@ -400,7 +401,14 @@ describe("firstPassSnippets FTS relevance pass", () => {
     content,
   });
 
+  // Every row this describe seeds uses an `fts-` id so afterAll can remove exactly
+  // those and leave the shared DB as the earlier describes expect it.
+  const purgeSeeded = () => {
+    getDb().run("DELETE FROM messages WHERE id LIKE 'fts-%'");
+  };
+
   beforeAll(() => {
+    purgeSeeded();
     // Old, relevant (sponsors, in eboard).
     upsertMessage({
       id: "fts-old-hit",
@@ -448,6 +456,23 @@ describe("firstPassSnippets FTS relevance pass", () => {
         createdAt: 50_000 + i,
       });
     }
+    // Many better-ranked matches outside the eboard subtree. If the FTS query
+    // ranked the whole table before scoping, these would crowd the single
+    // in-scope hit out of the candidate window.
+    for (let i = 0; i < OUT_OF_SCOPE_COUNT; i++) {
+      upsertMessage({
+        id: `fts-flood-${i}`,
+        channelId: LEADERSHIP_TEAM,
+        authorId: "u2",
+        authorName: "bob",
+        content: `${KEYWORD} ${KEYWORD} ${KEYWORD} ${KEYWORD} flood ${i}`,
+        createdAt: 20_000 + i,
+      });
+    }
+  });
+
+  afterAll(() => {
+    purgeSeeded();
   });
 
   test("an old matching message ranks ahead of newer unrelated ones", () => {
@@ -467,6 +492,16 @@ describe("firstPassSnippets FTS relevance pass", () => {
     expect(ids).toContain("fts-old-hit");
     expect(ids).not.toContain("fts-old-hit-general");
     expect(ids).not.toContain("fts-old-hit-leadership");
+  });
+
+  test("scoping happens before the candidate limit, not only after it", () => {
+    // 250 better-ranked out-of-scope rows exceed the FTS candidate window (200);
+    // the lone old in-scope hit must still come back for a sponsors-only job.
+    const snippets = firstPassSnippets(job("channel", `${KEYWORD} contract`, [SPONSORS]));
+    const ids = snippets.map((s) => s.id);
+    expect(ids).toContain("fts-old-hit");
+    expect(snippets.find((s) => s.id === "fts-old-hit")?.source).toBe("fts");
+    expect(ids.some((id) => id?.startsWith("fts-flood-"))).toBe(false);
   });
 
   test("a matching message outside the workspace subtree is excluded for a workspace job", () => {

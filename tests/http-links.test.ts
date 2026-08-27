@@ -26,12 +26,14 @@ const PD = WORKSPACE_TOKENS["programs-dev"];
 const DOC_A = "https://docs.google.com/document/d/AAAAAAAAAAAAAAAAAAAA/edit";
 const DOC_A_OLD = "https://docs.google.com/document/d/AAAAAAAAAAAAAAAAAAAA/view";
 const SHEET_E = "https://sheets.google.com/spreadsheets/d/EEEEEEEEEEEEEEEEEEEE/edit";
+// Canonical sheets URL on the docs.google.com host: kind must be "sheets" (path-based), not "docs".
+const SHEET_E2 = "https://docs.google.com/spreadsheets/d/FFFFFFFFFFFFFFFFFFFF/edit#gid=0";
 const DRIVE_L = "https://drive.google.com/file/d/LLLLLLLLLLLLLLLLLLLL/view";
 const DRIVE_T = "https://drive.google.com/file/d/TTTTTTTTTTTTTTTTTTTT/view";
 const FORM_PD = "https://forms.google.com/forms/d/PPPPPPPPPPPPPPPPPPPP/viewform";
 const SLIDES_DEL = "https://docs.google.com/presentation/d/DDDDDDDDDDDDDDDDDDDD/edit";
 
-const E_MSG = "100000000000000001"; // eboard 1001: DOC_A (newest of the dup pair) + SHEET_E
+const E_MSG = "100000000000000001"; // eboard 1001: DOC_A (newest of the dup pair) + SHEET_E + SHEET_E2
 const E_OLD_MSG = "100000000000000002"; // eboard 1001: DOC_A_OLD (older, same file_id)
 const E_DEL_MSG = "100000000000000003"; // eboard 1001: SLIDES_DEL, deleted
 const L_MSG = "200000000000000002"; // leadership 2002: DRIVE_L
@@ -53,7 +55,7 @@ beforeAll(() => {
     1_000,
   );
   seed(
-    { id: E_MSG, channelId: "1001", authorId: "u1", authorName: "alice", content: `budget ${DOC_A} and ${SHEET_E}`, createdAt: 2_000 },
+    { id: E_MSG, channelId: "1001", authorId: "u1", authorName: "alice", content: `budget ${DOC_A} and ${SHEET_E} and ${SHEET_E2}`, createdAt: 2_000 },
     2_000,
   );
   seed(
@@ -180,7 +182,10 @@ describe("GET /v1/links", () => {
   });
 
   test("kind filter and invalid kind", async () => {
-    expect((await links("?kind=sheets", EBOARD)).map((l) => l.url)).toEqual([SHEET_E]);
+    const sheets = await links("?kind=sheets", EBOARD);
+    expect(sheets.map((l) => l.url).sort()).toEqual([SHEET_E2, SHEET_E].sort());
+    expect(sheets.every((l) => l.kind === "sheets")).toBe(true);
+    expect((await links("?kind=docs", EBOARD)).map((l) => l.url)).toEqual([DOC_A]);
     expect((await links("?kind=forms", EBOARD)).map((l) => l.url)).toEqual([FORM_PD]);
     expect((await get("/v1/links?kind=dropbox", EBOARD)).status).toBe(400);
   });
@@ -195,6 +200,30 @@ describe("GET /v1/links", () => {
     expect((await links("?limit=1", EBOARD)).length).toBe(1);
     expect((await links("?limit=0", EBOARD)).length).toBe(1);
     expect((await links("?limit=999", EBOARD)).length).toBeLessThanOrEqual(100);
+  });
+
+  test("dedupe happens before limit: a reshared file cannot hide older unique files", async () => {
+    const shared = "https://drive.google.com/file/d/SHAREDSHAREDSHARED99/view";
+    const sharedLinks = extractLinks(shared);
+    for (let i = 0; i < 5; i++) {
+      const url = `https://drive.google.com/file/d/UNIQUEUNIQUEUNIQUE9${i}/view`;
+      seed(
+        { id: `50000000000000000${i}`, channelId: "5005", authorId: "u5", authorName: "erin", content: url, createdAt: 50_000 + i },
+        50_000 + i,
+      );
+    }
+    for (let i = 0; i < 220; i++) {
+      const id = `6${String(i).padStart(17, "0")}`;
+      upsertMessage({ id, channelId: "5005", authorId: "u5", authorName: "erin", content: shared, createdAt: 60_000 + i });
+      indexFromRow(getMessage(id)!);
+      persistLinks(id, "5005", sharedLinks, 60_000 + i);
+    }
+    const out = await links("?channel=5005&limit=10", EBOARD);
+    expect(out.length).toBe(6);
+    expect(out[0]!.fileId).toBe("SHAREDSHAREDSHARED99");
+    expect(out.slice(1).map((l) => l.fileId)).toEqual(
+      ["UNIQUEUNIQUEUNIQUE94", "UNIQUEUNIQUEUNIQUE93", "UNIQUEUNIQUEUNIQUE92", "UNIQUEUNIQUEUNIQUE91", "UNIQUEUNIQUEUNIQUE90"],
+    );
   });
 
   test("dedupe by file_id keeps the newest", async () => {

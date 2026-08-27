@@ -230,8 +230,9 @@ function handleLinks(url: URL, namespace: Scope): Response {
   const channelIds = channelIdsForScope(namespace);
   if (channelIds.length === 0) return json({ links: [] });
 
-  const rows = queryLinks({ channelIds, kind, sinceMs, untilMs, channelId, limit: limit * 4 });
-  const seenFiles = new Set<string>();
+  // Dedupe by file_id happens in SQL before the limit; the small over-fetch only
+  // covers rows dropped by the post-query rowInScope / path checks.
+  const rows = queryLinks({ channelIds, kind, sinceMs, untilMs, channelId, limit: limit * 2 });
   const links: Array<Record<string, unknown>> = [];
   for (const l of rows) {
     if (links.length >= limit) break;
@@ -239,10 +240,6 @@ function handleLinks(url: URL, namespace: Scope): Response {
     if (!rowInScope(m, namespace)) continue;
     const path = indexPathForRow(m);
     if (!path) continue;
-    if (l.file_id) {
-      if (seenFiles.has(l.file_id)) continue;
-      seenFiles.add(l.file_id);
-    }
     links.push({
       url: l.url,
       kind: l.kind,
