@@ -1,8 +1,10 @@
+Parent: #25. Depends on #26.
+
 ## Goal
 
 Expose the `ContextStore` from the FTS slice over HTTP so a **remote** Cursor/Grok agent can search/read/poll without a local `data/` dump or Nia. Serve it from the existing `Bun.serve` in `src/http/health.ts` (rename to `src/http/server.ts` if needed).
 
-Depends on the ContextStore / FTS5 issue. Read `docs/context-layer.md` §3 HTTP table and §5 secrets.
+Depends on the ContextStore / FTS5 issue (#26). Read `docs/context-layer.md` §3 HTTP table and §5 secrets.
 
 ## Files to create / modify
 

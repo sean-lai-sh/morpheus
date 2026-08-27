@@ -1,3 +1,5 @@
+Parent: #25. Depends on #27 and #30.
+
 ## Goal
 
 Document and (minimally) stub how a **Cursor/Grok cloud agent** uses Morpheus: poll jobs, pull context, reply, optionally open GitHub issues with implementation suggestions.

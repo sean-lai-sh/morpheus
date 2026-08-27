@@ -2,7 +2,12 @@
 
 Discord intelligence bot for the club's eboard. Ingests messages into SQLite, renders them as structured markdown, and syncs to Nia for semantic search.
 
-**Direction (2026-08):** Nia is a write-only derived index, not the source of truth. The next work is to stop depending on Nia and expose a queryable context API so an official Discord bot can feed a Cursor/Grok agent. Full architecture map, coupling inventory, and migration plan: [docs/context-layer.md](docs/context-layer.md).
+**Direction (2026-08):** Nia is a write-only derived index, not the source of truth. The next work is to stop depending on Nia and expose a queryable context API so an official Discord bot can feed a Cursor/Grok agent.
+
+- Plan: [docs/context-layer.md](docs/context-layer.md)
+- Tracking: [#25](https://github.com/sean-lai-sh/morpheus/issues/25)
+- Slices: [#32](https://github.com/sean-lai-sh/morpheus/issues/32) index · [#26](https://github.com/sean-lai-sh/morpheus/issues/26) FTS → [#27](https://github.com/sean-lai-sh/morpheus/issues/27) HTTP → [#28](https://github.com/sean-lai-sh/morpheus/issues/28) delete Nia → [#29](https://github.com/sean-lai-sh/morpheus/issues/29) mention jobs → [#30](https://github.com/sean-lai-sh/morpheus/issues/30) replies → [#31](https://github.com/sean-lai-sh/morpheus/issues/31) agent poll / GitHub
+
 
 ## How Nia indexing works
 

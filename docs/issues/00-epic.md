@@ -2,7 +2,7 @@
 
 Make Morpheus a **queryable context layer** for Tech@NYU: Discord ingest stays, Nia goes away, a Cursor/Grok agent can be talked to through the official Discord bot.
 
-Do **not** treat this issue as a rewrite. Land the slices below in separate PRs. The investigation that produced this epic is in-repo: [`docs/context-layer.md`](../blob/main/docs/context-layer.md) (path may be on the `cursor/nia-migration-plan-9afa` branch until merged).
+Do **not** treat this issue as a rewrite. Land the slices below in separate PRs. The investigation that produced this epic is in-repo: [`docs/context-layer.md`](https://github.com/sean-lai-sh/morpheus/blob/cursor/nia-migration-plan-9afa/docs/context-layer.md) (PR #24).
 
 ## What the code actually does today (do not re-guess)
 
@@ -28,12 +28,12 @@ Do **not** treat this issue as a rewrite. Land the slices below in separate PRs.
 
 Each child issue is written so a Cursor agent can implement it without this chat.
 
-- [ ] **A.** `ContextStore` + SQLite FTS5, namespace-isolated, ingest writes the index ([child issue])
-- [ ] **B.** Authenticated HTTP `/v1/search`, `/v1/messages/:id`, `/v1/channels/:id/messages`, `/v1/poll` ([child issue])
-- [ ] **C.** Feature-flag Nia off, fix `/health`, then delete `src/nia/` and `register-nia` ([child issue])
-- [ ] **D.** Discord mention / reply-to-bot → `jobs` table ([child issue])
-- [ ] **E.** Job claim/complete HTTP + in-process Discord replies ([child issue])
-- [ ] **F.** Cursor/Grok poll contract + GitHub issue posting (no secrets in repo) ([child issue])
+- [ ] **A.** `ContextStore` + SQLite FTS5, namespace-isolated, ingest writes the index (#26)
+- [ ] **B.** Authenticated HTTP `/v1/search`, `/v1/messages/:id`, `/v1/channels/:id/messages`, `/v1/poll` (#27)
+- [ ] **C.** Feature-flag Nia off, fix `/health`, then delete `src/nia/` and `register-nia` (#28)
+- [ ] **D.** Discord mention / reply-to-bot → `jobs` table (#29)
+- [ ] **E.** Job claim/complete HTTP + in-process Discord replies (#30)
+- [ ] **F.** Cursor/Grok poll contract + GitHub issue posting (no secrets in repo) (#31)
 
 ## Constraints
 

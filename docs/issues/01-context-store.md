@@ -1,8 +1,10 @@
+Parent: #25. Next: #27.
+
 ## Goal
 
 Replace Nia as the retrieval engine with an in-process `ContextStore` backed by SQLite FTS5. Ingest already upserts `messages`; this slice adds search/read/poll **without HTTP** and **without Nia**.
 
-Read [`docs/context-layer.md`](../blob/main/docs/context-layer.md) §3 for the full interface. This issue **supersedes the Nia half of #15**. Keep #15's requirements that still apply: namespace isolation, freshness, abort-friendly design (sync FTS is fine).
+Read [`docs/context-layer.md`](https://github.com/sean-lai-sh/morpheus/blob/cursor/nia-migration-plan-9afa/docs/context-layer.md) §3 for the full interface. This issue **supersedes the Nia half of #15**. Keep #15's requirements that still apply: namespace isolation, freshness, abort-friendly design (sync FTS is fine).
 
 ## Files to create / modify
 

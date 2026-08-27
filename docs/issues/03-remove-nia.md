@@ -1,3 +1,5 @@
+Parent: #25. Depends on #26 (and preferably #27).
+
 ## Goal
 
 Stop depending on Nia for indexing. After ContextStore + HTTP exist, turn the syncer off by default, then delete the vendor code.

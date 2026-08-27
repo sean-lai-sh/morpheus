@@ -1,3 +1,5 @@
+Parent: #25. Next: #30.
+
 ## Goal
 
 Turn `@bot` mentions (and replies to the bot) in allowlisted Tech@NYU channels into durable **jobs** in SQLite. No LLM in this slice. No Nia. Official bot only.

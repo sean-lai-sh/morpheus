@@ -2,6 +2,8 @@
 
 Investigation of https://github.com/sean-lai-sh/morpheus (main @ `291a3ef`, after PR #6 `nia-index-overhaul`). This document is the source of truth for the Nia-exit and Discord-entry work. It is based on the current tree, not on earlier guesses.
 
+**Filed issues:** tracking [#25](https://github.com/sean-lai-sh/morpheus/issues/25) · index [#32](https://github.com/sean-lai-sh/morpheus/issues/32) · [#26](https://github.com/sean-lai-sh/morpheus/issues/26) ContextStore · [#27](https://github.com/sean-lai-sh/morpheus/issues/27) HTTP · [#28](https://github.com/sean-lai-sh/morpheus/issues/28) remove Nia · [#29](https://github.com/sean-lai-sh/morpheus/issues/29) jobs · [#30](https://github.com/sean-lai-sh/morpheus/issues/30) replies · [#31](https://github.com/sean-lai-sh/morpheus/issues/31) agent poll. Analysis PR: [#24](https://github.com/sean-lai-sh/morpheus/pull/24).
+
 **Corrections vs. the investigation brief**
 
 | Guess | What the code actually does |
@@ -374,18 +376,17 @@ Implementers should not blindly follow these:
 
 ---
 
-Issue drafts (same text filed on GitHub) live in [`docs/issues/`](issues/).
+Issue drafts (same text filed on GitHub) live in [`docs/issues/`](issues/). Tracking epic: **#25**. PR: **#24**.
 
 ## 7. Implementation order
 
-Concrete GitHub issues are filed from this list (see the tracking issue). Order:
+Filed on `sean-lai-sh/morpheus` (bodies also in `docs/issues/`):
 
-1. ContextStore + FTS5 + namespace isolation + tests (no HTTP yet; ingest writes the index).
-2. Authenticated HTTP `/v1/search|messages|poll` on the existing Bun server.
-3. Feature-flag Nia syncer off; stop requiring Nia env; fix `/health`.
-4. `jobs` table + mention/reply enqueue (no LLM).
-5. Job claim/complete HTTP + Discord reply posting in-process.
-6. Document Cursor/Grok poll loop + optional GitHub issue posting (agent-side).
-7. Delete `src/nia/`, `register-nia`, Nia env, after a soak with the flag off.
+1. **#26** ContextStore + FTS5 + namespace isolation + tests (no HTTP yet; ingest writes the index).
+2. **#27** Authenticated HTTP `/v1/search|messages|poll` on the existing Bun server.
+3. **#28** Feature-flag Nia syncer off; stop requiring Nia env; fix `/health`; then delete `src/nia/`.
+4. **#29** `jobs` table + mention/reply enqueue (no LLM).
+5. **#30** Job claim/complete HTTP + Discord reply posting in-process.
+6. **#31** Document Cursor/Grok poll loop + optional GitHub issue posting (agent-side).
 
-Markdown export (`appendBlock`) can stay until (7) so a rollback to Nia is possible; do not build new features on it.
+Markdown export (`appendBlock`) can stay until #28 so a rollback to Nia is possible; do not build new features on it.

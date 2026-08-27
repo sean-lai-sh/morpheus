@@ -1,3 +1,5 @@
+Parent: #25. Depends on #29 and #27.
+
 ## Goal
 
 Let an external Cursor/Grok agent **claim** queued Discord jobs, do work using `/v1/search` etc., then **complete** them. Completing posts a **Discord reply from the official bot process**. The agent never receives `DISCORD_TOKEN`.
