@@ -2,7 +2,7 @@
 
 Investigation of https://github.com/sean-lai-sh/morpheus (main @ `291a3ef`, after PR #6 `nia-index-overhaul`). This document is the source of truth for the Nia-exit and Discord-entry work. It is based on the current tree, not on earlier guesses.
 
-**Filed issues:** tracking [#25](https://github.com/sean-lai-sh/morpheus/issues/25) · index [#32](https://github.com/sean-lai-sh/morpheus/issues/32) · [#26](https://github.com/sean-lai-sh/morpheus/issues/26) ContextStore · [#27](https://github.com/sean-lai-sh/morpheus/issues/27) HTTP · [#28](https://github.com/sean-lai-sh/morpheus/issues/28) remove Nia · [#29](https://github.com/sean-lai-sh/morpheus/issues/29) jobs · [#30](https://github.com/sean-lai-sh/morpheus/issues/30) replies · [#31](https://github.com/sean-lai-sh/morpheus/issues/31) agent poll. Analysis PR: [#24](https://github.com/sean-lai-sh/morpheus/pull/24).
+**Filed issues:** tracking [#25](https://github.com/sean-lai-sh/morpheus/issues/25) · Grok Bot consumer [#33](https://github.com/sean-lai-sh/morpheus/issues/33) · park agent-v1 [#34](https://github.com/sean-lai-sh/morpheus/issues/34) · index [#32](https://github.com/sean-lai-sh/morpheus/issues/32) · [#26](https://github.com/sean-lai-sh/morpheus/issues/26)–[#31](https://github.com/sean-lai-sh/morpheus/issues/31) slices · events HTTP [#35](https://github.com/sean-lai-sh/morpheus/issues/35). Analysis PR: [#24](https://github.com/sean-lai-sh/morpheus/pull/24).
 
 **Corrections vs. the investigation brief**
 
@@ -14,7 +14,7 @@ Investigation of https://github.com/sean-lai-sh/morpheus (main @ `291a3ef`, afte
 | Discord is a future entry point | Discord is **already** the ingest entry point (official `discord.js` bot, not a self-bot). What is missing is mention→job, replies, and GitHub issue posting. |
 | Search/read of indexed artifacts lives here | **Not implemented.** Planned in open issue #15 as "SQLite FTS + Nia search", which this plan supersedes. |
 
-Existing `agent-v1` issues (#7–#22) assume an **in-process Pi/Claude agent** (`@mariozechner/pi-agent-core`) that still queries Nia. This plan instead treats Morpheus as the **context + Discord I/O layer** for an external Cursor/Grok agent. Do not implement #15's Nia retrieval path.
+Existing `agent-v1` issues (#7–#22) assume an **in-process Pi/Claude agent** (`@mariozechner/pi-agent-core`) that still queries Nia. The consumer is now **Cursor Grok Bot** (Tech@NYU), via Discord → Morpheus HTTP → Grok Bot. Audit of every open PR/issue: [`docs/grok-bot-audit.md`](grok-bot-audit.md). Do not implement #15's Nia retrieval path or #10's in-process mention reply.
 
 ---
 
