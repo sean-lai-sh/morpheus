@@ -33,9 +33,14 @@ export type FastPathSkip =
   | "missing-event-id"
   | "api-error"
   | "meet-pending"
+  | "meet-failed"
   | "unknown-state";
 
-export const DEFERRING_SKIPS: ReadonlySet<FastPathSkip> = new Set<FastPathSkip>(["meet-pending", "unknown-state"]);
+export const DEFERRING_SKIPS: ReadonlySet<FastPathSkip> = new Set<FastPathSkip>([
+  "meet-pending",
+  "meet-failed",
+  "unknown-state",
+]);
 
 export type FastPathOutcome =
   | {
@@ -217,8 +222,9 @@ export async function tryMiniCalendarSync(
 
     // The event exists; only the Meet is missing. Keep the id, retry later.
     if (apiError?.calendarEventId) {
-      logger.warn(detail, "calendar fast path: event exists but Meet is not ready; deferring");
-      return { ok: false, skip: "meet-pending", calendarEventId: apiError.calendarEventId };
+      const skip = apiError.reason === "meet-failed" ? "meet-failed" : "meet-pending";
+      logger.warn(detail, `calendar fast path: event exists but Meet is ${skip === "meet-failed" ? "failed" : "not ready"}; deferring`);
+      return { ok: false, skip, calendarEventId: apiError.calendarEventId };
     }
 
     // Anything else (timeout, 5xx after retries, network) may have committed on

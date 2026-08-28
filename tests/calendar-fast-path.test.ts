@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { publishOutboxEvent } from "../src/coordinator/publisher.ts";
+import { publishOutboxEvent, type CalendarFastPath as CalendarFastPathFn } from "../src/coordinator/publisher.ts";
 import { coordinatorJobMessageId } from "../src/coordinator/calendar-job.ts";
 import {
   tryMiniCalendarCancel,
@@ -409,7 +409,8 @@ describe("publisher prefers the Mini and falls back to Grok", () => {
     expect(outcome.status).toBe("deferred");
     const row = getOutboxEvent(event.id);
     expect(row?.status).toBe("pending");
-    expect(row?.attempts).toBe(1);
+    // Transient deferrals do not burn dead-letter attempts (see the cap test below).
+    expect(row?.attempts).toBe(0);
     expect(getMeeting(meeting.id)?.calendarEventId).toBe("evt-half");
     expect(getMeeting(meeting.id)?.meetLink).toBeNull();
   });
@@ -452,6 +453,90 @@ describe("publisher prefers the Mini and falls back to Grok", () => {
     expect(calls).toEqual(["meeting.calendar_sync:null", "meeting.calendar_cancel:evt-raced"]);
     expect(getOutboxEvent(syncEvent.id)?.status).toBe("dispatched");
     expect(getMeeting(meeting.id)?.status).toBe("cancelled");
+  });
+
+  test("cancel race, undo FAILS: the retry sweep (stale_version) deletes the event before closing the row", async () => {
+    const { meeting, outboxEvents } = scheduledMeeting("Cancel race, undo fails");
+    const syncEvent = outboxEvents[0]!;
+    const cancels: Array<string | null> = [];
+    let undoAttempts = 0;
+
+    const fastPath = async (input: Parameters<CalendarFastPathFn>[0]) => {
+      if (input.kind === "meeting.calendar_sync") {
+        cancelMeeting({ meetingId: meeting.id, creatorUserId: "creator-fast" });
+        return { ok: true, calendarEventId: "evt-raced-2", meetLink: "https://meet.google.com/r2", attendeeCount: 1 } as const;
+      }
+      undoAttempts += 1;
+      cancels.push(input.meeting.calendarEventId);
+      // First undo: Google 5xx. Second (from the sweep): success.
+      if (undoAttempts === 1) return { ok: false, skip: "api-error" } as const;
+      return { ok: true, calendarEventId: input.meeting.calendarEventId, meetLink: null, attendeeCount: 0 } as const;
+    };
+    const noGrok = () => {
+      throw new Error("Grok must not be reached");
+    };
+
+    const first = await publishOutboxEvent(syncEvent, { calendarFastPath: fastPath, enqueueCalendar: noGrok });
+    expect(first.status).toBe("deferred");
+    expect(getOutboxEvent(syncEvent.id)?.status).toBe("pending");
+
+    // The sweeper re-reads the row; the meeting version has moved on (cancel).
+    const retry = await publishOutboxEvent(getOutboxEvent(syncEvent.id)!, {
+      calendarFastPath: fastPath,
+      enqueueCalendar: noGrok,
+    });
+    expect(retry.status).toBe("accepted");
+    expect(getOutboxEvent(syncEvent.id)?.status).toBe("dispatched");
+    expect(undoAttempts).toBe(2);
+    // The second undo went through the cancel path with the meeting's own row
+    // (null id there, so the fast path looks up the deterministic id).
+    expect(cancels).toEqual(["evt-raced-2", null]);
+  });
+
+  test("cancel race, upsert throws and lookup misses: no Grok CREATE on a cancelled meeting", async () => {
+    const { meeting, outboxEvents } = scheduledMeeting("Cancel race, Grok create");
+    const syncEvent = outboxEvents[0]!;
+    const kinds: string[] = [];
+
+    const outcome = await publishOutboxEvent(syncEvent, {
+      calendarFastPath: async (input) => {
+        kinds.push(input.kind);
+        if (input.kind === "meeting.calendar_sync") {
+          cancelMeeting({ meetingId: meeting.id, creatorUserId: "creator-fast" });
+          // Abort + GET 404: "proven absent" from the fast path's point of view.
+          return { ok: false, skip: "api-error" };
+        }
+        return { ok: false, skip: "missing-event-id" };
+      },
+      enqueueCalendar: () => {
+        throw new Error("Grok must not be handed a create for a cancelled meeting");
+      },
+    });
+
+    expect(outcome.status).toBe("accepted");
+    expect(getOutboxEvent(syncEvent.id)?.status).toBe("dispatched");
+    expect(kinds).toEqual(["meeting.calendar_sync", "meeting.calendar_cancel"]);
+    expect(getJobByDiscordMessageId(coordinatorJobMessageId(syncEvent.id))).toBeNull();
+  });
+
+  test("meet-pending / unknown-state do not count toward the dead-letter cap; meet-failed does", async () => {
+    const pending = scheduledMeeting("Deferral cap");
+    const event = pending.outboxEvents[0]!;
+    for (let i = 0; i < 10; i += 1) {
+      await publishOutboxEvent(event, {
+        calendarFastPath: async () => ({ ok: false, skip: i % 2 ? "meet-pending" : "unknown-state" }),
+      });
+    }
+    expect(getOutboxEvent(event.id)?.status).toBe("pending");
+    expect(getOutboxEvent(event.id)?.attempts).toBe(0);
+
+    const failed = scheduledMeeting("Meet failed");
+    const failedEvent = failed.outboxEvents[0]!;
+    await publishOutboxEvent(failedEvent, {
+      calendarFastPath: async () => ({ ok: false, skip: "meet-failed", calendarEventId: "evt-nomeet" }),
+    });
+    expect(getOutboxEvent(failedEvent.id)?.attempts).toBe(1);
+    expect(getMeeting(failed.meeting.id)?.calendarEventId).toBe("evt-nomeet");
   });
 
   test("two dispatchers on the same row: the second is deferred while the first is in flight", async () => {

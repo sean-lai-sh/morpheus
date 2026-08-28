@@ -120,13 +120,23 @@ export function applyRosterSeedResult(input: {
   now?: number;
   /** Test/one-off seam: keep bindings the seed did not mention. Defaults to prune. */
   prune?: boolean;
-}): { mapped: number; unmatched: RosterUnmatched[]; pruned: number } {
+}): { mapped: number; unmatched: RosterUnmatched[]; pruned: number; pruneSkipped?: "empty" | "shrink-guard" } {
   const db = getDb();
   const now = input.now ?? Date.now();
   const accepted = acceptableMappings(input.mappings);
   let pruned = 0;
+  let pruneSkipped: "empty" | "shrink-guard" | undefined;
   db.transaction(() => {
-    if ((input.prune ?? true) && accepted.length > 0) {
+    const manualIds = new Set(MANUAL_ROSTER_BINDINGS.map((mapping) => mapping.discord_id));
+    const existingSeeded = listAllRosterBindings().filter((row) => !manualIds.has(row.discordId)).length;
+    // A truncated-but-well-formed seed (Grok returned one row of forty) must
+    // not replace the production guest list. Below half the current snapshot
+    // the new rows are still upserted, but nothing is pruned; a genuinely
+    // shrinking roster gets there in two seeds or with an operator's `prune`.
+    const shrinkGuard = existingSeeded > 0 && accepted.length * 2 < existingSeeded;
+    if (accepted.length === 0) pruneSkipped = "empty";
+    else if (shrinkGuard && input.prune === undefined) pruneSkipped = "shrink-guard";
+    if ((input.prune ?? true) && accepted.length > 0 && pruneSkipped === undefined) {
       const keep = new Set<string>([
         ...accepted.map((mapping) => mapping.discord_id.trim()),
         ...MANUAL_ROSTER_BINDINGS.map((mapping) => mapping.discord_id),
@@ -140,7 +150,7 @@ export function applyRosterSeedResult(input: {
     upsertMappings(db, accepted, now);
     upsertManualRosterBindings(db, now);
   })();
-  return { mapped: accepted.length, unmatched: input.unmatched ?? [], pruned };
+  return { mapped: accepted.length, unmatched: input.unmatched ?? [], pruned, ...(pruneSkipped ? { pruneSkipped } : {}) };
 }
 
 /** One-shot empty-Disc people who ARE on Discord. Pass `db` during migrate (getDb is not ready). */

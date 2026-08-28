@@ -188,8 +188,11 @@ describe("requestId stability", () => {
     expect(new URL(calls[2]!.url).pathname).toBe(
       `/calendar/v3/calendars/hello%40techatnyu.org/events/${calendarEventIdFor(MEETING_ID)}`,
     );
-    // The convergence PATCH never asks for a new conference (that would swap the Meet).
+    // The convergence PATCH never asks for a new conference (that would swap the Meet)
+    // and never re-mails the guest list: the committed POST already did.
     expect(calls[2]!.body.conferenceData).toBeUndefined();
+    expect(new URL(calls[2]!.url).searchParams.get("sendUpdates")).toBe("none");
+    expect(new URL(calls[2]!.url).searchParams.get("conferenceDataVersion")).toBe("1");
     expect(calls[2]!.body.id).toBeUndefined();
     expect(result.calendarEventId).toBe("evt_123");
   });
@@ -305,6 +308,23 @@ describe("getEvent", () => {
 });
 
 describe("abort", () => {
+  test("a hung token exchange is cut by the signal, before any Calendar call", async () => {
+    const controller = new AbortController();
+    const hungToken = { getAccessToken: () => new Promise<string>(() => {}) };
+    const { calls, fetchImpl } = recorder([() => jsonResponse(createdEvent)]);
+    const api = createGoogleCalendarClient({ tokenSource: hungToken, fetchImpl, sleepImpl: async () => {} });
+    const attempt = api.upsertEvent(baseInput({ signal: controller.signal }));
+    setTimeout(() => controller.abort(), 5);
+    let caught: unknown;
+    try {
+      await attempt;
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as CalendarApiError).aborted).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
   test("an already-aborted signal short-circuits before any fetch and reports aborted", async () => {
     const controller = new AbortController();
     controller.abort();

@@ -265,11 +265,7 @@ async function dispatchCalendarJob(
     logger.warn(logCorrelate(event, { reason: "meeting_not_found" }), "outbox.publish.unsupported");
     return "unsupported";
   }
-  if (meeting.version !== version && event.type === "meeting.calendar_sync_requested") {
-    markOutboxDispatched(event.id, now);
-    logger.info(logCorrelate(event, { reason: "stale_version" }), "outbox.publish.skipped");
-    return "accepted";
-  }
+  const staleSync = meeting.version !== version && event.type === "meeting.calendar_sync_requested";
 
   const kind =
     event.type === "meeting.calendar_cancel_requested" ? "meeting.calendar_cancel" : "meeting.calendar_sync";
@@ -301,6 +297,34 @@ async function dispatchCalendarJob(
             calendarEventId: input.meeting.calendarEventId,
           }));
 
+  /**
+   * Cancel is the only version bump, so a stale sync row is (almost always) the
+   * retry of an insert that raced a cancel. The first attempt's undo may have
+   * failed, or the insert may have landed after the cancel row already went
+   * out with a null id. Before this row is closed, make sure no Mini event is
+   * left behind: the cancel path looks up the deterministic id when the
+   * meeting holds none. `missing-event-id` means proven absent, which is fine.
+   */
+  const ensureNoMiniEvent = async (): Promise<"clean" | "deferred"> => {
+    const undo = await runFastPath({ kind: "meeting.calendar_cancel", meeting: getMeeting(meeting.id) ?? meeting, participantIds });
+    if (undo.ok || undo.skip === "missing-event-id" || undo.skip === "not-configured" || undo.skip === "disabled") {
+      return "clean";
+    }
+    const failure = recordOutboxDispatchFailure(event.id, `orphan-event:${undo.skip}`, now);
+    logger.error(
+      logCorrelate(event, { meetingId, skip: undo.skip, attempts: failure.attempts }),
+      failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+    );
+    return "deferred";
+  };
+
+  if (staleSync) {
+    if (meeting.status !== "scheduled" && (await ensureNoMiniEvent()) === "deferred") return "deferred";
+    markOutboxDispatched(event.id, now);
+    logger.info(logCorrelate(event, { reason: "stale_version" }), "outbox.publish.skipped");
+    return "accepted";
+  }
+
   const fast = await runFastPath({ kind, meeting, participantIds });
   if (fast.ok) {
     if (kind === "meeting.calendar_sync") {
@@ -325,6 +349,8 @@ async function dispatchCalendarJob(
           participantIds,
         });
         if (!undo.ok) {
+          // Deferred; the next sweep sees `stale_version` and runs
+          // `ensureNoMiniEvent` before closing the row.
           const failure = recordOutboxDispatchFailure(event.id, `orphan-event:${undo.skip}`, now);
           logger.error(
             logCorrelate(event, { meetingId, skip: undo.skip, attempts: failure.attempts }),
@@ -353,12 +379,33 @@ async function dispatchCalendarJob(
     if (kind === "meeting.calendar_sync" && fast.calendarEventId) {
       applyCalendarSyncResult({ meetingId: meeting.id, version, calendarEventId: fast.calendarEventId, now });
     }
-    const failure = recordOutboxDispatchFailure(event.id, `calendar fast path: ${fast.skip}`, now);
-    logger.warn(
-      logCorrelate(event, { meetingId, skip: fast.skip, attempts: failure.attempts }),
-      failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
-    );
+    if (fast.skip === "meet-failed") {
+      // Google said the conference will never come; a PATCH cannot re-request
+      // one. This counts toward the dead-letter cap so the row does not spin
+      // forever, and the stored id keeps the event cancellable/inspectable.
+      const failure = recordOutboxDispatchFailure(event.id, `calendar fast path: ${fast.skip}`, now);
+      logger.error(
+        logCorrelate(event, { meetingId, skip: fast.skip, attempts: failure.attempts }),
+        failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+      );
+      return "deferred";
+    }
+    // Still-provisioning Meet or an unanswered lookup: transient by definition.
+    // These are NOT counted toward the dead-letter cap -- a mailed event with
+    // no stored Meet must never be silently abandoned after five minutes. The
+    // sweeper retries every 60s; the Mini converges on the same event id.
+    logger.warn(logCorrelate(event, { meetingId, skip: fast.skip }), "outbox.publish.deferred");
     return "deferred";
+  }
+  // Nothing of ours exists on Google (proven, or never attempted). Before
+  // paying Grok, re-read the meeting: a cancel that landed during the attempt
+  // must not turn into a Grok *create* on a cancelled meeting -- Grok does not
+  // use the deterministic id, so that would be a second, unreachable event.
+  if (kind === "meeting.calendar_sync" && getMeeting(meeting.id)?.status !== "scheduled") {
+    if ((await ensureNoMiniEvent()) === "deferred") return "deferred";
+    markOutboxDispatched(event.id, now);
+    logger.info(logCorrelate(event, { reason: "cancelled_during_sync" }), "outbox.publish.skipped");
+    return "accepted";
   }
   logger.info(
     logCorrelate(event, { meetingId, skip: fast.skip }),

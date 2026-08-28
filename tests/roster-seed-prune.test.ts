@@ -46,6 +46,27 @@ describe("roster seed replaces the snapshot", () => {
     expect(listAllRosterBindings()).toHaveLength(before);
   });
 
+  test("a truncated seed (under half the snapshot) upserts but does not prune", () => {
+    const many = Array.from({ length: 6 }, (_, i) => ({
+      discord_id: `30000000000000000${i}`,
+      email: `p${i}@nyu.edu`,
+      name: `P${i}`,
+      disc: `p${i}`,
+      confidence: "disc" as const,
+    }));
+    applyRosterSeedResult({ mappings: many });
+    const before = listAllRosterBindings().length;
+
+    const truncated = applyRosterSeedResult({ mappings: [many[0]!] });
+    expect(truncated.pruneSkipped).toBe("shrink-guard");
+    expect(truncated.pruned).toBe(0);
+    expect(listAllRosterBindings()).toHaveLength(before);
+
+    // An operator can force it.
+    const forced = applyRosterSeedResult({ mappings: [many[0]!], prune: true });
+    expect(forced.pruned).toBe(5);
+  });
+
   test("prune: false keeps unmentioned rows (one-off top-ups)", () => {
     applyRosterSeedResult({ mappings: [A, B] });
     applyRosterSeedResult({ mappings: [A], prune: false });

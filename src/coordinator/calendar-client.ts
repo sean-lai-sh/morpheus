@@ -320,6 +320,26 @@ function isAbort(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
+/** Resolves with `promise`, or rejects as aborted the moment `signal` fires. */
+function withAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined, op: string): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError(op));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortError(op));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
 export interface CalendarClientDeps {
   tokenSource: TokenSource;
   fetchImpl?: typeof fetch;
@@ -377,7 +397,9 @@ export function createGoogleCalendarClient(deps: CalendarClientDeps): CalendarCl
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       if (init.signal?.aborted) throw abortError(op);
       // Token is fetched per call; the token source owns caching and refresh.
-      const token = await deps.tokenSource.getAccessToken();
+      // The exchange is raced against the signal too: a hung OAuth POST must
+      // not outlive the deadline any more than a hung Calendar call.
+      const token = await withAbort(deps.tokenSource.getAccessToken(), init.signal, op);
       const headers: Record<string, string> = { Authorization: `Bearer ${token}`, Accept: "application/json" };
       if (init.body !== undefined) headers["Content-Type"] = "application/json";
 
@@ -455,10 +477,21 @@ export function createGoogleCalendarClient(deps: CalendarClientDeps): CalendarCl
           op = "update";
           logger.info({ op: "create" }, "calendar.event.exists; converging via update");
           const { id: _id, conferenceData: _conf, ...patchBody } = prepared.body;
+          // The earlier POST already mailed everyone; this PATCH only converges
+          // state, so it must not send a second invite (`sendUpdates=none`).
           // `confirmed` revives the row if the earlier copy was deleted; harmless otherwise.
           response = await request(
             op,
-            { url: prepared.updateUrl, method: "PATCH", body: { ...patchBody, status: "confirmed" }, ...(signal ? { signal } : {}) },
+            {
+              url: eventUrl(
+                input.calendarId,
+                prepared.eventId,
+                new URLSearchParams({ sendUpdates: "none", conferenceDataVersion: "1" }),
+              ),
+              method: "PATCH",
+              body: { ...patchBody, status: "confirmed" },
+              ...(signal ? { signal } : {}),
+            },
             () => false,
           );
         }
