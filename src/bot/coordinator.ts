@@ -772,7 +772,14 @@ export function confirmSummary(draft: {
   return lines.join("\n");
 }
 
-/** The in-channel post. Shared time formatting with the preview by construction. */
+/**
+ * The in-channel post. Shared time formatting with the preview by construction.
+ *
+ * Attendees are rendered as real mentions so the channel can see at a glance who
+ * is expected, and each name is clickable. `ALLOWED_MENTIONS` suppresses every
+ * ping, so this reads as a roster rather than notifying 29 people twice -- they
+ * already got the calendar invite.
+ */
 export function meetingAnnouncement(
   meeting: {
     title: string;
@@ -783,7 +790,7 @@ export function meetingAnnouncement(
     audienceKind: "picked" | "f26_roster";
     timeZone: string;
   },
-  participantCount: number,
+  participants: readonly { userId: string }[],
 ): string {
   const durationMinutes = Math.max(1, Math.round((meeting.endsAt - meeting.startsAt) / 60_000));
   const lines = [
@@ -791,12 +798,14 @@ export function meetingAnnouncement(
     meetingWhenLine(meeting.startsAt, durationMinutes, meeting.timeZone),
   ];
   if (meeting.location) lines.push(`📍 ${meeting.location}`);
-  lines.push(
-    meeting.audienceKind === "f26_roster"
-      ? "Invited: F26 roster (role is not expanded)."
-      : `Invited: ${participantCount} attendee(s).`,
-  );
-  lines.push(`Meeting ID: \`${meeting.id}\``);
+
+  const mentions = participants.map((p) => `<@${p.userId}>`);
+  // The role is never expanded into members -- the F26 sheet is the source of
+  // truth for who it covers -- so it is announced as the role itself.
+  if (meeting.audienceKind === "f26_roster") mentions.unshift(`<@&${EBOARD_ROLE_ID}>`);
+  lines.push(mentions.length > 0 ? `**Attending:** ${mentions.join(" ")}` : "**Attending:** nobody yet.");
+
+  lines.push(`-# Meeting ID: \`${meeting.id}\``);
   return lines.join("\n");
 }
 
@@ -1140,7 +1149,7 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     const outcomes = await publish(result.outboxEvents);
     if (interaction.client.isReady() && draft.channelId) {
       try {
-        await announceMeeting(interaction.client, draft.channelId, meetingAnnouncement(result.meeting, people.length));
+        await announceMeeting(interaction.client, draft.channelId, meetingAnnouncement(result.meeting, people));
       } catch (err) {
         logger.warn({ err, meetingId: result.meeting.id }, "meeting.announce.failed");
       }

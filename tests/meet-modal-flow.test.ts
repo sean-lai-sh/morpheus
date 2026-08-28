@@ -116,7 +116,7 @@ describe("confirmSummary is the last stop before real invitations", () => {
   });
 });
 
-describe("meetingAnnouncement", () => {
+describe("meetingAnnouncement names the attendees", () => {
   const meeting = {
     title: "Eboard sync",
     startsAt: START,
@@ -126,27 +126,39 @@ describe("meetingAnnouncement", () => {
     audienceKind: "picked" as const,
     timeZone: "America/New_York",
   };
+  const people = [{ userId: "111" }, { userId: "222" }, { userId: "333" }];
+
+  test("lists every attendee as a mention rather than a bare count", () => {
+    const out = meetingAnnouncement(meeting, people);
+    expect(out).toContain("**Attending:** <@111> <@222> <@333>");
+    // The count was the thing being replaced.
+    expect(out).not.toContain("3 attendee");
+  });
 
   test("derives duration from the stored window", () => {
-    expect(meetingAnnouncement(meeting, 3)).toContain("1h30m");
+    expect(meetingAnnouncement(meeting, people)).toContain("1h30m");
   });
 
   test("carries the meeting id so /meet cancel is possible", () => {
-    expect(meetingAnnouncement(meeting, 3)).toContain("`m-42`");
+    expect(meetingAnnouncement(meeting, people)).toContain("`m-42`");
   });
 
-  test("does not expand the role for an f26 audience", () => {
-    const out = meetingAnnouncement({ ...meeting, audienceKind: "f26_roster" }, 29);
-    expect(out).toContain("role is not expanded");
-    expect(out).not.toContain("29 attendee");
+  test("an f26 audience announces the role, still without expanding it", () => {
+    const out = meetingAnnouncement({ ...meeting, audienceKind: "f26_roster" }, []);
+    expect(out).toContain(`<@&${EBOARD_ROLE_ID}>`);
   });
 
-  test("reports the attendee count for a picked audience", () => {
-    expect(meetingAnnouncement(meeting, 3)).toContain("3 attendee(s)");
+  test("role plus individuals shows the role first, then the extras", () => {
+    const out = meetingAnnouncement({ ...meeting, audienceKind: "f26_roster" }, [{ userId: "999" }]);
+    expect(out).toContain(`**Attending:** <@&${EBOARD_ROLE_ID}> <@999>`);
+  });
+
+  test("an empty picked audience says so rather than rendering a blank line", () => {
+    expect(meetingAnnouncement(meeting, [])).toContain("nobody yet");
   });
 
   test("includes a location when set", () => {
-    expect(meetingAnnouncement({ ...meeting, location: "Zoom" }, 1)).toContain("📍 Zoom");
+    expect(meetingAnnouncement({ ...meeting, location: "Zoom" }, people)).toContain("📍 Zoom");
   });
 });
 
