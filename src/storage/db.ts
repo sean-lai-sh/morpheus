@@ -153,6 +153,15 @@ function migrateAlter(db: Database): void {
   // counters must be able to tell an interactive job from a /background one.
   // Pre-existing rows default to 'interactive', which is what they were.
   try { db.exec(`ALTER TABLE jobs ADD COLUMN lane TEXT NOT NULL DEFAULT 'interactive'`); } catch { /* already exists */ }
+  // Mini weekday digest idempotency: one successful post per calendar day + channel (#76).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS digest_posts (
+      day TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      posted_at INTEGER NOT NULL,
+      PRIMARY KEY (day, channel)
+    )
+  `);
   migrateSeqAndFts(db);
 }
 

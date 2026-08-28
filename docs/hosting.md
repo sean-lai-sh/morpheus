@@ -40,7 +40,7 @@ Slice #0: [#39](https://github.com/sean-lai-sh/morpheus/issues/39). Live index t
 
 1. Discord gateway (`wss://…` via discord.js)
 2. `GROK_BOT_WEBHOOK_URL` — **thin** job + first-pass snippets, not the whole index
-3. Optional: Discord incoming webhooks if Mini itself posts a digest
+3. Discord incoming webhooks when Mini posts the weekday digest (`MINI_DIGEST_ENABLED`, #76)
 
 **Live index HTTP (Grok pulls more):** Tailscale overlay only.
 
@@ -65,10 +65,11 @@ Documented empty in `.env.example`. Inject via Doppler **on the Mini** or the Gr
 | `GROK_BOT_WEBHOOK_SECRET` | **Mini** | Sender key. Mini sends `Authorization: Bearer`. Not in the JSON body. Never on Grok as `DISCORD_BOT_TOKEN`. |
 | Per-workspace `MORPHEUS_API_TOKEN_*` (`workspaces.<id>.token_env`, e.g. `_LEADERSHIP`, `_EBOARD`, `_PROGRAMS_DEV`) | Mini + Grok (matching scope) | Tailscale `/v1/fs` + optional job complete. Scope = that workspace plus descendants, from whichever token matched. |
 | `MORPHEUS_BASE_URL` | **Grok Bot** | Tailnet URL of Mini Morpheus HTTP. Not a public URL. |
-| `DISCORD_WEBHOOK_SPONSORS` | **Grok Bot** | Incoming webhook for `#sponsors` |
-| `DISCORD_WEBHOOK_OPPORTUNITIES` | **Grok Bot** | `#opportunities` |
-| `DISCORD_WEBHOOK_SPEAKERS` | **Grok Bot** | `#speakers` |
-| `DISCORD_WEBHOOK_INBOX` | **Grok Bot** | proposed `#inbox` |
+| `DISCORD_WEBHOOK_SPONSORS` | **Grok Bot** (+ Mini when digest on) | Incoming webhook for `#sponsors` |
+| `DISCORD_WEBHOOK_OPPORTUNITIES` | **Grok Bot** (+ Mini when digest on) | `#opportunities` |
+| `DISCORD_WEBHOOK_SPEAKERS` | **Grok Bot** (+ Mini when digest on) | `#speakers` |
+| `DISCORD_WEBHOOK_INBOX` | **Grok Bot** (+ Mini when digest on) | proposed `#inbox` |
+| `MINI_DIGEST_ENABLED` | **Mini** | Weekday digest (#76). Default `false`. Same Doppler project — not a second env flavor. |
 
 Do not put these in git, in `config/channels.yml`, or in PR text. Do not put `MORPHEUS_BASE_URL` or API tokens in the Discord webhook payload.
 
@@ -77,6 +78,7 @@ Mini Doppler does **not** need `NIA_*`. Nia is unsupported; delete leftover Nia 
 ## Operator notes (Mini)
 
 - Keep `bun run live` under launchd/`brew services` so a reboot restores the gateway.
+- Weekday digest is default OFF. When `MINI_DIGEST_ENABLED=true` and the four `DISCORD_WEBHOOK_*` URLs are in the same Doppler project, cron or launchd can run `doppler run -- bun run digest` on weekday mornings. Unset webhook or empty bucket skips that channel.
 - SQLite + `data/` stay on the Mini disk (Time Machine / local backup). Not on Grok Bot's box. **Not** shared as a network filesystem.
 - `config/channels.yml` stays on the Mini (gitignored).
 - Doppler project `morpheus-bot` on the Mini holds the bot token; Cursor cloud agents should not receive `DISCORD_BOT_TOKEN`.

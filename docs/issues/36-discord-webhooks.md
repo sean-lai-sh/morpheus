@@ -24,7 +24,7 @@ Already sketched in this repo (`src/notify/*`, `docs/discord-webhooks.md`, `bun 
 3. Operators create webhooks in Discord: channel → Integrations → Webhooks (see the doc).
 4. `routeFeedChannel` / `routeFeedFromText` for kind → channel.
 
-Optional later: Mini-originated digests using `bun run post-feed` on the Mac Mini.
+Mini-originated weekday digest (same `postFeed` module on the persistent host): **#76**. That slice does not close this issue.
 
 ## Out of scope
 
