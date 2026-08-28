@@ -218,6 +218,38 @@ export function countJobsSince(
   );
 }
 
+/**
+ * Cancel jobs that have sat `queued` past `maxAgeMs` without a worker ever
+ * claiming them.
+ *
+ * Dispatch is a one-shot wakeup POST at enqueue time; nothing re-POSTs a row
+ * whose dispatch failed (worker offline, webhook refused, workspace not in the
+ * dispatch allowlist). Such a row stays `queued` forever and permanently
+ * consumes one of its author's outstanding slots. `requeueExpiredClaims`
+ * cannot help — it only moves `claimed` back to `queued`.
+ *
+ * Only rows never claimed are swept: `claimed_by IS NULL` and no reply written.
+ * A job a worker is actively holding is the lease sweeper's business, not this
+ * one's.
+ */
+export function cancelStaleQueuedJobs(now: number, maxAgeMs: number): number {
+  const cutoff = now - maxAgeMs;
+  const rows = getDb()
+    .query<{ id: string }, [number, number]>(
+      `UPDATE jobs
+       SET status = 'cancelled',
+           error = 'stale: no worker claimed it before the queue timeout',
+           updated_at = ?
+       WHERE status = 'queued'
+         AND claimed_by IS NULL
+         AND created_at < ?
+         AND result_discord_message_id IS NULL
+       RETURNING id`,
+    )
+    .all(now, cutoff);
+  return rows.length;
+}
+
 function isUniqueConstraint(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return /UNIQUE constraint failed/i.test(msg) || /constraint failed/i.test(msg);
