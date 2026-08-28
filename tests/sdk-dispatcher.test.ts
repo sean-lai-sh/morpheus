@@ -23,9 +23,13 @@ import {
   DEV_CHAT_PATH,
   EBOARD_TOKEN,
   GENERAL_CHAT_PATH,
+  LEADERSHIP_TEAM_PATH,
   SPONSORS_PATH,
   withWorkspaceConfig,
 } from "./jobs-fixture.ts";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { discordDir } from "../src/storage/markdown.ts";
 
 const BASE = "http://127.0.0.1:8080";
 const API_KEY = "cur_api_key_should_never_leak";
@@ -815,6 +819,67 @@ describe("custom tools", () => {
     await h.waitSettled(1);
   });
 
+  test("morpheus_fs_file execute returns the newest window; /leadership is refused on the disk path", async () => {
+    const sponsorsDir = resolve(discordDir(), "eboard/eboard-teams/sponsors-1001");
+    const leadershipDir = resolve(discordDir(), "leadership/eboard-teams/leadership-team-2002");
+    mkdirSync(sponsorsDir, { recursive: true });
+    mkdirSync(leadershipDir, { recursive: true });
+    const blocks = Array.from(
+      { length: 80 },
+      (_, i) => `## [2026-01-01 00:00 UTC] @someone (msg:${1000 + i})\nblock ${i} ${"y".repeat(40)}`,
+    );
+    writeFileSync(
+      resolve(sponsorsDir, "main.md"),
+      ["# #sponsors", "- channel_id: 1001", "", "---", ...blocks].join("\n") + "\n",
+    );
+    writeFileSync(
+      resolve(leadershipDir, "main.md"),
+      ["# #leadership-team", "- channel_id: 2002", "", "---", "## [2026-01-01] @lead\nsecret eboard ancestor"].join(
+        "\n",
+      ) + "\n",
+    );
+
+    const h = makeHarness();
+    const run = await startJob(h);
+    const tools = run.customTools!;
+    const before = h.requests.length;
+
+    const recent = (await tools.morpheus_fs_file!.execute({ path: SPONSORS_PATH, bytes: 2_000 }, {})) as {
+      content: Array<{ text: string }>;
+      isError?: boolean;
+    };
+    expect(recent.isError).toBeUndefined();
+    const text = recent.content[0]!.text;
+    expect(text).toContain("block 79");
+    expect(text).not.toContain("block 0 ");
+    expect(text).toContain("before=");
+    expect(text).toContain("# #sponsors");
+
+    const channelLead = (await tools.morpheus_fs_file!.execute({ path: LEADERSHIP_TEAM_PATH }, {})) as {
+      isError?: boolean;
+    };
+    expect(channelLead.isError).toBe(true);
+    // Disk path: no HTTP leave for the file read (claim already happened).
+    expect(h.requests.length).toBe(before);
+    expect(h.requests.some((r) => r.url.includes("/v1/fs/file"))).toBe(false);
+    expect(h.requests.some((r) => r.url.includes("/v1/fs/read"))).toBe(false);
+
+    run.finish({ status: "finished", result: "x" });
+    await h.waitSettled(1);
+
+    const hWs = makeHarness();
+    const wsRun = await startJob(hWs, payloadFor("j-file-ws", { scope: "workspace", channel_ids: [] }));
+    const wsLead = (await wsRun.customTools!.morpheus_fs_file!.execute({ path: LEADERSHIP_TEAM_PATH }, {})) as {
+      isError?: boolean;
+      content: Array<{ text: string }>;
+    };
+    expect(wsLead.isError).toBe(true);
+    expect(wsLead.content[0]!.text).not.toContain("secret eboard ancestor");
+
+    wsRun.finish({ status: "finished", result: "x" });
+    await hWs.waitSettled(1);
+  });
+
   test("a hotter sibling channel cannot starve the allowed one, even at limit 1", async () => {
     const h = makeHarness({
       route: (url, init) => {
@@ -1288,6 +1353,14 @@ describe("prompt construction (untrusted content)", () => {
     expect(prompt).toContain("rarest keywords");
     expect(prompt).toContain("morpheus_fs_links");
     expect(prompt).toContain("Never conclude the");
+  });
+
+  test("the prompt steers recent conversation to morpheus_fs_file, not oldest-50 fs_read", () => {
+    const prompt = buildJobPrompt(payloadFor("j1"));
+    expect(prompt).toContain("morpheus_fs_file");
+    expect(prompt).toContain("newest window");
+    expect(prompt).toContain("Use morpheus_fs_read only for a specific message path");
+    expect(prompt).not.toContain("Use morpheus_fs_read on a channel path for the surrounding conversation");
   });
 });
 
