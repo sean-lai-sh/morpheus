@@ -22,6 +22,7 @@ function knownSecrets(env: Env): Array<{ name: string; value: string | undefined
     { name: "CURSOR_SDK_WEBHOOK_SECRET", value: env.CURSOR_SDK_WEBHOOK_SECRET },
     { name: "CURSOR_API_KEY", value: env.CURSOR_API_KEY },
     { name: "NVIDIA_API_KEY", value: env.NVIDIA_API_KEY },
+    { name: "GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY", value: env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY },
   ];
 }
 

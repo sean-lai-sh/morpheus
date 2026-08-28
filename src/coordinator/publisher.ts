@@ -27,6 +27,13 @@ import {
   redactCalendarJobContent,
   serializeCalendarJobPack,
 } from "./calendar-job.ts";
+import {
+  DEFERRING_SKIPS,
+  tryMiniCalendarCancel,
+  tryMiniCalendarSync,
+  type FastPathOutcome,
+} from "./calendar-fast-path.ts";
+import { applyCalendarSyncResult, type MeetingRow } from "../storage/coordinator-meetings.ts";
 
 export const OUTBOX_HANDOFF_TIMEOUT_MS = 1_500;
 
@@ -47,6 +54,18 @@ export interface ReminderDmSender {
 }
 
 const HANDOFF_TIMEOUT_MS = OUTBOX_HANDOFF_TIMEOUT_MS;
+
+/**
+ * Outbox rows currently being dispatched by this process.
+ *
+ * The `/meet` handler publishes a row immediately and the 60s sweeper re-reads
+ * every `pending` row, so the two overlap whenever Google is slow; without a
+ * lease the second dispatcher would POST again while the first is mid-flight.
+ * (The deterministic event id turns that into a 409, not a duplicate event, but
+ * it would still mail the guest list twice.) One process owns the SQLite file,
+ * so an in-memory set is the whole lease.
+ */
+const inFlightOutbox = new Set<string>();
 
 async function withDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -220,12 +239,22 @@ export interface CalendarJobDispatch {
   (input: { discordMessageId: string }): Promise<boolean>;
 }
 
+export interface CalendarFastPath {
+  (input: {
+    kind: "meeting.calendar_sync" | "meeting.calendar_cancel";
+    meeting: MeetingRow;
+    participantIds: string[];
+  }): Promise<FastPathOutcome>;
+}
+
 async function dispatchCalendarJob(
   event: OutboxEvent,
   now: number,
   opts: {
     enqueue?: CalendarJobEnqueue;
     dispatch?: CalendarJobDispatch;
+    /** Test seam. Omitted in production so the real credential check runs. */
+    fastPath?: CalendarFastPath;
   } = {},
 ): Promise<OutboxDispatchStatus> {
   const meetingId = String(event.payload.meetingId ?? event.aggregateId);
@@ -236,21 +265,160 @@ async function dispatchCalendarJob(
     logger.warn(logCorrelate(event, { reason: "meeting_not_found" }), "outbox.publish.unsupported");
     return "unsupported";
   }
-  if (meeting.version !== version && event.type === "meeting.calendar_sync_requested") {
+  const staleSync = meeting.version !== version && event.type === "meeting.calendar_sync_requested";
+
+  const kind =
+    event.type === "meeting.calendar_cancel_requested" ? "meeting.calendar_cancel" : "meeting.calendar_sync";
+  const participantIds = getMeetingParticipants(meeting.id).map((person) => person.userId);
+
+  // Deterministic path first. The Mini holds `roster_bindings`, so it is the
+  // only process that can turn these snowflakes into addresses -- Grok cannot
+  // query them, which is why the remote pack carries only counts and ids. Any
+  // skip falls through to the Grok handoff below, so a miss costs latency, not
+  // the meeting.
+  const runFastPath =
+    opts.fastPath ??
+    ((input) =>
+      input.kind === "meeting.calendar_cancel"
+        ? tryMiniCalendarCancel({
+            meetingId: input.meeting.id,
+            calendarEventId: input.meeting.calendarEventId,
+          })
+        : tryMiniCalendarSync({
+            meetingId: input.meeting.id,
+            title: input.meeting.title,
+            startsAt: new Date(input.meeting.startsAt).toISOString(),
+            endsAt: new Date(input.meeting.endsAt).toISOString(),
+            timeZone: input.meeting.timeZone,
+            notes: input.meeting.notes,
+            location: input.meeting.location,
+            audience: input.meeting.audienceKind ?? "picked",
+            participantIds: input.participantIds,
+            calendarEventId: input.meeting.calendarEventId,
+          }));
+
+  /**
+   * Cancel is the only version bump, so a stale sync row is (almost always) the
+   * retry of an insert that raced a cancel. The first attempt's undo may have
+   * failed, or the insert may have landed after the cancel row already went
+   * out with a null id. Before this row is closed, make sure no Mini event is
+   * left behind: the cancel path looks up the deterministic id when the
+   * meeting holds none. `missing-event-id` means proven absent, which is fine.
+   */
+  const ensureNoMiniEvent = async (): Promise<"clean" | "deferred"> => {
+    const undo = await runFastPath({ kind: "meeting.calendar_cancel", meeting: getMeeting(meeting.id) ?? meeting, participantIds });
+    if (undo.ok || undo.skip === "missing-event-id" || undo.skip === "not-configured" || undo.skip === "disabled") {
+      return "clean";
+    }
+    const failure = recordOutboxDispatchFailure(event.id, `orphan-event:${undo.skip}`, now);
+    logger.error(
+      logCorrelate(event, { meetingId, skip: undo.skip, attempts: failure.attempts }),
+      failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+    );
+    return "deferred";
+  };
+
+  if (staleSync) {
+    if (meeting.status !== "scheduled" && (await ensureNoMiniEvent()) === "deferred") return "deferred";
     markOutboxDispatched(event.id, now);
     logger.info(logCorrelate(event, { reason: "stale_version" }), "outbox.publish.skipped");
     return "accepted";
   }
 
-  const kind =
-    event.type === "meeting.calendar_cancel_requested" ? "meeting.calendar_cancel" : "meeting.calendar_sync";
+  const fast = await runFastPath({ kind, meeting, participantIds });
+  if (fast.ok) {
+    if (kind === "meeting.calendar_sync") {
+      const applied = applyCalendarSyncResult({
+        meetingId: meeting.id,
+        version,
+        calendarEventId: fast.calendarEventId,
+        meetLink: fast.meetLink,
+        now,
+      });
+      if (!applied.applied && applied.reason === "not_scheduled" && fast.calendarEventId) {
+        // The organizer cancelled while the insert was in flight. The cancel
+        // row snapshotted `calendarEventId: null`, so nothing else will ever
+        // delete this event; do it now, while we still hold the id.
+        logger.warn(
+          logCorrelate(event, { meetingId, reason: applied.reason }),
+          "calendar fast path: meeting cancelled mid-insert; removing the event",
+        );
+        const undo = await runFastPath({
+          kind: "meeting.calendar_cancel",
+          meeting: { ...meeting, calendarEventId: fast.calendarEventId },
+          participantIds,
+        });
+        if (!undo.ok) {
+          // Deferred; the next sweep sees `stale_version` and runs
+          // `ensureNoMiniEvent` before closing the row.
+          const failure = recordOutboxDispatchFailure(event.id, `orphan-event:${undo.skip}`, now);
+          logger.error(
+            logCorrelate(event, { meetingId, skip: undo.skip, attempts: failure.attempts }),
+            failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+          );
+          return "deferred";
+        }
+      }
+    }
+    markOutboxDispatched(event.id, now);
+    logger.info(
+      logCorrelate(event, {
+        meetingId,
+        attendees: fast.attendeeCount,
+        unresolved: fast.unresolvedCount ?? 0,
+        path: "mini",
+      }),
+      "outbox.publish.accepted",
+    );
+    return "accepted";
+  }
+  if (DEFERRING_SKIPS.has(fast.skip)) {
+    // The event may exist on Google's side (or provably does, minus its Meet).
+    // Grok would create a second one; keep the row pending so the sweeper
+    // retries the Mini, which converges on the same deterministic event id.
+    if (kind === "meeting.calendar_sync" && fast.calendarEventId) {
+      applyCalendarSyncResult({ meetingId: meeting.id, version, calendarEventId: fast.calendarEventId, now });
+    }
+    if (fast.skip === "meet-failed") {
+      // Google said the conference will never come; a PATCH cannot re-request
+      // one. This counts toward the dead-letter cap so the row does not spin
+      // forever, and the stored id keeps the event cancellable/inspectable.
+      const failure = recordOutboxDispatchFailure(event.id, `calendar fast path: ${fast.skip}`, now);
+      logger.error(
+        logCorrelate(event, { meetingId, skip: fast.skip, attempts: failure.attempts }),
+        failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+      );
+      return "deferred";
+    }
+    // Still-provisioning Meet or an unanswered lookup: transient by definition.
+    // These are NOT counted toward the dead-letter cap -- a mailed event with
+    // no stored Meet must never be silently abandoned after five minutes. The
+    // sweeper retries every 60s; the Mini converges on the same event id.
+    logger.warn(logCorrelate(event, { meetingId, skip: fast.skip }), "outbox.publish.deferred");
+    return "deferred";
+  }
+  // Nothing of ours exists on Google (proven, or never attempted). Before
+  // paying Grok, re-read the meeting: a cancel that landed during the attempt
+  // must not turn into a Grok *create* on a cancelled meeting -- Grok does not
+  // use the deterministic id, so that would be a second, unreachable event.
+  if (kind === "meeting.calendar_sync" && getMeeting(meeting.id)?.status !== "scheduled") {
+    if ((await ensureNoMiniEvent()) === "deferred") return "deferred";
+    markOutboxDispatched(event.id, now);
+    logger.info(logCorrelate(event, { reason: "cancelled_during_sync" }), "outbox.publish.skipped");
+    return "accepted";
+  }
+  logger.info(
+    logCorrelate(event, { meetingId, skip: fast.skip }),
+    "calendar fast path skipped; handing off to Grok",
+  );
+
   const pack = buildCalendarJobPack({
     kind,
     meeting,
     outboxId: event.id,
     version,
-    participantCount: getMeetingParticipants(meeting.id).length,
-    participantIds: getMeetingParticipants(meeting.id).map((person) => person.userId),
+    participantCount: participantIds.length,
+    participantIds,
   });
   const content = redactCalendarJobContent(serializeCalendarJobPack(pack));
   if (/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(content.replace(/hello@techatnyu\.org/gi, ""))) {
@@ -350,6 +518,8 @@ export async function publishOutboxEvent(
     sendDm?: ReminderDmSender["send"];
     enqueueCalendar?: CalendarJobEnqueue;
     dispatchCalendar?: CalendarJobDispatch;
+    /** Test seam for the Mini-side Calendar insert; see `dispatchCalendarJob`. */
+    calendarFastPath?: CalendarFastPath;
   } = {},
 ): Promise<OutboxDispatchOutcome> {
   const now = opts.now ?? Date.now();
@@ -363,11 +533,21 @@ export async function publishOutboxEvent(
       event.type === "meeting.calendar_sync_requested" ||
       event.type === "meeting.calendar_cancel_requested"
     ) {
-      const status = await dispatchCalendarJob(event, now, {
-        enqueue: opts.enqueueCalendar,
-        dispatch: opts.dispatchCalendar,
-      });
-      return { outboxId: event.id, status };
+      if (inFlightOutbox.has(event.id)) {
+        logger.info(logCorrelate(event), "outbox.publish.already_in_flight");
+        return { outboxId: event.id, status: "deferred" };
+      }
+      inFlightOutbox.add(event.id);
+      try {
+        const status = await dispatchCalendarJob(event, now, {
+          enqueue: opts.enqueueCalendar,
+          dispatch: opts.dispatchCalendar,
+          fastPath: opts.calendarFastPath,
+        });
+        return { outboxId: event.id, status };
+      } finally {
+        inFlightOutbox.delete(event.id);
+      }
     }
     markOutboxFailed(event.id, `Unsupported outbox type: ${event.type}`, now);
     logger.warn(logCorrelate(event), "outbox.publish.unsupported");

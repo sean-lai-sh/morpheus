@@ -20,6 +20,26 @@ export const ROSTER_ROLE_AUDIENCE = {
 } as const;
 
 /**
+ * The role choices offered in `/meet`'s audience step.
+ *
+ * A role is a *bulk* audience: picking it invites the sheet behind it without
+ * expanding into individual members, so adding a role here is adding a mailing
+ * list, not a lookup. Kept as a list rather than derived from
+ * `ROSTER_ROLE_AUDIENCE` so each option carries copy written for a human.
+ */
+export const ROSTER_ROLE_OPTIONS: ReadonlyArray<{
+  roleId: string;
+  label: string;
+  description: string;
+}> = [
+  {
+    roleId: EBOARD_ROLE_ID,
+    label: "@Eboard",
+    description: "Everyone on the F26 roster",
+  },
+];
+
+/**
  * Empty-Disc F26 rows that ARE on Discord. One-shot upsert only — do not guess
  * further accounts. Do not bind khidir_41052.
  */

@@ -1,5 +1,6 @@
 import { peekClient } from "../bot/client.ts";
 import { logger } from "../logger.ts";
+import { deleteExpiredMeetingDrafts } from "../storage/meeting-drafts.ts";
 import {
   getMeetingParticipants,
   listDueMeetingHourReminders,
@@ -26,6 +27,15 @@ export async function runCoordinatorSweep(now: number = Date.now()): Promise<voi
     await sendDueMeetingHourReminders(now);
   } catch (err) {
     logger.error({ err }, "meeting.hour_reminder.sweep_failed");
+  }
+  try {
+    // Expiry is already enforced in every draft read predicate, so this is
+    // compaction, not correctness -- it just stops abandoned drafts from
+    // accumulating forever, which is what the in-memory Map used to do.
+    const removed = deleteExpiredMeetingDrafts(now);
+    if (removed > 0) logger.info({ removed }, "meeting_drafts.expired.swept");
+  } catch (err) {
+    logger.error({ err }, "meeting_drafts.sweep_failed");
   }
 }
 

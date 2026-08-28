@@ -1,5 +1,6 @@
 import { redactSecrets } from "../notify/grok-dispatch.ts";
 import { applyRosterSeedResult } from "../storage/roster-map.ts";
+import { MEET_INVOKE_ROLE_IDS } from "./roster-map.ts";
 import {
   ROSTER_SHEET_ID,
   ROSTER_TAB,
@@ -102,6 +103,25 @@ export function parseRosterSeedComplete(reply: string): {
     }
   }
   return { mappings: [], unmatched: [] };
+}
+
+/**
+ * The guild members a roster seed should consider.
+ *
+ * Seeding every non-bot member sent hundreds of unrelated usernames to a remote
+ * worker and buried the real roster in noise. Only people carrying a role that
+ * can appear on the F26 sheet are relevant.
+ *
+ * The whole MEET_INVOKE set rather than the bare @Eboard snowflake: someone
+ * holding only Leadership or Senior Adv is still on the sheet, and excluding
+ * them here would quietly make them un-inviteable through `/meet` later.
+ */
+export function isRosterSeedCandidate(member: {
+  isBot: boolean;
+  roleIds: readonly string[];
+}): boolean {
+  if (member.isBot) return false;
+  return member.roleIds.some((id) => MEET_INVOKE_ROLE_IDS.has(id));
 }
 
 export function applyRosterSeedComplete(content: string, reply: string, now: number = Date.now()): {

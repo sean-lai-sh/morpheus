@@ -11,6 +11,8 @@ export interface MeetingRow {
   endsAt: number;
   timeZone: string;
   notes: string | null;
+  /** Free text shown on the Calendar invite: a room, a Zoom URL, an address. */
+  location: string | null;
   status: MeetingStatus;
   version: number;
   channelId: string | null;
@@ -44,6 +46,7 @@ interface MeetingDbRow {
   ends_at: number;
   time_zone: string;
   notes: string | null;
+  location: string | null;
   status: string;
   version: number;
   channel_id: string | null;
@@ -68,6 +71,7 @@ function mapMeeting(row: MeetingDbRow): MeetingRow {
     endsAt: row.ends_at,
     timeZone: row.time_zone,
     notes: row.notes,
+    location: row.location,
     status: row.status as MeetingStatus,
     version: row.version,
     channelId: row.channel_id,
@@ -104,6 +108,7 @@ export function createScheduledMeeting(input: {
   durationMinutes: number;
   timeZone?: string;
   notes?: string | null;
+  location?: string | null;
   channelId?: string | null;
   participants: MeetingAssigneeInput[];
   audienceKind?: "picked" | "f26_roster";
@@ -130,9 +135,9 @@ export function createScheduledMeeting(input: {
     getDb()
       .query(
         `INSERT INTO meetings (
-           id, created_by_user_id, title, starts_at, ends_at, time_zone, notes, status, version,
+           id, created_by_user_id, title, starts_at, ends_at, time_zone, notes, location, status, version,
            channel_id, hour_reminder_at, audience_kind, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -142,6 +147,7 @@ export function createScheduledMeeting(input: {
         endsAt,
         timeZone,
         input.notes?.trim() || null,
+        input.location?.trim().slice(0, 500) || null,
         input.channelId ?? null,
         hourReminderAt,
         audienceKind,
@@ -205,17 +211,28 @@ export function cancelMeeting(input: {
   })();
 }
 
+export interface CalendarSyncApplyResult {
+  meeting: MeetingRow | null;
+  /** False when nothing was written; `reason` says why so the caller can react. */
+  applied: boolean;
+  reason?: "meeting_not_found" | "not_scheduled" | "stale_version";
+}
+
 export function applyCalendarSyncResult(input: {
   meetingId: string;
   version: number;
   calendarEventId?: string | null;
   meetLink?: string | null;
   now?: number;
-}): MeetingRow | null {
+}): CalendarSyncApplyResult {
   const now = input.now ?? Date.now();
   const meeting = getMeeting(input.meetingId);
-  if (!meeting || meeting.status !== "scheduled") return null;
-  if (meeting.version !== input.version) return meeting;
+  if (!meeting) return { meeting: null, applied: false, reason: "meeting_not_found" };
+  // A cancelled meeting must not re-acquire an event id: the cancel outbox row
+  // already snapshotted whatever id it had, and the caller decides what to do
+  // with an event that landed after the cancel.
+  if (meeting.status !== "scheduled") return { meeting, applied: false, reason: "not_scheduled" };
+  if (meeting.version !== input.version) return { meeting, applied: false, reason: "stale_version" };
   const row = getDb()
     .query<MeetingDbRow, [string | null, string | null, number, string]>(
       `UPDATE meetings
@@ -226,7 +243,7 @@ export function applyCalendarSyncResult(input: {
        RETURNING *`,
     )
     .get(input.calendarEventId ?? null, input.meetLink ?? null, now, meeting.id);
-  return row ? mapMeeting(row) : meeting;
+  return { meeting: row ? mapMeeting(row) : meeting, applied: true };
 }
 
 export function markMeetingAnnounced(meetingId: string, now: number = Date.now()): MeetingRow | null {

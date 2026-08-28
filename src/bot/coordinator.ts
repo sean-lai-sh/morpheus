@@ -9,6 +9,7 @@ import {
   StringSelectMenuBuilder,
   TextInputBuilder,
   TextInputStyle,
+  UserSelectMenuBuilder,
   type ChatInputCommandInteraction,
   type Client,
   type GuildMember,
@@ -25,10 +26,22 @@ import {
   expandAudience,
   extractMentionableAudience,
   formatUnmappedInviteRefusal,
-  parseMeetingStart,
-  resolveMeetingInvitees,
 } from "../coordinator/audience.ts";
-import { buildRosterSeedPack, serializeRosterSeedPack } from "../coordinator/seed-job.ts";
+import {
+  buildRosterSeedPack,
+  isRosterSeedCandidate,
+  serializeRosterSeedPack,
+} from "../coordinator/seed-job.ts";
+import { EBOARD_ROLE_ID, ROSTER_ROLE_OPTIONS } from "../coordinator/roster-map.ts";
+import { partitionRosterUsers } from "../storage/roster-map.ts";
+import { parseDurationInput, parseWhenInput } from "../coordinator/when-input.ts";
+import { draftPreview, meetingWhenLine } from "../coordinator/meeting-format.ts";
+import {
+  claimMeetingDraft,
+  createMeetingDraft,
+  getMeetingDraft,
+  setMeetingDraftAudience,
+} from "../storage/meeting-drafts.ts";
 import { ephemeralSlashAckMessageId } from "./reply.ts";
 import { tryEnqueueJob } from "./enqueue.ts";
 import { authorCanViewChannel } from "./job-scope.ts";
@@ -79,25 +92,7 @@ export const MEET_COMMAND = new SlashCommandBuilder()
   .addSubcommand((sub) =>
     sub
       .setName("create")
-      .setDescription("Schedule a meeting and queue Calendar sync via Grok")
-      .addStringOption((opt) => opt.setName("title").setDescription("Meeting title").setRequired(true).setMaxLength(100))
-      .addStringOption((opt) =>
-        opt.setName("start").setDescription("Start: ISO-8601 or YYYY-MM-DD HH:mm").setRequired(true),
-      )
-      .addIntegerOption((opt) =>
-        opt
-          .setName("duration")
-          .setDescription("Duration in minutes (15–480)")
-          .setRequired(true)
-          .setMinValue(15)
-          .setMaxValue(480),
-      )
-      .addStringOption((opt) =>
-        opt.setName("timezone").setDescription("IANA timezone (default America/New_York)").setRequired(false),
-      )
-      .addStringOption((opt) =>
-        opt.setName("notes").setDescription("Optional notes").setRequired(false).setMaxLength(2000),
-      ),
+      .setDescription("Schedule a meeting and send the Google Calendar invite"),
   )
   .addSubcommand((sub) =>
     sub
@@ -114,17 +109,6 @@ export const MEET_COMMAND = new SlashCommandBuilder()
 
 const ALLOWED_MENTIONS = { parse: [] as never[], users: [] as string[], roles: [] as string[], repliedUser: false };
 
-interface MeetingDraft {
-  title: string;
-  startsAt: number;
-  durationMinutes: number;
-  timeZone: string;
-  notes: string | null;
-  channelId: string;
-  createdByUserId: string;
-}
-
-const pendingMeetings = new Map<string, MeetingDraft>();
 
 /**
  * Structural param, not discord.js's `Interaction` union: the union does not
@@ -519,8 +503,22 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
     if (interaction.guild) {
       await interaction.guild.members.fetch().catch(() => undefined);
     }
+    // Only the roles that can actually appear on the F26 sheet. Seeding every
+    // non-bot guild member sent hundreds of unrelated usernames to a remote
+    // worker, buried the real roster in noise, and pushed `job.content` toward
+    // the generic dispatcher's 4,000-character truncation (issue #89 item 2) --
+    // past which the wakeup payload is invalid JSON rather than a short list.
+    //
+    // Deliberately the whole MEET_INVOKE set, not the bare @Eboard snowflake:
+    // someone carrying only Leadership or Senior Adv is still on the sheet, and
+    // dropping them here would silently make them un-inviteable later.
     const members = [...(interaction.guild?.members.cache.values() ?? [])]
-      .filter((member) => !member.user.bot)
+      .filter((member) =>
+        isRosterSeedCandidate({
+          isBot: member.user.bot,
+          roleIds: [...member.roles.cache.keys()],
+        }),
+      )
       .map((member) => ({
         id: member.id,
         username: member.user.username ?? null,
@@ -562,7 +560,7 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
     await interaction.reply({
       content: handoffMessage(
         outcomes,
-        "Meeting cancelled. Calendar cancellation is queued for Grok.",
+        "Meeting cancelled. The Calendar event is being cancelled.",
         "Meeting cancelled. Calendar cancellation is queued for automatic retry.",
       ),
       ephemeral: true,
@@ -571,34 +569,278 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
     return;
   }
 
-  const title = interaction.options.getString("title", true);
-  const start = interaction.options.getString("start", true);
-  const duration = interaction.options.getInteger("duration", true);
-  const timeZone = interaction.options.getString("timezone")?.trim() || "America/New_York";
-  const notes = interaction.options.getString("notes");
-  const startsAt = parseMeetingStart(start, timeZone).getTime();
-  const draftId = crypto.randomUUID();
-  pendingMeetings.set(draftId, {
+  // A modal must be the FIRST response to the interaction -- it cannot follow a
+  // defer -- so nothing may be awaited before this.
+  await interaction.showModal(meetCreateModal());
+}
+
+const ORG_TIME_ZONE = "America/New_York";
+
+/**
+ * One box instead of five slash options. Discord has no date picker of any
+ * kind, so the honest alternatives are a text field or a multi-hop select-menu
+ * maze; the maze is what made `/task`'s due date four round trips. A forgiving
+ * parser plus a preview that echoes the parse back is cheaper and clearer.
+ *
+ * Five inputs is Discord's hard maximum for a modal. Timezone did not make the
+ * cut: it was a slash option nobody filled in sensibly, the org runs on one
+ * zone, and anyone who genuinely needs another can type an ISO string with an
+ * offset into `when`, which the parser accepts.
+ */
+export function meetCreateModal(): ModalBuilder {
+  return new ModalBuilder()
+    .setCustomId("meet:create")
+    .setTitle("New meeting")
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("title")
+          .setLabel("Title")
+          .setStyle(TextInputStyle.Short)
+          .setMaxLength(100)
+          .setRequired(true),
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("when")
+          .setLabel("When")
+          .setPlaceholder("friday 2pm · tomorrow 3:30pm · sep 4 2pm · 2026-09-04 14:00")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true),
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("duration")
+          .setLabel("Duration (blank = 30m)")
+          .setPlaceholder("30m · 1h · 1h30")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false),
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("location")
+          .setLabel("Location (optional)")
+          .setPlaceholder("Bobst 5th floor · a Zoom link · leave blank for Meet only")
+          .setStyle(TextInputStyle.Short)
+          .setMaxLength(500)
+          .setRequired(false),
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("notes")
+          .setLabel("Notes (optional)")
+          .setStyle(TextInputStyle.Paragraph)
+          .setMaxLength(1000)
+          .setRequired(false),
+      ),
+    );
+}
+
+/** Optional modal fields throw rather than return "" when left empty. */
+function optionalField(interaction: ModalSubmitInteraction, id: string): string | null {
+  try {
+    return interaction.fields.getTextInputValue(id).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Two selectors that COMPOSE into one invitee list, rather than two competing
+ * ways to answer the same question.
+ *
+ * Roles are a bulk audience: @Eboard means the F26 sheet, and it is never
+ * expanded into individual members. People are looked up one at a time through
+ * `roster_bindings`. A meeting frequently needs both -- the whole eboard plus a
+ * collaborator from outside it -- so each selector writes its own half of the
+ * draft audience and leaves the other half alone.
+ *
+ * The user select is guild-wide on purpose. Discord has no role filter for user
+ * pickers, but more importantly the outside collaborator is exactly the person
+ * a roster-derived menu could never offer. Picking someone unmapped is refused
+ * by name at selection time.
+ */
+export function audienceRows(
+  draftId: string,
+  state: { roleIds?: readonly string[]; userIds?: readonly string[] } = {},
+): MessageRow[] {
+  const roleSelect = new StringSelectMenuBuilder()
+    .setCustomId(`meet-roles:${draftId}`)
+    .setPlaceholder("Add by role")
+    .setMinValues(0)
+    .setMaxValues(ROSTER_ROLE_OPTIONS.length)
+    .addOptions(
+      ROSTER_ROLE_OPTIONS.map((option) => ({
+        label: option.label,
+        value: option.roleId,
+        description: option.description,
+        default: (state.roleIds ?? []).includes(option.roleId),
+      })),
+    );
+
+  const userSelect = new UserSelectMenuBuilder()
+    .setCustomId(`meet-users:${draftId}`)
+    .setPlaceholder("Add individual people")
+    .setMinValues(0)
+    .setMaxValues(25);
+  if (state.userIds?.length) userSelect.setDefaultUsers([...state.userIds]);
+
+  return [
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(roleSelect),
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(userSelect),
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`meet-review:${draftId}`)
+        .setLabel("Review & send")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`meet-discard:${draftId}`)
+        .setLabel("Cancel")
+        .setStyle(ButtonStyle.Secondary),
+    ),
+  ];
+}
+
+/** Header for a stored draft, re-rendered as the audience is built up. */
+function draftHeader(draft: {
+  title: string;
+  startsAt: number;
+  durationMinutes: number;
+  location: string | null;
+  timeZone: string;
+}): string {
+  const lines = [
+    `📅 **${draft.title}**`,
+    meetingWhenLine(draft.startsAt, draft.durationMinutes, draft.timeZone),
+  ];
+  if (draft.location) lines.push(`📍 ${draft.location}`);
+  return lines.join("\n");
+}
+
+/** Running tally of the composed audience, shown while it is being built. */
+export function audienceLine(audience: {
+  audienceKind: "picked" | "f26_roster";
+  participants: readonly { displayName: string }[];
+}): string {
+  const parts: string[] = [];
+  if (audience.audienceKind === "f26_roster") parts.push("**@Eboard** (F26 roster)");
+  if (audience.participants.length > 0) {
+    const names = audience.participants.map((p) => p.displayName);
+    const shown = names.slice(0, 6).join(", ");
+    const rest = names.length - 6;
+    parts.push(`**${names.length}** individually: ${shown}${rest > 0 ? ` +${rest} more` : ""}`);
+  }
+  return parts.length === 0 ? "_No one selected yet._" : `Inviting ${parts.join(" · plus ")}`;
+}
+
+/** Confirm/cancel pair, shown once an audience is settled. */
+function confirmRow(draftId: string): MessageRow {
+  return new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`meet-confirm:${draftId}`)
+      .setLabel("Confirm & send invite")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`meet-discard:${draftId}`)
+      .setLabel("Cancel")
+      .setStyle(ButtonStyle.Secondary),
+  );
+}
+
+/** What the organizer sees before any invitation goes out. */
+export function confirmSummary(draft: {
+  title: string;
+  startsAt: number;
+  durationMinutes: number;
+  location: string | null;
+  notes: string | null;
+  timeZone: string;
+  audience: { audienceKind: "picked" | "f26_roster"; participants: Array<{ userId: string }> } | null;
+}): string {
+  const count = draft.audience?.participants.length ?? 0;
+  const who =
+    draft.audience?.audienceKind === "f26_roster"
+      ? `**the full F26 roster**${count > 0 ? ` plus ${count} more` : ""}`
+      : `**${count} ${count === 1 ? "person" : "people"}**`;
+  const lines = [
+    `📅 **${draft.title}**`,
+    meetingWhenLine(draft.startsAt, draft.durationMinutes, draft.timeZone),
+  ];
+  if (draft.location) lines.push(`📍 ${draft.location}`);
+  lines.push("", `Inviting ${who}. A Google Meet link is created automatically.`);
+  lines.push("-# Confirming sends real calendar invitations.");
+  return lines.join("\n");
+}
+
+/**
+ * The in-channel post. Shared time formatting with the preview by construction.
+ *
+ * Attendees are rendered as real mentions so the channel can see at a glance who
+ * is expected, and each name is clickable. `ALLOWED_MENTIONS` suppresses every
+ * ping, so this reads as a roster rather than notifying 29 people twice -- they
+ * already got the calendar invite.
+ */
+export function meetingAnnouncement(
+  meeting: {
+    title: string;
+    startsAt: number;
+    endsAt: number;
+    location: string | null;
+    id: string;
+    audienceKind: "picked" | "f26_roster";
+    timeZone: string;
+  },
+  participants: readonly { userId: string }[],
+): string {
+  const durationMinutes = Math.max(1, Math.round((meeting.endsAt - meeting.startsAt) / 60_000));
+  const lines = [
+    `📅 **${meeting.title}**`,
+    meetingWhenLine(meeting.startsAt, durationMinutes, meeting.timeZone),
+  ];
+  if (meeting.location) lines.push(`📍 ${meeting.location}`);
+
+  const mentions = participants.map((p) => `<@${p.userId}>`);
+  // The role is never expanded into members -- the F26 sheet is the source of
+  // truth for who it covers -- so it is announced as the role itself.
+  if (meeting.audienceKind === "f26_roster") mentions.unshift(`<@&${EBOARD_ROLE_ID}>`);
+  lines.push(mentions.length > 0 ? `**Attending:** ${mentions.join(" ")}` : "**Attending:** nobody yet.");
+
+  lines.push(`-# Meeting ID: \`${meeting.id}\``);
+  return lines.join("\n");
+}
+
+async function handleMeetCreateModal(interaction: ModalSubmitInteraction): Promise<void> {
+  const title = interaction.fields.getTextInputValue("title").trim();
+  const rawWhen = interaction.fields.getTextInputValue("when").trim();
+  const timeZone = ORG_TIME_ZONE;
+  // Both parsers throw WhenParseError with a message written for a human; the
+  // shared handler shows it verbatim, so a bad time is a correctable mistake
+  // rather than a stack trace.
+  const startsAt = parseWhenInput(rawWhen, timeZone).getTime();
+  const durationMinutes = parseDurationInput(optionalField(interaction, "duration") ?? "", 30);
+
+  const draft = createMeetingDraft({
+    createdByUserId: interaction.user.id,
+    channelId: interaction.channelId ?? "",
     title,
     startsAt,
-    durationMinutes: duration,
+    durationMinutes,
     timeZone,
-    notes: notes?.trim() || null,
-    channelId: interaction.channelId,
-    createdByUserId: interaction.user.id,
+    notes: optionalField(interaction, "notes"),
+    location: optionalField(interaction, "location"),
   });
+
   await interaction.reply({
-    content: `**${title}**\n${new Date(startsAt).toLocaleString("en-US", { timeZone, dateStyle: "medium", timeStyle: "short" })} (${duration} min)\nSelect Discord users or roles to invite.`,
+    content: draftPreview({
+      title,
+      startsAtMs: startsAt,
+      durationMinutes,
+      rawWhen,
+      notes: draft.notes,
+      timeZone,
+    }),
     ephemeral: true,
-    components: [
-      new ActionRowBuilder<MentionableSelectMenuBuilder>().addComponents(
-        new MentionableSelectMenuBuilder()
-          .setCustomId(`meet-audience:${draftId}`)
-          .setPlaceholder("Add Discord users or roles")
-          .setMinValues(1)
-          .setMaxValues(25),
-      ),
-    ],
+    components: audienceRows(draft.id),
     allowedMentions: ALLOWED_MENTIONS,
   });
 }
@@ -814,46 +1056,84 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     await replyEphemeral(interaction, assignmentCard(value, interaction.user.id));
     return;
   }
-  if (kind === "meet-audience" && value) {
-    const draft = pendingMeetings.get(value);
-    if (!draft || draft.createdByUserId !== interaction.user.id) {
-      throw new Error("This meeting draft expired. Run /meet create again.");
+  if ((kind === "meet-roles" || kind === "meet-users") && value) {
+    const draft = getMeetingDraft(value, interaction.user.id);
+    if (!draft) throw new Error("This meeting draft expired. Run /meet create again.");
+
+    // Each selector owns one half of the audience and preserves the other, so
+    // adding a role never clears the individuals and vice versa.
+    let audienceKind = draft.audience?.audienceKind ?? "picked";
+    let participants = [...(draft.audience?.participants ?? [])];
+
+    if (kind === "meet-roles") {
+      const chosen = interaction.isStringSelectMenu() ? [...interaction.values] : [];
+      audienceKind = chosen.length > 0 ? "f26_roster" : "picked";
+    } else {
+      const picked = interaction.isUserSelectMenu()
+        ? [...interaction.users.values()].map((user) => ({
+            id: user.id,
+            displayName: user.globalName ?? user.username ?? user.id,
+          }))
+        : [];
+      const { bound, unmapped } = partitionRosterUsers(picked);
+      if (unmapped.length > 0) {
+        // Named immediately rather than after booking: the picker is guild-wide
+        // so that outside collaborators are reachable, which means "no binding
+        // yet" is a normal answer, not an error state.
+        await replyEphemeral(interaction, {
+          content: `${draftHeader(draft)}\n\n${formatUnmappedInviteRefusal(unmapped)}`,
+          components: audienceRows(value, {
+            roleIds: audienceKind === "f26_roster" ? [EBOARD_ROLE_ID] : [],
+            userIds: participants.map((p) => p.userId),
+          }),
+        });
+        return;
+      }
+      participants = bound;
     }
-    const selections = extractMentionableAudience({
-      values: interaction.isMentionableSelectMenu() ? [...interaction.values] : [],
-      resolved: interaction.isMentionableSelectMenu()
-        ? {
-            users: Object.fromEntries(
-              [...interaction.users.entries()].map(([id, user]) => [
-                id,
-                { username: user.username, global_name: user.globalName },
-              ]),
-            ),
-            roles: Object.fromEntries([...interaction.roles.entries()].map(([id]) => [id, { id }])),
-          }
-        : {},
+
+    const saved = setMeetingDraftAudience(value, interaction.user.id, { audienceKind, participants });
+    if (!saved) throw new Error("This meeting draft expired. Run /meet create again.");
+
+    await replyEphemeral(interaction, {
+      content: `${draftHeader(saved)}\n\n${audienceLine({ audienceKind, participants })}`,
+      components: audienceRows(value, {
+        roleIds: audienceKind === "f26_roster" ? [EBOARD_ROLE_ID] : [],
+        userIds: participants.map((p) => p.userId),
+      }),
     });
-    const invite = resolveMeetingInvitees(selections);
-    if (!invite.ok) {
-      await replyEphemeral(interaction, {
-        content:
-          invite.reason === "unmapped-users"
-            ? formatUnmappedInviteRefusal(invite.unmapped)
-            : "Select @Eboard (F26 roster) and/or Discord users who already have a roster binding.",
-        components: [
-          new ActionRowBuilder<MentionableSelectMenuBuilder>().addComponents(
-            new MentionableSelectMenuBuilder()
-              .setCustomId(`meet-audience:${value}`)
-              .setPlaceholder("Add @Eboard and/or roster users")
-              .setMinValues(1)
-              .setMaxValues(25),
-          ),
-        ],
-      });
-      return;
+    return;
+  }
+  if (kind === "meet-review" && value) {
+    const draft = getMeetingDraft(value, interaction.user.id);
+    if (!draft) throw new Error("This meeting draft expired. Run /meet create again.");
+    const audience = draft.audience;
+    if (!audience || (audience.audienceKind !== "f26_roster" && audience.participants.length === 0)) {
+      throw new Error("Pick a role or at least one person first.");
     }
-    const people = invite.participants;
-    const audienceKind = invite.audienceKind;
+    await replyEphemeral(interaction, {
+      content: confirmSummary(draft),
+      components: [confirmRow(value)],
+    });
+    return;
+  }
+  if (kind === "meet-discard" && value) {
+    // Claim consumes the row, so a discarded draft cannot be confirmed later.
+    claimMeetingDraft(value, interaction.user.id);
+    await replyEphemeral(interaction, {
+      content: "Discarded. Nothing was booked and no invitations were sent.",
+      components: [],
+    });
+    return;
+  }
+  if (kind === "meet-confirm" && value) {
+    // Single-shot: two fast clicks cannot both book. The second gets null.
+    const draft = claimMeetingDraft(value, interaction.user.id);
+    if (!draft) throw new Error("This meeting draft expired. Run /meet create again.");
+    if (!draft.audience) throw new Error("Pick who to invite first, then confirm.");
+
+    const people = draft.audience.participants;
+    const audienceKind = draft.audience.audienceKind;
     const result = createScheduledMeeting({
       createdByUserId: draft.createdByUserId,
       title: draft.title,
@@ -861,25 +1141,15 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
       durationMinutes: draft.durationMinutes,
       timeZone: draft.timeZone,
       notes: draft.notes,
+      location: draft.location,
       channelId: draft.channelId,
       participants: people,
       audienceKind,
     });
-    pendingMeetings.delete(value);
     const outcomes = await publish(result.outboxEvents);
-    const when = new Date(result.meeting.startsAt).toLocaleString("en-US", {
-      timeZone: result.meeting.timeZone,
-      dateStyle: "medium",
-      timeStyle: "short",
-    });
-    const audienceLine =
-      audienceKind === "f26_roster"
-        ? "F26 Preferred Emails (role is not expanded)."
-        : `${people.length} attendee(s).`;
-    const announcement = `📅 **${result.meeting.title}**\n${when}\n${audienceLine}\nMeeting ID: \`${result.meeting.id}\`\nCalendar sync queued for Grok (hello@).`;
-    if (interaction.client.isReady()) {
+    if (interaction.client.isReady() && draft.channelId) {
       try {
-        await announceMeeting(interaction.client, draft.channelId, announcement);
+        await announceMeeting(interaction.client, draft.channelId, meetingAnnouncement(result.meeting, people));
       } catch (err) {
         logger.warn({ err, meetingId: result.meeting.id }, "meeting.announce.failed");
       }
@@ -887,7 +1157,7 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     await replyEphemeral(interaction, {
       content: `${handoffMessage(
         outcomes,
-        "Meeting scheduled. Calendar sync handed off to Grok.",
+        "Meeting scheduled. The Calendar invite is on its way.",
         "Meeting scheduled. Calendar sync is queued for automatic retry.",
       )}\nMeeting ID: \`${result.meeting.id}\``,
       components: [],
@@ -913,6 +1183,10 @@ async function handleModal(interaction: ModalSubmitInteraction): Promise<void> {
       channelId: interaction.channelId,
     });
     await replyEphemeral(interaction, composerContent(task.id));
+    return;
+  }
+  if (interaction.customId === "meet:create") {
+    await handleMeetCreateModal(interaction);
     return;
   }
   if (interaction.customId.startsWith("task-edit:")) {
@@ -945,7 +1219,9 @@ export async function handleCoordinatorInteraction(interaction: Interaction): Pr
     /^(task-|meet-|task:|meet:)/.test(interaction.customId);
   const isModal =
     interaction.isModalSubmit() &&
-    (interaction.customId === "task:create" || interaction.customId.startsWith("task-edit:"));
+    (interaction.customId === "task:create" ||
+      interaction.customId === "meet:create" ||
+      interaction.customId.startsWith("task-edit:"));
   if (!isCommand && !isComponent && !isModal) return false;
 
   try {
