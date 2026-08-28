@@ -27,7 +27,11 @@ import {
   formatUnmappedInviteRefusal,
   resolveMeetingInvitees,
 } from "../coordinator/audience.ts";
-import { buildRosterSeedPack, serializeRosterSeedPack } from "../coordinator/seed-job.ts";
+import {
+  buildRosterSeedPack,
+  isRosterSeedCandidate,
+  serializeRosterSeedPack,
+} from "../coordinator/seed-job.ts";
 import { parseDurationInput, parseWhenInput } from "../coordinator/when-input.ts";
 import { draftPreview, meetingWhenLine } from "../coordinator/meeting-format.ts";
 import {
@@ -497,8 +501,22 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
     if (interaction.guild) {
       await interaction.guild.members.fetch().catch(() => undefined);
     }
+    // Only the roles that can actually appear on the F26 sheet. Seeding every
+    // non-bot guild member sent hundreds of unrelated usernames to a remote
+    // worker, buried the real roster in noise, and pushed `job.content` toward
+    // the generic dispatcher's 4,000-character truncation (issue #89 item 2) --
+    // past which the wakeup payload is invalid JSON rather than a short list.
+    //
+    // Deliberately the whole MEET_INVOKE set, not the bare @Eboard snowflake:
+    // someone carrying only Leadership or Senior Adv is still on the sheet, and
+    // dropping them here would silently make them un-inviteable later.
     const members = [...(interaction.guild?.members.cache.values() ?? [])]
-      .filter((member) => !member.user.bot)
+      .filter((member) =>
+        isRosterSeedCandidate({
+          isBot: member.user.bot,
+          roleIds: [...member.roles.cache.keys()],
+        }),
+      )
       .map((member) => ({
         id: member.id,
         username: member.user.username ?? null,
