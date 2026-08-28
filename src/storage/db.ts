@@ -273,7 +273,21 @@ function migrateCoordinator(db: Database): void {
       created_at INTEGER NOT NULL,
       PRIMARY KEY (meeting_id, user_id)
     );
+
+    CREATE TABLE IF NOT EXISTS roster_bindings (
+      discord_id TEXT PRIMARY KEY,
+      email TEXT NOT NULL,
+      name TEXT NOT NULL,
+      disc TEXT,
+      confidence TEXT NOT NULL CHECK (confidence IN ('disc', 'name')),
+      updated_at INTEGER NOT NULL
+    );
   `);
+  try {
+    db.exec(`ALTER TABLE meetings ADD COLUMN audience_kind TEXT NOT NULL DEFAULT 'picked'`);
+  } catch {
+    /* already exists */
+  }
 }
 
 /**

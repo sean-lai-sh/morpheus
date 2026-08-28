@@ -41,6 +41,34 @@ export async function membersWithRole(guild: Guild, roleId: string): Promise<Gui
   return [...role.members.values()].filter((member) => !member.user.bot);
 }
 
+export function audienceSelectionsFromMentions(input: {
+  users: Array<{ id: string; displayName?: string }>;
+  roleIds: string[];
+}): AudienceSelection[] {
+  return [
+    ...input.users.map((user) => ({
+      kind: "user" as const,
+      id: user.id,
+      displayName: user.displayName?.trim() || user.id,
+    })),
+    ...input.roleIds.map((id) => ({ kind: "role" as const, id })),
+  ];
+}
+
+/** Meetings: a role means F26 Preferred Emails, not Discord member expansion. */
+export function meetingAudienceFromSelections(selections: AudienceSelection[]): {
+  audienceKind: "picked" | "f26_roster";
+  userSelections: Extract<AudienceSelection, { kind: "user" }>[];
+} {
+  const userSelections = selections.filter(
+    (selection): selection is Extract<AudienceSelection, { kind: "user" }> => selection.kind === "user",
+  );
+  return {
+    audienceKind: selections.some((selection) => selection.kind === "role") ? "f26_roster" : "picked",
+    userSelections,
+  };
+}
+
 /** Expand Discord users + roles at create time and snapshot membership. */
 export async function expandAudience(input: {
   selections: AudienceSelection[];

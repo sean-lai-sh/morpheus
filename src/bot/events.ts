@@ -6,6 +6,7 @@ import { candidateFromMessage, tryEnqueueJob } from "./enqueue.ts";
 import { authorCanViewChannel } from "./job-scope.ts";
 import { handleJobCommandInteraction, registerJobCommandsOnReady } from "./commands.ts";
 import { handleCoordinatorInteraction } from "./coordinator.ts";
+import { tryEnqueueMeetingMention } from "./meeting-mention.ts";
 
 async function fetchIfPartial(
   message: Message | PartialMessage,
@@ -72,6 +73,7 @@ export function registerLiveHandlers(client: Client): void {
       try {
         const botId = client.user?.id;
         if (!botId) return;
+        if (full.inGuild() && (await tryEnqueueMeetingMention(full, botId))) return;
         await tryEnqueueJob(candidateFromMessage(full, botId), {
           canViewChannel: (id) => authorCanViewChannel(full, id),
         });

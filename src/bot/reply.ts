@@ -5,6 +5,12 @@ import { redactSecrets } from "../notify/grok-dispatch.ts";
 import { stopJobTyping } from "./typing.ts";
 import { applyCoordinatorJobComplete, parseCoordinatorJobContent } from "../coordinator/calendar-job.ts";
 import {
+  applyRosterSeedComplete,
+  formatRosterSeedAnnouncement,
+  parseRosterSeedContent,
+  redactSeedText,
+} from "../coordinator/seed-job.ts";
+import {
   failJob,
   getJob,
   markJobCompleted,
@@ -188,6 +194,14 @@ export async function completeJobWithReply(
   postReplies ??= env.DISCORD_POST_REPLIES;
 
   const existing = getJob(id);
+  if (existing && parseRosterSeedContent(existing.content)) {
+    const applied = applyRosterSeedComplete(existing.content, reply, opts.now);
+    reply = redactSeedText(
+      applied
+        ? formatRosterSeedAnnouncement(applied.mapped, applied.unmatched)
+        : "Roster seed completed but stored 0 bindings.",
+    );
+  }
   const github = allowlistedGithubIssueUrl(input.github_issue_url, {
     repo: githubRepo,
     namespace: existing?.namespace,

@@ -18,6 +18,8 @@ export interface CalendarJobPack {
   timeZone: string;
   notes: string | null;
   participantCount: number;
+  participant_ids: string[];
+  audience: "picked" | "f26_roster";
   calendarEventId: string | null;
   instruction: string;
 }
@@ -42,20 +44,20 @@ export function parseCoordinatorJobContent(content: string): CalendarJobPack | n
 }
 
 const SYNC_INSTRUCTION =
-  "Create or update the Eboard Google Calendar event as hello@techatnyu.org. Request a Google Meet conference. Then complete this job with JSON only: {\"calendar_event_id\":\"...\",\"meet_link\":\"https://meet.google.com/...\"}. Do not include attendee emails. Mini does not hold Google secrets.";
+  "Create or update the Eboard Google Calendar event as hello@techatnyu.org. Request a Google Meet conference. audience=f26_roster means invite every F26 Preferred Email from sheet 1NlApvtFAhFTMNafGoVksrYpJhi_oz5dlA6pml5VQ3rw tab F26 (gid 1079418365) — not Discord role members. audience=picked means invite only participant_ids using the seed Discord→email map (snowflake lookup). This pack has snowflakes and a count, never emails. Then complete with JSON only: {\"calendar_event_id\":\"...\",\"meet_link\":\"https://meet.google.com/...\"}. Mini does not hold Google secrets.";
 
 const CANCEL_INSTRUCTION =
   "Cancel the Eboard Google Calendar event as hello@techatnyu.org using calendar_event_id when present. Then complete this job with JSON only: {\"cancelled\":true}. Do not include attendee emails. Mini does not hold Google secrets.";
 
 export function buildCalendarJobPack(input: {
   kind: CalendarJobKind;
-  meeting: Pick<
-    MeetingRow,
-    "id" | "title" | "startsAt" | "endsAt" | "timeZone" | "notes" | "calendarEventId"
-  >;
+  meeting: Pick<MeetingRow, "id" | "title" | "startsAt" | "endsAt" | "timeZone" | "notes" | "calendarEventId"> & {
+    audienceKind?: MeetingRow["audienceKind"];
+  };
   outboxId: string;
   version: number;
   participantCount: number;
+  participantIds?: string[];
 }): CalendarJobPack {
   return {
     kind: input.kind,
@@ -68,6 +70,8 @@ export function buildCalendarJobPack(input: {
     timeZone: input.meeting.timeZone,
     notes: input.meeting.notes,
     participantCount: input.participantCount,
+    participant_ids: input.participantIds ?? [],
+    audience: input.meeting.audienceKind ?? "picked",
     calendarEventId: input.meeting.calendarEventId,
     instruction: input.kind === CALENDAR_SYNC_KIND ? SYNC_INSTRUCTION : CANCEL_INSTRUCTION,
   };

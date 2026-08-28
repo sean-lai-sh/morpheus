@@ -20,7 +20,16 @@ import {
 } from "discord.js";
 
 type MessageRow = ActionRowBuilder<MessageActionRowComponentBuilder>;
-import { dateInTimeZone, expandAudience, extractMentionableAudience, parseMeetingStart } from "../coordinator/audience.ts";
+import {
+  dateInTimeZone,
+  expandAudience,
+  extractMentionableAudience,
+  meetingAudienceFromSelections,
+  parseMeetingStart,
+} from "../coordinator/audience.ts";
+import { buildRosterSeedPack, serializeRosterSeedPack } from "../coordinator/seed-job.ts";
+import { tryEnqueueJob } from "./enqueue.ts";
+import { authorCanViewChannel } from "./job-scope.ts";
 import { assertCoordinatorCreate } from "../coordinator/gates.ts";
 import { publishOutboxEvents, type OutboxDispatchOutcome } from "../coordinator/publisher.ts";
 import {
@@ -95,6 +104,9 @@ export const MEET_COMMAND = new SlashCommandBuilder()
       .addStringOption((opt) =>
         opt.setName("meeting_id").setDescription("Meeting id from the announcement").setRequired(true),
       ),
+  )
+  .addSubcommand((sub) =>
+    sub.setName("seed").setDescription("One-shot F26 Discord→email map (Grok reads the sheet; Mini stores bindings)"),
   )
   .toJSON();
 
@@ -470,6 +482,61 @@ async function handleTaskCommand(interaction: ChatInputCommandInteraction): Prom
 
 async function handleMeetCommand(interaction: ChatInputCommandInteraction): Promise<void> {
   const sub = interaction.options.getSubcommand();
+  if (sub === "seed") {
+    const gate = createGate(interaction);
+    if (!gate.ok) {
+      await interaction.reply({
+        content:
+          gate.reason === "role-gate"
+            ? "You need an eboard trigger role to seed the roster map."
+            : "Seed the roster from an allowlisted eboard channel.",
+        ephemeral: true,
+        allowedMentions: ALLOWED_MENTIONS,
+      });
+      return;
+    }
+    const ack = await interaction.reply({
+      content: "Queued roster seed. Grok (hello@) will read the F26 sheet and I'll store Discord→email bindings.",
+      ephemeral: true,
+      fetchReply: true,
+      allowedMentions: ALLOWED_MENTIONS,
+    });
+    if (interaction.guild) {
+      await interaction.guild.members.fetch().catch(() => undefined);
+    }
+    const members = [...(interaction.guild?.members.cache.values() ?? [])]
+      .filter((member) => !member.user.bot)
+      .map((member) => ({
+        id: member.id,
+        username: member.user.username ?? null,
+        global_name: member.user.globalName ?? null,
+        nick: member.nickname ?? null,
+      }));
+    const content = serializeRosterSeedPack(buildRosterSeedPack(members));
+    const result = await tryEnqueueJob(
+      {
+        discordMessageId: ack.id,
+        discordChannelId: interaction.channelId,
+        discordThreadId: null,
+        parentChannelId: interactionParentId(interaction),
+        authorId: interaction.user.id,
+        authorIsBot: Boolean(interaction.user.bot),
+        authorRoleIds: interactionRoleIds(interaction),
+        content,
+        mentionedBot: true,
+        replyToBot: false,
+        source: "slash",
+      },
+      {
+        canViewChannel: (id) =>
+          authorCanViewChannel({ member: interaction.member, guild: interaction.guild }, id),
+      },
+    );
+    if (result.skipped && result.skipped !== "duplicate") {
+      await interaction.editReply({ content: `Could not queue seed (${result.skipped}).` }).catch(() => undefined);
+    }
+    return;
+  }
   if (sub === "cancel") {
     const meetingId = interaction.options.getString("meeting_id", true).trim();
     const result = cancelMeeting({ meetingId, creatorUserId: interaction.user.id });
@@ -747,7 +814,25 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     if (!draft || draft.createdByUserId !== interaction.user.id) {
       throw new Error("This meeting draft expired. Run /meet create again.");
     }
-    const people = await resolveComponentAudience(interaction);
+    const selections = extractMentionableAudience({
+      values: interaction.isMentionableSelectMenu() ? [...interaction.values] : [],
+      resolved: interaction.isMentionableSelectMenu()
+        ? {
+            users: Object.fromEntries(
+              [...interaction.users.entries()].map(([id, user]) => [
+                id,
+                { username: user.username, global_name: user.globalName },
+              ]),
+            ),
+            roles: Object.fromEntries([...interaction.roles.entries()].map(([id]) => [id, { id }])),
+          }
+        : {},
+    });
+    const { audienceKind, userSelections } = meetingAudienceFromSelections(selections);
+    const people =
+      audienceKind === "f26_roster"
+        ? userSelections.map((user) => ({ userId: user.id, displayName: user.displayName }))
+        : await resolveComponentAudience(interaction);
     const result = createScheduledMeeting({
       createdByUserId: draft.createdByUserId,
       title: draft.title,
@@ -757,6 +842,7 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
       notes: draft.notes,
       channelId: draft.channelId,
       participants: people,
+      audienceKind,
     });
     pendingMeetings.delete(value);
     const outcomes = await publish(result.outboxEvents);
@@ -765,7 +851,11 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
       dateStyle: "medium",
       timeStyle: "short",
     });
-    const announcement = `📅 **${result.meeting.title}**\n${when}\n${people.length} attendee(s).\nMeeting ID: \`${result.meeting.id}\`\nCalendar sync queued for Grok (hello@).`;
+    const audienceLine =
+      audienceKind === "f26_roster"
+        ? "F26 Preferred Emails (role is not expanded)."
+        : `${people.length} attendee(s).`;
+    const announcement = `📅 **${result.meeting.title}**\n${when}\n${audienceLine}\nMeeting ID: \`${result.meeting.id}\`\nCalendar sync queued for Grok (hello@).`;
     if (interaction.client.isReady()) {
       try {
         await announceMeeting(interaction.client, draft.channelId, announcement);

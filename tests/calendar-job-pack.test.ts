@@ -55,6 +55,8 @@ describe("calendar job pack", () => {
     expect(content).not.toMatch(/@gmail\.com|@nyu\.edu/i);
     expect(content).toContain("meet-1");
     expect(content).toContain("hello@techatnyu.org");
+    expect(content).toContain("\"audience\":\"picked\"");
+    expect(content).toContain("participant_ids");
     expect(parseCoordinatorJobContent(content)?.kind).toBe("meeting.calendar_sync");
     expect(coordinatorJobMessageId("outbox-1")).toBe("coordinator-outbox:outbox-1");
   });

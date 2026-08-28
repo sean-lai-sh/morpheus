@@ -247,8 +247,14 @@ async function dispatchCalendarJob(
     outboxId: event.id,
     version,
     participantCount: getMeetingParticipants(meeting.id).length,
+    participantIds: getMeetingParticipants(meeting.id).map((person) => person.userId),
   });
   const content = redactCalendarJobContent(serializeCalendarJobPack(pack));
+  if (/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(content.replace(/hello@techatnyu\.org/gi, ""))) {
+    markOutboxFailed(event.id, "refused-email-in-payload", now);
+    logger.error(logCorrelate(event), "outbox.publish.refused_email_in_payload");
+    return "unsupported";
+  }
   if (/discord_bot_token|DISCORD_BOT_TOKEN/i.test(content)) {
     markOutboxFailed(event.id, "refused-discord-token-in-payload", now);
     logger.error(logCorrelate(event), "outbox.publish.refused_token_in_payload");
