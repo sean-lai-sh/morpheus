@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   CalendarApiError,
+  calendarEventIdFor,
   createGoogleCalendarClient,
   type CalendarEventInput,
 } from "../src/coordinator/calendar-client.ts";
@@ -45,7 +46,7 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
 }
 
 const slept: number[] = [];
-function client(responses: Array<() => Response>) {
+function client(responses: Array<() => Response>, extra: { meetPollAttempts?: number } = {}) {
   const { calls, fetchImpl } = recorder(responses);
   const api = createGoogleCalendarClient({
     tokenSource,
@@ -54,13 +55,18 @@ function client(responses: Array<() => Response>) {
       slept.push(ms);
     },
     baseDelayMs: 1,
+    meetPollAttempts: extra.meetPollAttempts ?? 0,
+    meetPollDelayMs: 1,
   });
   return { calls, api };
 }
 
+const MEETING_ID = "meeting-0001";
+
 function baseInput(overrides: Partial<CalendarEventInput> = {}): CalendarEventInput {
   return {
     calendarId: CALENDAR_ID,
+    meetingId: MEETING_ID,
     title: "Eboard Sync",
     startsAt: "2026-09-01T18:00:00.000Z",
     endsAt: "2026-09-01T19:00:00.000Z",
@@ -99,6 +105,17 @@ describe("create request shape", () => {
     expect(url.searchParams.get("conferenceDataVersion")).toBe("1");
     expect(url.searchParams.get("sendUpdates")).toBe("all");
     expect(call.headers.Authorization).toBe(`Bearer ${TOKEN}`);
+  });
+
+  test("the create carries a deterministic, charset-legal event id derived from the meeting id", async () => {
+    const { calls, api } = client([() => jsonResponse(createdEvent)]);
+    await api.upsertEvent(baseInput());
+    const id = calls[0]!.body.id;
+    expect(id).toBe(calendarEventIdFor(MEETING_ID));
+    // Google event ids: base32hex, 5..1024 chars. No hyphens, no uppercase.
+    expect(id).toMatch(/^[0-9a-v]{5,1024}$/);
+    expect(calendarEventIdFor(MEETING_ID)).toBe(calendarEventIdFor(MEETING_ID));
+    expect(calendarEventIdFor("meeting-0002")).not.toBe(id);
   });
 
   test("carries a hangoutsMeet createRequest when requestMeet is true, and no conferenceData when false", async () => {
@@ -142,9 +159,39 @@ describe("requestId stability", () => {
     expect(idA).toBe(idB);
 
     const other = client([() => jsonResponse(createdEvent)]);
-    await other.api.upsertEvent(baseInput({ startsAt: "2026-09-08T18:00:00.000Z", title: "Different Meeting" }));
+    await other.api.upsertEvent(baseInput({ meetingId: "meeting-0002" }));
     expect(other.calls[0]!.body.conferenceData.createRequest.requestId).not.toBe(idA);
+  });
 
+  test("two meetings with the same title and slot never share an event id or a conference key", async () => {
+    const a = client([() => jsonResponse(createdEvent)]);
+    await a.api.upsertEvent(baseInput({ meetingId: "meeting-a" }));
+    const b = client([() => jsonResponse(createdEvent)]);
+    await b.api.upsertEvent(baseInput({ meetingId: "meeting-b" }));
+    expect(a.calls[0]!.body.id).not.toBe(b.calls[0]!.body.id);
+    expect(a.calls[0]!.body.conferenceData.createRequest.requestId).not.toBe(
+      b.calls[0]!.body.conferenceData.createRequest.requestId,
+    );
+  });
+
+  test("a 503 whose create actually committed converges on ONE event: retry 409s, then PATCHes it", async () => {
+    const { calls, api } = client([
+      () => jsonResponse({ error: { message: "Backend Error" } }, 503),
+      () => jsonResponse({ error: { message: "The requested identifier already belongs to another event" } }, 409),
+      () => jsonResponse(createdEvent),
+    ]);
+    const result = await api.upsertEvent(baseInput());
+
+    expect(calls.map((c) => c.method)).toEqual(["POST", "POST", "PATCH"]);
+    // Both POSTs carried the same id, so Google could not have minted two events.
+    expect(calls[0]!.body.id).toBe(calls[1]!.body.id);
+    expect(new URL(calls[2]!.url).pathname).toBe(
+      `/calendar/v3/calendars/hello%40techatnyu.org/events/${calendarEventIdFor(MEETING_ID)}`,
+    );
+    // The convergence PATCH never asks for a new conference (that would swap the Meet).
+    expect(calls[2]!.body.conferenceData).toBeUndefined();
+    expect(calls[2]!.body.id).toBeUndefined();
+    expect(result.calendarEventId).toBe("evt_123");
   });
 
   test("an update sends no createRequest at all, so the existing Meet link survives", async () => {
@@ -183,12 +230,113 @@ describe("meet link extraction", () => {
     expect(result.meetLink).toBe("https://meet.google.com/fallback-link");
   });
 
-  test("returns null without throwing when neither is present", async () => {
+  test("a plain (requestMeet: false) event with no link is fine", async () => {
     const { api } = client([() => jsonResponse({ id: "evt_none" })]);
-    const result = await api.upsertEvent(baseInput());
+    const result = await api.upsertEvent(baseInput({ requestMeet: false }));
     expect(result.meetLink).toBeNull();
     expect(result.htmlLink).toBeNull();
     expect(result.calendarEventId).toBe("evt_none");
+  });
+
+  test("requestMeet with a 200 and no Meet is NOT success: throws with the event id attached", async () => {
+    // Google can answer 200 + id with the conference still `pending`. Treating
+    // that as done would close the outbox with no Meet link ever stored.
+    const { api } = client([() => jsonResponse({ id: "evt_pending" })]);
+    let caught: unknown;
+    try {
+      await api.upsertEvent(baseInput());
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(CalendarApiError);
+    const error = caught as CalendarApiError;
+    expect(error.reason).toBe("meet-pending");
+    expect(error.calendarEventId).toBe("evt_pending");
+    expect(error.retryable).toBe(false);
+  });
+
+  test("a pending conference is polled by GET until the video entry appears", async () => {
+    const pending = {
+      id: "evt_slow",
+      conferenceData: { createRequest: { status: { statusCode: "pending" } } },
+    };
+    const { calls, api } = client(
+      [() => jsonResponse(pending), () => jsonResponse(pending), () => jsonResponse({ ...createdEvent, id: "evt_slow" })],
+      { meetPollAttempts: 3 },
+    );
+    const result = await api.upsertEvent(baseInput());
+    expect(calls.map((c) => c.method)).toEqual(["POST", "GET", "GET"]);
+    expect(new URL(calls[1]!.url).pathname).toBe("/calendar/v3/calendars/hello%40techatnyu.org/events/evt_slow");
+    expect(result.meetLink).toBe("https://meet.google.com/abc-defg-hij");
+  });
+
+  test("a failed conference stops polling and reports meet-failed with the id", async () => {
+    const failed = {
+      id: "evt_fail",
+      conferenceData: { createRequest: { status: { statusCode: "failure" } } },
+    };
+    const { calls, api } = client([() => jsonResponse(failed)], { meetPollAttempts: 3 });
+    let caught: unknown;
+    try {
+      await api.upsertEvent(baseInput());
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as CalendarApiError).reason).toBe("meet-failed");
+    expect((caught as CalendarApiError).calendarEventId).toBe("evt_fail");
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe("getEvent", () => {
+  test("returns the event, null on 404/410, and null when Google says cancelled", async () => {
+    const live = client([() => jsonResponse(createdEvent)]);
+    const found = await live.api.getEvent({ calendarId: CALENDAR_ID, eventId: "evt_123" });
+    expect(found?.calendarEventId).toBe("evt_123");
+    expect(found?.meetLink).toBe("https://meet.google.com/abc-defg-hij");
+    expect(live.calls[0]!.method).toBe("GET");
+
+    const gone = client([() => jsonResponse({ error: { message: "Not Found" } }, 404)]);
+    expect(await gone.api.getEvent({ calendarId: CALENDAR_ID, eventId: "evt_x" })).toBeNull();
+
+    const cancelled = client([() => jsonResponse({ ...createdEvent, status: "cancelled" })]);
+    expect(await cancelled.api.getEvent({ calendarId: CALENDAR_ID, eventId: "evt_123" })).toBeNull();
+  });
+});
+
+describe("abort", () => {
+  test("an already-aborted signal short-circuits before any fetch and reports aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { calls, api } = client([() => jsonResponse(createdEvent)]);
+    let caught: unknown;
+    try {
+      await api.upsertEvent(baseInput({ signal: controller.signal }));
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as CalendarApiError).aborted).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("the signal is forwarded to fetch and an AbortError becomes a typed, non-retryable failure", async () => {
+    const controller = new AbortController();
+    let sawSignal: AbortSignal | undefined;
+    const fetchImpl = (async (_url: any, init: any) => {
+      sawSignal = init.signal;
+      controller.abort();
+      throw Object.assign(new Error("aborted"), { name: "AbortError" });
+    }) as unknown as typeof fetch;
+    const api = createGoogleCalendarClient({ tokenSource, fetchImpl, sleepImpl: async () => {}, baseDelayMs: 1 });
+    let caught: unknown;
+    try {
+      await api.upsertEvent(baseInput({ signal: controller.signal }));
+    } catch (err) {
+      caught = err;
+    }
+    expect(sawSignal).toBe(controller.signal);
+    expect((caught as CalendarApiError).aborted).toBe(true);
+    expect((caught as CalendarApiError).retryable).toBe(false);
   });
 });
 
@@ -315,5 +463,12 @@ describe("secret hygiene", () => {
     expect(caught!.status).toBe(400);
     expect(caught!.message).toContain("Invalid attendee");
     expect(caught!.message).toContain("[redacted-email]");
+  });
+});
+
+describe("source hygiene", () => {
+  test("the client source contains no NUL bytes, so GitHub diffs it as text", async () => {
+    const text = await Bun.file(new URL("../src/coordinator/calendar-client.ts", import.meta.url)).text();
+    expect(text.includes("\u0000")).toBe(false);
   });
 });

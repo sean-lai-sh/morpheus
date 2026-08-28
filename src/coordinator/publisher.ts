@@ -28,6 +28,7 @@ import {
   serializeCalendarJobPack,
 } from "./calendar-job.ts";
 import {
+  DEFERRING_SKIPS,
   tryMiniCalendarCancel,
   tryMiniCalendarSync,
   type FastPathOutcome,
@@ -53,6 +54,18 @@ export interface ReminderDmSender {
 }
 
 const HANDOFF_TIMEOUT_MS = OUTBOX_HANDOFF_TIMEOUT_MS;
+
+/**
+ * Outbox rows currently being dispatched by this process.
+ *
+ * The `/meet` handler publishes a row immediately and the 60s sweeper re-reads
+ * every `pending` row, so the two overlap whenever Google is slow; without a
+ * lease the second dispatcher would POST again while the first is mid-flight.
+ * (The deterministic event id turns that into a 409, not a duplicate event, but
+ * it would still mail the guest list twice.) One process owns the SQLite file,
+ * so an in-memory set is the whole lease.
+ */
+const inFlightOutbox = new Set<string>();
 
 async function withDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -291,20 +304,61 @@ async function dispatchCalendarJob(
   const fast = await runFastPath({ kind, meeting, participantIds });
   if (fast.ok) {
     if (kind === "meeting.calendar_sync") {
-      applyCalendarSyncResult({
+      const applied = applyCalendarSyncResult({
         meetingId: meeting.id,
         version,
         calendarEventId: fast.calendarEventId,
         meetLink: fast.meetLink,
         now,
       });
+      if (!applied.applied && applied.reason === "not_scheduled" && fast.calendarEventId) {
+        // The organizer cancelled while the insert was in flight. The cancel
+        // row snapshotted `calendarEventId: null`, so nothing else will ever
+        // delete this event; do it now, while we still hold the id.
+        logger.warn(
+          logCorrelate(event, { meetingId, reason: applied.reason }),
+          "calendar fast path: meeting cancelled mid-insert; removing the event",
+        );
+        const undo = await runFastPath({
+          kind: "meeting.calendar_cancel",
+          meeting: { ...meeting, calendarEventId: fast.calendarEventId },
+          participantIds,
+        });
+        if (!undo.ok) {
+          const failure = recordOutboxDispatchFailure(event.id, `orphan-event:${undo.skip}`, now);
+          logger.error(
+            logCorrelate(event, { meetingId, skip: undo.skip, attempts: failure.attempts }),
+            failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+          );
+          return "deferred";
+        }
+      }
     }
     markOutboxDispatched(event.id, now);
     logger.info(
-      logCorrelate(event, { meetingId, attendees: fast.attendeeCount, path: "mini" }),
+      logCorrelate(event, {
+        meetingId,
+        attendees: fast.attendeeCount,
+        unresolved: fast.unresolvedCount ?? 0,
+        path: "mini",
+      }),
       "outbox.publish.accepted",
     );
     return "accepted";
+  }
+  if (DEFERRING_SKIPS.has(fast.skip)) {
+    // The event may exist on Google's side (or provably does, minus its Meet).
+    // Grok would create a second one; keep the row pending so the sweeper
+    // retries the Mini, which converges on the same deterministic event id.
+    if (kind === "meeting.calendar_sync" && fast.calendarEventId) {
+      applyCalendarSyncResult({ meetingId: meeting.id, version, calendarEventId: fast.calendarEventId, now });
+    }
+    const failure = recordOutboxDispatchFailure(event.id, `calendar fast path: ${fast.skip}`, now);
+    logger.warn(
+      logCorrelate(event, { meetingId, skip: fast.skip, attempts: failure.attempts }),
+      failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+    );
+    return "deferred";
   }
   logger.info(
     logCorrelate(event, { meetingId, skip: fast.skip }),
@@ -432,12 +486,21 @@ export async function publishOutboxEvent(
       event.type === "meeting.calendar_sync_requested" ||
       event.type === "meeting.calendar_cancel_requested"
     ) {
-      const status = await dispatchCalendarJob(event, now, {
-        enqueue: opts.enqueueCalendar,
-        dispatch: opts.dispatchCalendar,
-        fastPath: opts.calendarFastPath,
-      });
-      return { outboxId: event.id, status };
+      if (inFlightOutbox.has(event.id)) {
+        logger.info(logCorrelate(event), "outbox.publish.already_in_flight");
+        return { outboxId: event.id, status: "deferred" };
+      }
+      inFlightOutbox.add(event.id);
+      try {
+        const status = await dispatchCalendarJob(event, now, {
+          enqueue: opts.enqueueCalendar,
+          dispatch: opts.dispatchCalendar,
+          fastPath: opts.calendarFastPath,
+        });
+        return { outboxId: event.id, status };
+      } finally {
+        inFlightOutbox.delete(event.id);
+      }
     }
     markOutboxFailed(event.id, `Unsupported outbox type: ${event.type}`, now);
     logger.warn(logCorrelate(event), "outbox.publish.unsupported");

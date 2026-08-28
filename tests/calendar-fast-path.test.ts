@@ -6,7 +6,13 @@ import {
   tryMiniCalendarSync,
   type FastPathOutcome,
 } from "../src/coordinator/calendar-fast-path.ts";
-import type { CalendarClient, CalendarEventInput } from "../src/coordinator/calendar-client.ts";
+import {
+  CalendarApiError,
+  calendarEventIdFor,
+  type CalendarClient,
+  type CalendarEventInput,
+  type CalendarEventResult,
+} from "../src/coordinator/calendar-client.ts";
 import {
   cancelMeeting,
   createScheduledMeeting,
@@ -41,6 +47,7 @@ afterAll(() => {
 function recordingClient(over: Partial<CalendarClient> = {}) {
   const upserts: CalendarEventInput[] = [];
   const cancels: Array<{ calendarId: string; eventId: string }> = [];
+  const lookups: Array<{ calendarId: string; eventId: string }> = [];
   const client: CalendarClient = {
     async upsertEvent(input) {
       upserts.push(input);
@@ -50,13 +57,23 @@ function recordingClient(over: Partial<CalendarClient> = {}) {
         htmlLink: null,
       };
     },
+    async getEvent(input) {
+      lookups.push({ calendarId: input.calendarId, eventId: input.eventId });
+      return null;
+    },
     async cancelEvent(input) {
-      cancels.push(input);
+      cancels.push({ calendarId: input.calendarId, eventId: input.eventId });
     },
     ...over,
   };
-  return { client, upserts, cancels };
+  return { client, upserts, cancels, lookups };
 }
+
+const FOUND: CalendarEventResult = {
+  calendarEventId: calendarEventIdFor("m-1"),
+  meetLink: "https://meet.google.com/found-link",
+  htmlLink: null,
+};
 
 const SYNC_INPUT = {
   meetingId: "m-1",
@@ -103,6 +120,32 @@ describe("tryMiniCalendarSync resolves attendees locally", () => {
     expect(upserts[0]!.attendeeEmails).toEqual(expected);
     expect(upserts[0]!.attendeeEmails).toContain("ada@nyu.edu");
     expect(upserts[0]!.attendeeEmails).toContain("grace@nyu.edu");
+  });
+
+  test("f26_roster with one unbound extra still invites the roster and reports the extra", async () => {
+    // Grok has no roster map either, so aborting the whole insert over one
+    // unmapped snowflake would just fail slower. Invite everyone we can name.
+    const { client, upserts } = recordingClient();
+    const out = await tryMiniCalendarSync(
+      { ...SYNC_INPUT, audience: "f26_roster", participantIds: ["100000000000000001", "100000000000000009"] },
+      { client, env: {} },
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) throw new Error("unreachable");
+    expect(out.unresolvedCount).toBe(1);
+    expect(upserts).toHaveLength(1);
+    expect(upserts[0]!.attendeeEmails).toContain("ada@nyu.edu");
+    expect(upserts[0]!.attendeeEmails).toContain("grace@nyu.edu");
+  });
+
+  test("the upsert carries the meeting id and an abort signal", async () => {
+    const { client, upserts } = recordingClient();
+    await tryMiniCalendarSync(
+      { ...SYNC_INPUT, audience: "picked", participantIds: ["100000000000000001"] },
+      { client, env: {} },
+    );
+    expect(upserts[0]!.meetingId).toBe("m-1");
+    expect(upserts[0]!.signal).toBeInstanceOf(AbortSignal);
   });
 
   test("an existing calendarEventId updates in place rather than creating a second event", async () => {
@@ -154,8 +197,8 @@ describe("tryMiniCalendarSync skips rather than sending a partial invite", () =>
     expect(out).toEqual({ ok: false, skip: "no-attendees" });
   });
 
-  test("a Calendar API failure degrades to Grok instead of losing the meeting", async () => {
-    const { client } = recordingClient({
+  test("a Calendar API failure degrades to Grok only once a lookup proves no event exists", async () => {
+    const { client, lookups } = recordingClient({
       async upsertEvent() {
         throw new Error("boom");
       },
@@ -165,6 +208,80 @@ describe("tryMiniCalendarSync skips rather than sending a partial invite", () =>
       { client, env: {} },
     );
     expect(out).toEqual({ ok: false, skip: "api-error" });
+    expect(lookups).toEqual([{ calendarId: "primary", eventId: calendarEventIdFor("m-1") }]);
+  });
+
+  test("a failure whose create actually landed is a success, not a Grok duplicate", async () => {
+    const { client } = recordingClient({
+      async upsertEvent() {
+        throw new CalendarApiError("calendar create failed (503)", { status: 503 });
+      },
+      async getEvent() {
+        return FOUND;
+      },
+    });
+    const out = await tryMiniCalendarSync(
+      { ...SYNC_INPUT, audience: "picked", participantIds: ["100000000000000001"] },
+      { client, env: {} },
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) throw new Error("unreachable");
+    expect(out.calendarEventId).toBe(FOUND.calendarEventId);
+    expect(out.meetLink).toBe(FOUND.meetLink);
+  });
+
+  test("a failure where the lookup itself fails is unknown-state (retry later, never Grok)", async () => {
+    const { client } = recordingClient({
+      async upsertEvent() {
+        throw new Error("boom");
+      },
+      async getEvent() {
+        throw new Error("lookup boom");
+      },
+    });
+    const out = await tryMiniCalendarSync(
+      { ...SYNC_INPUT, audience: "picked", participantIds: ["100000000000000001"] },
+      { client, env: {} },
+    );
+    expect(out).toEqual({ ok: false, skip: "unknown-state" });
+  });
+
+  test("an event without its Meet yet is meet-pending and carries the id", async () => {
+    const { client } = recordingClient({
+      async upsertEvent() {
+        throw new CalendarApiError("conference not ready", {
+          status: 200,
+          retryable: false,
+          calendarEventId: "evt-half",
+          reason: "meet-pending",
+        });
+      },
+    });
+    const out = await tryMiniCalendarSync(
+      { ...SYNC_INPUT, audience: "picked", participantIds: ["100000000000000001"] },
+      { client, env: {} },
+    );
+    expect(out).toEqual({ ok: false, skip: "meet-pending", calendarEventId: "evt-half" });
+  });
+
+  test("a never-resolving client is aborted at the deadline, then looked up, within the budget", async () => {
+    const { client, lookups } = recordingClient({
+      upsertEvent(input) {
+        return new Promise((_, reject) => {
+          input.signal?.addEventListener("abort", () =>
+            reject(new CalendarApiError("aborted", { status: 0, retryable: false, aborted: true })),
+          );
+        });
+      },
+    });
+    const started = Date.now();
+    const out = await tryMiniCalendarSync(
+      { ...SYNC_INPUT, audience: "picked", participantIds: ["100000000000000001"] },
+      { client, env: {}, timeoutMs: 30 },
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(out).toEqual({ ok: false, skip: "api-error" });
+    expect(lookups).toHaveLength(1);
   });
 });
 
@@ -179,14 +296,29 @@ describe("tryMiniCalendarCancel", () => {
     expect(cancels).toEqual([{ calendarId: "hello@techatnyu.org", eventId: "evt-123" }]);
   });
 
-  test("no event id means there is nothing to cancel here", async () => {
-    const { client, cancels } = recordingClient();
+  test("no stored event id: checks the deterministic id, and if absent hands off", async () => {
+    const { client, cancels, lookups } = recordingClient();
     const out = await tryMiniCalendarCancel(
       { meetingId: "m-1", calendarEventId: null },
       { client, env: {} },
     );
     expect(out).toEqual({ ok: false, skip: "missing-event-id" });
+    expect(lookups).toEqual([{ calendarId: "primary", eventId: calendarEventIdFor("m-1") }]);
     expect(cancels).toHaveLength(0);
+  });
+
+  test("no stored event id but the Mini's event exists: it is deleted", async () => {
+    const { client, cancels } = recordingClient({
+      async getEvent() {
+        return FOUND;
+      },
+    });
+    const out = await tryMiniCalendarCancel(
+      { meetingId: "m-1", calendarEventId: null },
+      { client, env: {} },
+    );
+    expect(out.ok).toBe(true);
+    expect(cancels).toEqual([{ calendarId: "primary", eventId: FOUND.calendarEventId }]);
   });
 });
 
@@ -261,6 +393,87 @@ describe("publisher prefers the Mini and falls back to Grok", () => {
     const outcome = await publishOutboxEvent(event, { dispatchCalendar: async () => true });
     expect(outcome.status).toBe("accepted");
     expect(getJobByDiscordMessageId(coordinatorJobMessageId(event.id))).not.toBeNull();
+  });
+
+  test("meet-pending keeps the outbox pending, stores the id, and never reaches Grok", async () => {
+    const { meeting, outboxEvents } = scheduledMeeting("Meet pending");
+    const event = outboxEvents[0]!;
+
+    const outcome = await publishOutboxEvent(event, {
+      calendarFastPath: async () => ({ ok: false, skip: "meet-pending", calendarEventId: "evt-half" }),
+      enqueueCalendar: () => {
+        throw new Error("Grok must not be reached while the Mini's event exists");
+      },
+    });
+
+    expect(outcome.status).toBe("deferred");
+    const row = getOutboxEvent(event.id);
+    expect(row?.status).toBe("pending");
+    expect(row?.attempts).toBe(1);
+    expect(getMeeting(meeting.id)?.calendarEventId).toBe("evt-half");
+    expect(getMeeting(meeting.id)?.meetLink).toBeNull();
+  });
+
+  test("unknown-state also defers rather than handing Grok a possible duplicate", async () => {
+    const { outboxEvents } = scheduledMeeting("Unknown state");
+    const event = outboxEvents[0]!;
+    const outcome = await publishOutboxEvent(event, {
+      calendarFastPath: async () => ({ ok: false, skip: "unknown-state" }),
+      enqueueCalendar: () => {
+        throw new Error("Grok must not be reached in unknown-state");
+      },
+    });
+    expect(outcome.status).toBe("deferred");
+    expect(getOutboxEvent(event.id)?.status).toBe("pending");
+  });
+
+  test("a meeting cancelled while the insert was in flight gets its event deleted, not orphaned", async () => {
+    const { meeting, outboxEvents } = scheduledMeeting("Cancel race");
+    const syncEvent = outboxEvents[0]!;
+    const calls: string[] = [];
+
+    const outcome = await publishOutboxEvent(syncEvent, {
+      calendarFastPath: async (input) => {
+        calls.push(`${input.kind}:${input.meeting.calendarEventId ?? "null"}`);
+        if (input.kind === "meeting.calendar_sync") {
+          // The organizer cancels while Google is still answering the POST.
+          cancelMeeting({ meetingId: meeting.id, creatorUserId: "creator-fast" });
+          return { ok: true, calendarEventId: "evt-raced", meetLink: "https://meet.google.com/raced", attendeeCount: 1 };
+        }
+        return { ok: true, calendarEventId: input.meeting.calendarEventId, meetLink: null, attendeeCount: 0 };
+      },
+      enqueueCalendar: () => {
+        throw new Error("Grok must not be reached");
+      },
+    });
+
+    expect(outcome.status).toBe("accepted");
+    // The undo cancel ran with the id the insert just returned.
+    expect(calls).toEqual(["meeting.calendar_sync:null", "meeting.calendar_cancel:evt-raced"]);
+    expect(getOutboxEvent(syncEvent.id)?.status).toBe("dispatched");
+    expect(getMeeting(meeting.id)?.status).toBe("cancelled");
+  });
+
+  test("two dispatchers on the same row: the second is deferred while the first is in flight", async () => {
+    const { outboxEvents } = scheduledMeeting("Lease");
+    const event = outboxEvents[0]!;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let fastPathCalls = 0;
+    const fastPath = async () => {
+      fastPathCalls += 1;
+      await gate;
+      return { ok: true, calendarEventId: "evt-once", meetLink: "https://meet.google.com/once", attendeeCount: 1 } as const;
+    };
+
+    const first = publishOutboxEvent(event, { calendarFastPath: fastPath });
+    const second = await publishOutboxEvent(event, { calendarFastPath: fastPath });
+    expect(second.status).toBe("deferred");
+    release();
+    expect((await first).status).toBe("accepted");
+    expect(fastPathCalls).toBe(1);
   });
 
   test("a cancel handled by the Mini does not enqueue a Grok cancel job", async () => {

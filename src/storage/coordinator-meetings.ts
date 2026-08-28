@@ -211,17 +211,28 @@ export function cancelMeeting(input: {
   })();
 }
 
+export interface CalendarSyncApplyResult {
+  meeting: MeetingRow | null;
+  /** False when nothing was written; `reason` says why so the caller can react. */
+  applied: boolean;
+  reason?: "meeting_not_found" | "not_scheduled" | "stale_version";
+}
+
 export function applyCalendarSyncResult(input: {
   meetingId: string;
   version: number;
   calendarEventId?: string | null;
   meetLink?: string | null;
   now?: number;
-}): MeetingRow | null {
+}): CalendarSyncApplyResult {
   const now = input.now ?? Date.now();
   const meeting = getMeeting(input.meetingId);
-  if (!meeting || meeting.status !== "scheduled") return null;
-  if (meeting.version !== input.version) return meeting;
+  if (!meeting) return { meeting: null, applied: false, reason: "meeting_not_found" };
+  // A cancelled meeting must not re-acquire an event id: the cancel outbox row
+  // already snapshotted whatever id it had, and the caller decides what to do
+  // with an event that landed after the cancel.
+  if (meeting.status !== "scheduled") return { meeting, applied: false, reason: "not_scheduled" };
+  if (meeting.version !== input.version) return { meeting, applied: false, reason: "stale_version" };
   const row = getDb()
     .query<MeetingDbRow, [string | null, string | null, number, string]>(
       `UPDATE meetings
@@ -232,7 +243,7 @@ export function applyCalendarSyncResult(input: {
        RETURNING *`,
     )
     .get(input.calendarEventId ?? null, input.meetLink ?? null, now, meeting.id);
-  return row ? mapMeeting(row) : meeting;
+  return { meeting: row ? mapMeeting(row) : meeting, applied: true };
 }
 
 export function markMeetingAnnounced(meetingId: string, now: number = Date.now()): MeetingRow | null {
