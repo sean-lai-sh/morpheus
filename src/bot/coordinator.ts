@@ -126,7 +126,13 @@ interface MeetingDraft {
 
 const pendingMeetings = new Map<string, MeetingDraft>();
 
-function interactionRoleIds(interaction: Interaction): string[] {
+/**
+ * Structural param, not discord.js's `Interaction` union: the union does not
+ * include the base `MessageComponentInteraction`, only its concrete subtypes,
+ * so `meetGate` (which accepts the base) could not call this. All this needs
+ * is the optional `member`.
+ */
+function interactionRoleIds(interaction: { member?: unknown } | Interaction): string[] {
   const member = "member" in interaction ? interaction.member : null;
   if (!member) return [];
   if (typeof (member as GuildMember).roles?.cache?.keys === "function") {
