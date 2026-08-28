@@ -144,14 +144,19 @@ describe("requestId stability", () => {
     await other.api.upsertEvent(baseInput({ startsAt: "2026-09-08T18:00:00.000Z", title: "Different Meeting" }));
     expect(other.calls[0]!.body.conferenceData.createRequest.requestId).not.toBe(idA);
 
-    // Retrying an update of a known event also reuses one id, so no second conference is minted.
-    const patchA = client([() => jsonResponse(createdEvent)]);
-    await patchA.api.upsertEvent(baseInput({ eventId: "evt_123" }));
-    const patchB = client([() => jsonResponse(createdEvent)]);
-    await patchB.api.upsertEvent(baseInput({ eventId: "evt_123", title: "Renamed Meeting" }));
-    expect(patchA.calls[0]!.body.conferenceData.createRequest.requestId).toBe(
-      patchB.calls[0]!.body.conferenceData.createRequest.requestId,
-    );
+  });
+
+  test("an update sends no createRequest at all, so the existing Meet link survives", async () => {
+    // Regression, caught against the live API: a PATCH carrying a createRequest
+    // makes Google mint a SECOND conference and swap the event onto it, so
+    // everyone holding the original link lands in a dead room after a rename.
+    const patch = client([() => jsonResponse(createdEvent)]);
+    await patch.api.upsertEvent(baseInput({ eventId: "evt_123", title: "Renamed Meeting" }));
+
+    expect(patch.calls[0]!.method).toBe("PATCH");
+    expect(patch.calls[0]!.body.conferenceData).toBeUndefined();
+    // Still declared, so the update does not strip the conference either.
+    expect(patch.calls[0]!.url).toContain("conferenceDataVersion=1");
   });
 });
 
