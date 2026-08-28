@@ -28,6 +28,7 @@ import {
   parseMeetingStart,
 } from "../coordinator/audience.ts";
 import { buildRosterSeedPack, serializeRosterSeedPack } from "../coordinator/seed-job.ts";
+import { ephemeralSlashAckMessageId } from "./reply.ts";
 import { tryEnqueueJob } from "./enqueue.ts";
 import { authorCanViewChannel } from "./job-scope.ts";
 import { assertCoordinatorCreate } from "../coordinator/gates.ts";
@@ -495,10 +496,9 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
       });
       return;
     }
-    const ack = await interaction.reply({
-      content: "Queued roster seed. Grok (hello@) will read the F26 sheet and I'll store Discord→email bindings.",
+    await interaction.reply({
+      content: "Queued roster seed. Grok (hello@) will read the F26 sheet and I'll store Discord→email bindings. The result will post in this channel.",
       ephemeral: true,
-      fetchReply: true,
       allowedMentions: ALLOWED_MENTIONS,
     });
     if (interaction.guild) {
@@ -515,7 +515,7 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
     const content = serializeRosterSeedPack(buildRosterSeedPack(members));
     const result = await tryEnqueueJob(
       {
-        discordMessageId: ack.id,
+        discordMessageId: ephemeralSlashAckMessageId(interaction.id),
         discordChannelId: interaction.channelId,
         discordThreadId: null,
         parentChannelId: interactionParentId(interaction),

@@ -77,6 +77,7 @@ describe("roster.seed pack", () => {
     });
     claimJob(job.id, "grok-eboard");
     const posted: string[] = [];
+    let fetched = 0;
     const result = await completeJobWithReply(
       job.id,
       "grok-eboard",
@@ -93,14 +94,15 @@ describe("roster.seed pack", () => {
             fetch: async () => ({
               isTextBased: () => true,
               messages: {
-                fetch: async () => ({
-                  reply: async (opts: { content: string }) => {
-                    posted.push(opts.content);
-                    return { id: "r-seed" };
-                  },
-                }),
+                fetch: async () => {
+                  fetched += 1;
+                  throw Object.assign(new Error("Unknown Message"), { code: 10008 });
+                },
               },
-              send: async () => ({ id: "r2" }),
+              send: async (opts: { content: string }) => {
+                posted.push(opts.content);
+                return { id: "chan-seed" };
+              },
             }),
           },
         },
@@ -108,6 +110,8 @@ describe("roster.seed pack", () => {
     );
     expect(result.ok).toBe(true);
     expect(result.posted).toBe(true);
+    expect(result.job?.result_discord_message_id).toBe("chan-seed");
+    expect(fetched).toBe(0);
     expect(getRosterBinding("99")?.email).toBe("sam@nyu.edu");
     expect(getJob(job.id)?.reply_text).not.toContain("sam@nyu.edu");
     expect(posted.join("")).toContain("Zach");
