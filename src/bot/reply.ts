@@ -5,6 +5,12 @@ import { redactSecrets } from "../notify/grok-dispatch.ts";
 import { stopJobTyping } from "./typing.ts";
 import { applyCoordinatorJobComplete, parseCoordinatorJobContent } from "../coordinator/calendar-job.ts";
 import {
+  applyRosterSeedComplete,
+  formatRosterSeedAnnouncement,
+  parseRosterSeedContent,
+  redactSeedText,
+} from "../coordinator/seed-job.ts";
+import {
   failJob,
   getJob,
   markJobCompleted,
@@ -57,9 +63,68 @@ function isTextChannel(channel: unknown): channel is TextBasedChannel & {
   return Boolean(c.messages && c.send);
 }
 
+const EPHEMERAL_SLASH_ACK_PREFIX = "slash-ephemeral:";
+
+export function ephemeralSlashAckMessageId(interactionId: string): string {
+  return `${EPHEMERAL_SLASH_ACK_PREFIX}${interactionId}`;
+}
+
+/** Slash acks that are ephemeral (or synthetic) cannot be message.reply targets. */
+export function shouldAnnounceInChannel(
+  job: Pick<JobRow, "discord_message_id"> & { content?: string | null },
+): boolean {
+  if (job.discord_message_id.startsWith(EPHEMERAL_SLASH_ACK_PREFIX)) return true;
+  if (job.discord_message_id.startsWith("coordinator-outbox:")) return true;
+  return Boolean(job.content && parseRosterSeedContent(job.content));
+}
+
+/** Discord REST 10008 — ephemeral / deleted source message. */
+export function isUnknownDiscordMessageError(err: unknown): boolean {
+  if (!err) return false;
+  if (typeof err === "string") return /unknown message/i.test(err);
+  if (typeof err !== "object") return false;
+  const e = err as { code?: unknown; message?: unknown; rawError?: { code?: unknown; message?: unknown } };
+  if (e.code === 10008 || e.rawError?.code === 10008) return true;
+  const text = [e.message, e.rawError?.message].filter((v) => typeof v === "string").join(" ");
+  return /unknown message/i.test(text);
+}
+
+function announcePayload(content: string) {
+  return {
+    content,
+    allowedMentions: {
+      parse: [] as never[],
+      users: [] as string[],
+      roles: [] as string[],
+      repliedUser: false,
+    },
+  };
+}
+
+async function sendChannelAnnouncement(
+  channel: TextBasedChannel & { send(opts: unknown): Promise<{ id: string }> },
+  content: string,
+  jobId: string,
+  onFirstSent?: (messageId: string) => void,
+): Promise<{ messageId: string; skipped?: string }> {
+  const chunks = splitDiscordContent(content);
+  const sent = await channel.send(announcePayload(chunks[0] ?? "\u200b"));
+  onFirstSent?.(sent.id);
+  try {
+    for (const extra of chunks.slice(1)) {
+      await channel.send(announcePayload(extra));
+    }
+  } catch (err) {
+    logger.error({ err, job_id: jobId }, "job reply follow-up failed after first send; not re-posting");
+    return { messageId: sent.id, skipped: "follow-up-failed" };
+  }
+  return { messageId: sent.id };
+}
+
 export async function postJobReply(
   job: Pick<JobRow, "discord_channel_id" | "discord_message_id" | "id"> & {
     result_discord_message_id?: string | null;
+    content?: string | null;
   },
   content: string,
   opts: {
@@ -79,36 +144,34 @@ export async function postJobReply(
     logger.error({ job_id: job.id, channel_id: job.discord_channel_id }, "job reply: channel not text-based");
     return { messageId: null, skipped: "channel-not-text" };
   }
-  const message = await channel.messages.fetch(job.discord_message_id);
-  const chunks = splitDiscordContent(content);
-  const first = chunks[0] ?? "\u200b";
-  const sent = await message.reply({
-    content: first,
-    allowedMentions: {
-      parse: [],
-      users: [],
-      roles: [],
-      repliedUser: false,
-    },
-  });
-  opts.onFirstSent?.(sent.id);
-  try {
-    for (const extra of chunks.slice(1)) {
-      await channel.send({
-        content: extra,
-        allowedMentions: {
-          parse: [],
-          users: [],
-          roles: [],
-          repliedUser: false,
-        },
-      });
-    }
-  } catch (err) {
-    logger.error({ err, job_id: job.id }, "job reply follow-up failed after first send; not re-posting");
-    return { messageId: sent.id, skipped: "follow-up-failed" };
+
+  if (shouldAnnounceInChannel(job)) {
+    return sendChannelAnnouncement(channel, content, job.id, opts.onFirstSent);
   }
-  return { messageId: sent.id };
+
+  try {
+    const message = await channel.messages.fetch(job.discord_message_id);
+    const chunks = splitDiscordContent(content);
+    const first = chunks[0] ?? "\u200b";
+    const sent = await message.reply(announcePayload(first));
+    opts.onFirstSent?.(sent.id);
+    try {
+      for (const extra of chunks.slice(1)) {
+        await channel.send(announcePayload(extra));
+      }
+    } catch (err) {
+      logger.error({ err, job_id: job.id }, "job reply follow-up failed after first send; not re-posting");
+      return { messageId: sent.id, skipped: "follow-up-failed" };
+    }
+    return { messageId: sent.id };
+  } catch (err) {
+    if (!isUnknownDiscordMessageError(err)) throw err;
+    logger.warn(
+      { job_id: job.id, discord_message_id: job.discord_message_id },
+      "source message missing (ephemeral or deleted); announcing in channel",
+    );
+    return sendChannelAnnouncement(channel, content, job.id, opts.onFirstSent);
+  }
 }
 
 /**
@@ -188,6 +251,14 @@ export async function completeJobWithReply(
   postReplies ??= env.DISCORD_POST_REPLIES;
 
   const existing = getJob(id);
+  if (existing && parseRosterSeedContent(existing.content)) {
+    const applied = applyRosterSeedComplete(existing.content, reply, opts.now);
+    reply = redactSeedText(
+      applied
+        ? formatRosterSeedAnnouncement(applied.mapped, applied.unmatched)
+        : "Roster seed completed but stored 0 bindings.",
+    );
+  }
   const github = allowlistedGithubIssueUrl(input.github_issue_url, {
     repo: githubRepo,
     namespace: existing?.namespace,

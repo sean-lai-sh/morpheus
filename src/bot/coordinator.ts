@@ -20,8 +20,19 @@ import {
 } from "discord.js";
 
 type MessageRow = ActionRowBuilder<MessageActionRowComponentBuilder>;
-import { dateInTimeZone, expandAudience, extractMentionableAudience, parseMeetingStart } from "../coordinator/audience.ts";
-import { assertCoordinatorCreate } from "../coordinator/gates.ts";
+import {
+  dateInTimeZone,
+  expandAudience,
+  extractMentionableAudience,
+  formatUnmappedInviteRefusal,
+  parseMeetingStart,
+  resolveMeetingInvitees,
+} from "../coordinator/audience.ts";
+import { buildRosterSeedPack, serializeRosterSeedPack } from "../coordinator/seed-job.ts";
+import { ephemeralSlashAckMessageId } from "./reply.ts";
+import { tryEnqueueJob } from "./enqueue.ts";
+import { authorCanViewChannel } from "./job-scope.ts";
+import { assertCoordinatorCreate, assertMeetInvoke } from "../coordinator/gates.ts";
 import { publishOutboxEvents, type OutboxDispatchOutcome } from "../coordinator/publisher.ts";
 import {
   formatReminderPolicy,
@@ -96,6 +107,9 @@ export const MEET_COMMAND = new SlashCommandBuilder()
         opt.setName("meeting_id").setDescription("Meeting id from the announcement").setRequired(true),
       ),
   )
+  .addSubcommand((sub) =>
+    sub.setName("seed").setDescription("One-shot F26 Discord→email map (Grok reads the sheet; Mini stores bindings)"),
+  )
   .toJSON();
 
 const ALLOWED_MENTIONS = { parse: [] as never[], users: [] as string[], roles: [] as string[], repliedUser: false };
@@ -112,7 +126,13 @@ interface MeetingDraft {
 
 const pendingMeetings = new Map<string, MeetingDraft>();
 
-function interactionRoleIds(interaction: Interaction): string[] {
+/**
+ * Structural param, not discord.js's `Interaction` union: the union does not
+ * include the base `MessageComponentInteraction`, only its concrete subtypes,
+ * so `meetGate` (which accepts the base) could not call this. All this needs
+ * is the optional `member`.
+ */
+function interactionRoleIds(interaction: { member?: unknown } | Interaction): string[] {
   const member = "member" in interaction ? interaction.member : null;
   if (!member) return [];
   if (typeof (member as GuildMember).roles?.cache?.keys === "function") {
@@ -141,6 +161,14 @@ function createGate(interaction: ChatInputCommandInteraction) {
     channelId: interaction.channelId,
     parentChannelId: interactionParentId(interaction),
     triggerRoleIds: jobTriggerRoleIds(),
+  });
+}
+
+function meetGate(interaction: ChatInputCommandInteraction | MessageComponentInteraction) {
+  return assertMeetInvoke({
+    roleIds: interactionRoleIds(interaction),
+    channelId: interaction.channelId,
+    parentChannelId: interactionParentId(interaction),
   });
 }
 
@@ -469,7 +497,64 @@ async function handleTaskCommand(interaction: ChatInputCommandInteraction): Prom
 }
 
 async function handleMeetCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const gate = meetGate(interaction);
+  if (!gate.ok) {
+    await interaction.reply({
+      content:
+        gate.reason === "role-gate"
+          ? "Only Eboard (or Leadership / Senior Adv) can use /meet."
+          : "Use /meet from an allowlisted eboard channel.",
+      ephemeral: true,
+      allowedMentions: ALLOWED_MENTIONS,
+    });
+    return;
+  }
   const sub = interaction.options.getSubcommand();
+  if (sub === "seed") {
+    await interaction.reply({
+      content: "Queued roster seed. Grok (hello@) will read the F26 sheet and I'll store Discord→email bindings. The result will post in this channel.",
+      ephemeral: true,
+      allowedMentions: ALLOWED_MENTIONS,
+    });
+    if (interaction.guild) {
+      await interaction.guild.members.fetch().catch(() => undefined);
+    }
+    const members = [...(interaction.guild?.members.cache.values() ?? [])]
+      .filter((member) => !member.user.bot)
+      .map((member) => ({
+        id: member.id,
+        username: member.user.username ?? null,
+        global_name: member.user.globalName ?? null,
+        nick: member.nickname ?? null,
+      }));
+    const content = serializeRosterSeedPack(buildRosterSeedPack(members));
+    const result = await tryEnqueueJob(
+      {
+        discordMessageId: ephemeralSlashAckMessageId(interaction.id),
+        discordChannelId: interaction.channelId,
+        discordThreadId: null,
+        parentChannelId: interactionParentId(interaction),
+        authorId: interaction.user.id,
+        authorIsBot: Boolean(interaction.user.bot),
+        authorRoleIds: interactionRoleIds(interaction),
+        content,
+        mentionedBot: true,
+        replyToBot: false,
+        // Not "slash": the seed needs Grok's Sheets/Gmail tooling (the ack
+        // promises it), so it belongs in the background lane, which is never
+        // routed to the SDK sibling and is capped separately from /ask.
+        source: "coordinator",
+      },
+      {
+        canViewChannel: (id) =>
+          authorCanViewChannel({ member: interaction.member, guild: interaction.guild }, id),
+      },
+    );
+    if (result.skipped && result.skipped !== "duplicate") {
+      await interaction.editReply({ content: `Could not queue seed (${result.skipped}).` }).catch(() => undefined);
+    }
+    return;
+  }
   if (sub === "cancel") {
     const meetingId = interaction.options.getString("meeting_id", true).trim();
     const result = cancelMeeting({ meetingId, creatorUserId: interaction.user.id });
@@ -480,19 +565,6 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
         "Meeting cancelled. Calendar cancellation is queued for Grok.",
         "Meeting cancelled. Calendar cancellation is queued for automatic retry.",
       ),
-      ephemeral: true,
-      allowedMentions: ALLOWED_MENTIONS,
-    });
-    return;
-  }
-
-  const gate = createGate(interaction);
-  if (!gate.ok) {
-    await interaction.reply({
-      content:
-        gate.reason === "role-gate"
-          ? "You need an eboard trigger role to create meetings."
-          : "Create meetings from an allowlisted eboard channel.",
       ephemeral: true,
       allowedMentions: ALLOWED_MENTIONS,
     });
@@ -747,7 +819,41 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     if (!draft || draft.createdByUserId !== interaction.user.id) {
       throw new Error("This meeting draft expired. Run /meet create again.");
     }
-    const people = await resolveComponentAudience(interaction);
+    const selections = extractMentionableAudience({
+      values: interaction.isMentionableSelectMenu() ? [...interaction.values] : [],
+      resolved: interaction.isMentionableSelectMenu()
+        ? {
+            users: Object.fromEntries(
+              [...interaction.users.entries()].map(([id, user]) => [
+                id,
+                { username: user.username, global_name: user.globalName },
+              ]),
+            ),
+            roles: Object.fromEntries([...interaction.roles.entries()].map(([id]) => [id, { id }])),
+          }
+        : {},
+    });
+    const invite = resolveMeetingInvitees(selections);
+    if (!invite.ok) {
+      await replyEphemeral(interaction, {
+        content:
+          invite.reason === "unmapped-users"
+            ? formatUnmappedInviteRefusal(invite.unmapped)
+            : "Select @Eboard (F26 roster) and/or Discord users who already have a roster binding.",
+        components: [
+          new ActionRowBuilder<MentionableSelectMenuBuilder>().addComponents(
+            new MentionableSelectMenuBuilder()
+              .setCustomId(`meet-audience:${value}`)
+              .setPlaceholder("Add @Eboard and/or roster users")
+              .setMinValues(1)
+              .setMaxValues(25),
+          ),
+        ],
+      });
+      return;
+    }
+    const people = invite.participants;
+    const audienceKind = invite.audienceKind;
     const result = createScheduledMeeting({
       createdByUserId: draft.createdByUserId,
       title: draft.title,
@@ -757,6 +863,7 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
       notes: draft.notes,
       channelId: draft.channelId,
       participants: people,
+      audienceKind,
     });
     pendingMeetings.delete(value);
     const outcomes = await publish(result.outboxEvents);
@@ -765,7 +872,11 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
       dateStyle: "medium",
       timeStyle: "short",
     });
-    const announcement = `📅 **${result.meeting.title}**\n${when}\n${people.length} attendee(s).\nMeeting ID: \`${result.meeting.id}\`\nCalendar sync queued for Grok (hello@).`;
+    const audienceLine =
+      audienceKind === "f26_roster"
+        ? "F26 Preferred Emails (role is not expanded)."
+        : `${people.length} attendee(s).`;
+    const announcement = `📅 **${result.meeting.title}**\n${when}\n${audienceLine}\nMeeting ID: \`${result.meeting.id}\`\nCalendar sync queued for Grok (hello@).`;
     if (interaction.client.isReady()) {
       try {
         await announceMeeting(interaction.client, draft.channelId, announcement);

@@ -79,9 +79,13 @@ Mini Doppler does **not** need `NIA_*`. Nia is unsupported; delete leftover Nia 
 
 Ported from [techmate](https://github.com/fahimmehraj/techmate) as a Mini-side slice. No Inngest, no planner UI, no Google secrets on the Mini.
 
-- `/task` and `/meet` register next to `/ask`. Create is fail-closed on `JOB_TRIGGER_ROLE_IDS` and allowlisted channels.
+- `/task` create is fail-closed on `JOB_TRIGGER_ROLE_IDS` and allowlisted channels. `/meet` create|cancel|seed is **Eboard-only** (snowflakes `1203562091500404782`, plus Leadership `1203562091517321230` and Senior Adv `1322388298634756156`). A member with none of those roles cannot book. `/ask` and `/background` still use `JOB_TRIGGER`.
+- Booking a Calendar meeting is **explicit**: the `/meet` slash command is the only door. @-mentioning the bot never books a meeting — mention traffic falls through to the ordinary job enqueue path.
 - Task reminder DMs are sent by the official discord.js bot (Mini holds `DISCORD_BOT_TOKEN`). Grok never gets that token.
-- Calendar create/cancel is an outbox row that becomes a `jobs` row POSTed to `GROK_BOT_WEBHOOK_URL`. Grok (hello@) owns Calendar. The job pack is JSON with meeting times and a participant count — never emails, never the bot token.
+- Calendar create/cancel is an outbox row that becomes a `jobs` row POSTed to `GROK_BOT_WEBHOOK_URL`. Grok (hello@) owns Calendar. The job pack is JSON with meeting times, `audience` (`picked` | `f26_roster`), and participant snowflakes — never emails, never the bot token.
+- `/meet seed` is a one-shot Grok job (`roster.seed`): Mini sends guild members (id/username/global_name/nick); Grok reads F26 sheet `1NlApvtFAhFTMNafGoVksrYpJhi_oz5dlA6pml5VQ3rw` gid `1079418365` as hello@ and completes `{ mappings, unmatched }`. Mini persists `roster_bindings` (discord_id → email). Seed emails are not logged or POSTed back out. Empty Disc stays unmatched. The slash ack is ephemeral; complete announces with `channel.send` (names/counts only) — do not `message.reply` the ephemeral ack.
+- After seed, `/meet` picker and `@mention` attendees resolve by snowflake only. Detect mapped roster roles by snowflake (`<@&1203562091500404782>` / picker value), not the word “eboard”. That role means the F26 Preferred Email dump plus extra @users who already have `roster_bindings`. Unmapped @users are refused — do not invent emails. Not live Discord role expansion.
+- Four empty-Disc people (Marc, Zachary, Khidir, Fahim) are upserted into `roster_bindings` on Mini migrate. Cloud agents cannot write the live Mini SQLite — deploy this commit and restart `bun run live` on the host. Do not bind `1379449057474379819` (khidir_41052). Seed announces names/counts only.
 - `outbox_events` is written in the same SQLite transaction as the mutation. `bun run live` tries an immediate 1.5s dispatch, then a minute-level in-process sweeper recovers `pending` rows.
 
 ## Operator notes (Mini)

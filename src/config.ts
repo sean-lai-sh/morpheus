@@ -153,6 +153,15 @@ const envSchema = z
       emptyToUndef,
       z.coerce.number().int().min(1).max(1000).default(5),
     ),
+    /**
+     * How long a job may sit `queued` with no worker claim before the sweeper
+     * cancels it. Dispatch is a one-shot wakeup, so a row whose dispatch failed
+     * would otherwise hold an outstanding slot forever. Default 1 hour.
+     */
+    JOB_QUEUE_MAX_AGE_MS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(60_000).max(86_400_000).default(3_600_000),
+    ),
     JOB_CLAIM_LEASE_MS: z.preprocess(
       emptyToUndef,
       z.coerce.number().int().min(1_000).max(86_400_000).default(600_000),

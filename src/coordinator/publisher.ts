@@ -196,8 +196,11 @@ async function dispatchTaskReminder(
       error: message.slice(0, 500),
       now,
     });
-    recordOutboxDispatchFailure(event.id, message, now);
-    logger.error(logCorrelate(event, { err: message }), "outbox.publish.deferred");
+    const failure = recordOutboxDispatchFailure(event.id, message, now);
+    logger.error(
+      logCorrelate(event, { err: message, attempts: failure.attempts }),
+      failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+    );
     return "deferred";
   }
 }
@@ -247,8 +250,14 @@ async function dispatchCalendarJob(
     outboxId: event.id,
     version,
     participantCount: getMeetingParticipants(meeting.id).length,
+    participantIds: getMeetingParticipants(meeting.id).map((person) => person.userId),
   });
   const content = redactCalendarJobContent(serializeCalendarJobPack(pack));
+  if (/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(content.replace(/hello@techatnyu\.org/gi, ""))) {
+    markOutboxFailed(event.id, "refused-email-in-payload", now);
+    logger.error(logCorrelate(event), "outbox.publish.refused_email_in_payload");
+    return "unsupported";
+  }
   if (/discord_bot_token|DISCORD_BOT_TOKEN/i.test(content)) {
     markOutboxFailed(event.id, "refused-discord-token-in-payload", now);
     logger.error(logCorrelate(event), "outbox.publish.refused_token_in_payload");
@@ -258,8 +267,18 @@ async function dispatchCalendarJob(
   const namespace = namespaceForMeetingChannel(meeting.channelId);
   const channelId = meeting.channelId;
   if (!namespace || !channelId) {
-    recordOutboxDispatchFailure(event.id, "unknown-namespace", now);
-    logger.warn(logCorrelate(event, { reason: "unknown-namespace" }), "outbox.publish.deferred");
+    const failure = recordOutboxDispatchFailure(event.id, "unknown-namespace", now);
+    if (failure.deadLettered) {
+      logger.error(
+        logCorrelate(event, { reason: "unknown-namespace", attempts: failure.attempts }),
+        "outbox.publish.dead_lettered",
+      );
+    } else {
+      logger.warn(
+        logCorrelate(event, { reason: "unknown-namespace", attempts: failure.attempts }),
+        "outbox.publish.deferred",
+      );
+    }
     return "deferred";
   }
 
@@ -275,6 +294,11 @@ async function dispatchCalendarJob(
           authorId: input.authorId,
           namespace: input.namespace,
           content: input.content,
+          // Calendar handoffs need Grok's Google tooling, which the SDK
+          // sibling does not have; the background lane is never routed there.
+          // It also keeps these machine-issued jobs off the meeting creator's
+          // interactive cap, which is lane-scoped.
+          lane: "background",
         },
         input.now,
       );
@@ -285,7 +309,7 @@ async function dispatchCalendarJob(
     (async (input) => {
       const job = getJobByDiscordMessageId(input.discordMessageId);
       if (!job) return false;
-      const result = await dispatchEnqueuedJob(job);
+      const result = await dispatchEnqueuedJob(job, { lane: "background" });
       return result.dispatched;
     });
 
@@ -309,8 +333,12 @@ async function dispatchCalendarJob(
     logger.info(logCorrelate(event, { meetingId }), "outbox.publish.accepted");
     return "accepted";
   } catch (error) {
-    recordOutboxDispatchFailure(event.id, errorMessage(error), now);
-    logger.error(logCorrelate(event, { err: errorMessage(error), meetingId }), "outbox.publish.deferred");
+    const message = errorMessage(error);
+    const failure = recordOutboxDispatchFailure(event.id, message, now);
+    logger.error(
+      logCorrelate(event, { err: message, meetingId, attempts: failure.attempts }),
+      failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+    );
     return "deferred";
   }
 }
@@ -345,8 +373,12 @@ export async function publishOutboxEvent(
     logger.warn(logCorrelate(event), "outbox.publish.unsupported");
     return { outboxId: event.id, status: "unsupported" };
   } catch (error) {
-    recordOutboxDispatchFailure(event.id, errorMessage(error), now);
-    logger.error(logCorrelate(event, { err: errorMessage(error) }), "outbox.publish.deferred");
+    const message = errorMessage(error);
+    const failure = recordOutboxDispatchFailure(event.id, message, now);
+    logger.error(
+      logCorrelate(event, { err: message, attempts: failure.attempts }),
+      failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+    );
     return { outboxId: event.id, status: "deferred" };
   }
 }

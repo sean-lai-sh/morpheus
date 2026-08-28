@@ -19,6 +19,7 @@ export interface MeetingRow {
   announcedAt: number | null;
   hourReminderAt: number | null;
   hourReminderSentAt: number | null;
+  audienceKind: "picked" | "f26_roster";
   createdAt: number;
   updatedAt: number;
 }
@@ -51,6 +52,7 @@ interface MeetingDbRow {
   announced_at: number | null;
   hour_reminder_at: number | null;
   hour_reminder_sent_at: number | null;
+  audience_kind: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -74,6 +76,7 @@ function mapMeeting(row: MeetingDbRow): MeetingRow {
     announcedAt: row.announced_at,
     hourReminderAt: row.hour_reminder_at,
     hourReminderSentAt: row.hour_reminder_sent_at,
+    audienceKind: row.audience_kind === "f26_roster" ? "f26_roster" : "picked",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -103,6 +106,7 @@ export function createScheduledMeeting(input: {
   notes?: string | null;
   channelId?: string | null;
   participants: MeetingAssigneeInput[];
+  audienceKind?: "picked" | "f26_roster";
   now?: number;
 }): { meeting: MeetingRow; outboxEvents: OutboxEvent[] } {
   const now = input.now ?? Date.now();
@@ -113,7 +117,10 @@ export function createScheduledMeeting(input: {
     throw new Error("Duration must be between 15 and 480 minutes.");
   }
   const unique = [...new Map(input.participants.map((p) => [p.userId, p])).values()];
-  if (unique.length === 0) throw new Error("Add at least one attendee.");
+  const audienceKind = input.audienceKind ?? "picked";
+  if (unique.length === 0 && audienceKind !== "f26_roster") {
+    throw new Error("Add at least one attendee.");
+  }
   const endsAt = input.startsAt + input.durationMinutes * 60_000;
   const timeZone = input.timeZone?.trim() || "America/New_York";
   const id = input.id ?? crypto.randomUUID();
@@ -124,8 +131,8 @@ export function createScheduledMeeting(input: {
       .query(
         `INSERT INTO meetings (
            id, created_by_user_id, title, starts_at, ends_at, time_zone, notes, status, version,
-           channel_id, hour_reminder_at, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?)`,
+           channel_id, hour_reminder_at, audience_kind, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -137,6 +144,7 @@ export function createScheduledMeeting(input: {
         input.notes?.trim() || null,
         input.channelId ?? null,
         hourReminderAt,
+        audienceKind,
         now,
         now,
       );

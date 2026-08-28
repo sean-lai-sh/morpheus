@@ -1,4 +1,8 @@
 import type { Guild, GuildMember } from "discord.js";
+import { partitionRosterUsers } from "../storage/roster-map.ts";
+import { isRosterRole, rosterAudienceForRoles } from "./roster-map.ts";
+
+const ROLE_MENTION_RE = /<@&(\d+)>/g;
 
 export type AudienceSelection =
   | { kind: "user"; id: string; displayName: string }
@@ -9,6 +13,23 @@ export interface ResolvedAssignee {
   displayName: string;
 }
 
+/** Role snowflakes from `<@&id>` tokens. Does not match the word "eboard". */
+export function extractRoleSnowflakes(content: string): string[] {
+  const ids: string[] = [];
+  ROLE_MENTION_RE.lastIndex = 0;
+  for (const match of content.matchAll(ROLE_MENTION_RE)) {
+    if (match[1]) ids.push(match[1]);
+  }
+  return [...new Set(ids)];
+}
+
+export function collectMentionRoleIds(input: {
+  content?: string | null;
+  cachedRoleIds?: Iterable<string>;
+}): string[] {
+  return [...new Set([...extractRoleSnowflakes(input.content ?? ""), ...(input.cachedRoleIds ?? [])])];
+}
+
 export function extractMentionableAudience(data: {
   values?: string[];
   resolved?: {
@@ -16,9 +37,9 @@ export function extractMentionableAudience(data: {
     roles?: Record<string, { id?: string }>;
   };
 }): AudienceSelection[] {
-  const roleIds = new Set(Object.keys(data.resolved?.roles ?? {}));
+  const resolvedRoleIds = new Set(Object.keys(data.resolved?.roles ?? {}));
   return (data.values ?? []).map((value) =>
-    roleIds.has(value)
+    resolvedRoleIds.has(value) || isRosterRole(value)
       ? { kind: "role" as const, id: value }
       : {
           kind: "user" as const,
@@ -39,6 +60,61 @@ export async function membersWithRole(guild: Guild, roleId: string): Promise<Gui
     role = guild.roles.cache.get(roleId) ?? role;
   }
   return [...role.members.values()].filter((member) => !member.user.bot);
+}
+
+export function audienceSelectionsFromMentions(input: {
+  users: Array<{ id: string; displayName?: string }>;
+  roleIds: string[];
+}): AudienceSelection[] {
+  return [
+    ...input.users.map((user) => ({
+      kind: "user" as const,
+      id: user.id,
+      displayName: user.displayName?.trim() || user.id,
+    })),
+    ...input.roleIds.map((id) => ({ kind: "role" as const, id })),
+  ];
+}
+
+/**
+ * Meetings: a mapped roster role (Eboard snowflake, not the word "eboard") means
+ * F26 Preferred Emails. Extra explicit users stay as snowflakes. Do not expand members.
+ */
+export function meetingAudienceFromSelections(selections: AudienceSelection[]): {
+  audienceKind: "picked" | "f26_roster";
+  userSelections: Extract<AudienceSelection, { kind: "user" }>[];
+} {
+  const roleIds = selections.filter((selection) => selection.kind === "role" || isRosterRole(selection.id)).map((s) => s.id);
+  const userSelections = selections.filter(
+    (selection): selection is Extract<AudienceSelection, { kind: "user" }> =>
+      selection.kind === "user" && !isRosterRole(selection.id),
+  );
+  return {
+    audienceKind: rosterAudienceForRoles(roleIds) ?? "picked",
+    userSelections,
+  };
+}
+
+export function formatUnmappedInviteRefusal(unmapped: Array<{ displayName: string }>): string {
+  const names = unmapped.map((row) => row.displayName).filter(Boolean);
+  return `I can only invite F26 / @Eboard plus people already on the roster map. I will not invent emails. Unmapped: ${names.join(", ") || "unknown user"}.`;
+}
+
+/** F26 role dump and/or users who already have roster_bindings. Refuse unmapped @users. */
+export function resolveMeetingInvitees(selections: AudienceSelection[]):
+  | {
+      ok: true;
+      audienceKind: "picked" | "f26_roster";
+      participants: Array<{ userId: string; displayName: string }>;
+    }
+  | { ok: false; reason: "unmapped-users" | "no-audience"; unmapped: Array<{ id: string; displayName: string }> } {
+  const audience = meetingAudienceFromSelections(selections);
+  const { bound, unmapped } = partitionRosterUsers(audience.userSelections);
+  if (unmapped.length > 0) return { ok: false, reason: "unmapped-users", unmapped };
+  if (audience.audienceKind !== "f26_roster" && bound.length === 0) {
+    return { ok: false, reason: "no-audience", unmapped: [] };
+  }
+  return { ok: true, audienceKind: audience.audienceKind, participants: bound };
 }
 
 /** Expand Discord users + roles at create time and snapshot membership. */
