@@ -24,6 +24,8 @@ import {
   dateInTimeZone,
   expandAudience,
   extractMentionableAudience,
+  formatUnmappedInviteRefusal,
+  resolveMeetingInvitees,
 } from "../coordinator/audience.ts";
 import {
   buildRosterSeedPack,
@@ -32,7 +34,6 @@ import {
 } from "../coordinator/seed-job.ts";
 import { parseDurationInput, parseWhenInput } from "../coordinator/when-input.ts";
 import { draftPreview, meetingWhenLine } from "../coordinator/meeting-format.ts";
-import { mergePageSelection, pageLabel, rosterPickerPages } from "../coordinator/roster-picker.ts";
 import {
   claimMeetingDraft,
   createMeetingDraft,
@@ -643,51 +644,40 @@ function optionalField(interaction: ModalSubmitInteraction, id: string): string 
 }
 
 /**
- * The audience controls: one string select per page of the roster, plus a
- * one-click button for the whole F26 roster.
+ * Two ways to answer "who's invited", because they are genuinely different
+ * questions.
  *
- * A mentionable select would list the entire guild -- Discord has no role
- * filter for user pickers -- which offered hundreds of people who cannot be
- * invited at all, since only `roster_bindings` resolves to an address. Naming
- * @Eboard as a button also removes the need to know it was type-able.
+ * The button is the common case: @Eboard means the F26 roster, one click, no
+ * typing, and it does not expand into individual members. It exists as a
+ * labelled control because the role was always selectable in the menu below --
+ * it was just invisible unless you knew to type it.
+ *
+ * The mentionable select stays for everyone else. It lists the whole guild
+ * (Discord has no role filter for user pickers), which is exactly what you want
+ * when the attendee is a collaborator from outside the eboard rather than a
+ * roster member. Anyone without a binding is refused by name at selection time,
+ * so the breadth costs nothing.
  */
-function audienceRows(draftId: string, picked: readonly string[] = []): MessageRow[] {
-  const pages = rosterPickerPages();
-  const rows: MessageRow[] = pages.map((page, index) => {
-    const select = new StringSelectMenuBuilder()
-      .setCustomId(`meet-roster:${draftId}:${index}`)
-      .setPlaceholder(pages.length > 1 ? `Attendees · ${pageLabel(page)}` : "Pick attendees")
-      .setMinValues(0)
-      .setMaxValues(page.length)
-      .addOptions(
-        page.map((option) => ({
-          label: option.label,
-          value: option.value,
-          ...(option.description ? { description: option.description } : {}),
-          // Keeps the menu showing what is already chosen across re-renders.
-          default: picked.includes(option.value),
-        })),
-      );
-    return new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(select);
-  });
-
-  rows.push(
+export function audienceRows(draftId: string): MessageRow[] {
+  return [
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
+      new MentionableSelectMenuBuilder()
+        .setCustomId(`meet-audience:${draftId}`)
+        .setPlaceholder("Add individual people")
+        .setMinValues(1)
+        .setMaxValues(25),
+    ),
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(`meet-roster-all:${draftId}`)
-        .setLabel("Invite the whole F26 roster")
+        .setLabel("Invite @Eboard")
         .setStyle(ButtonStyle.Primary),
-      new ButtonBuilder()
-        .setCustomId(`meet-picked:${draftId}`)
-        .setLabel("Continue with selected")
-        .setStyle(ButtonStyle.Secondary),
       new ButtonBuilder()
         .setCustomId(`meet-discard:${draftId}`)
         .setLabel("Cancel")
         .setStyle(ButtonStyle.Secondary),
     ),
-  );
-  return rows;
+  ];
 }
 
 /** Confirm/cancel pair, shown once an audience is settled. */
@@ -702,27 +692,6 @@ function confirmRow(draftId: string): MessageRow {
       .setLabel("Cancel")
       .setStyle(ButtonStyle.Secondary),
   );
-}
-
-/** Re-render the header for a stored draft (the raw text is no longer around). */
-function draftPreviewFor(draft: {
-  title: string;
-  startsAt: number;
-  durationMinutes: number;
-  location: string | null;
-  notes: string | null;
-}): string {
-  const lines = [`📅 **${draft.title}**`, meetingWhenLine(draft.startsAt, draft.durationMinutes)];
-  if (draft.location) lines.push(`📍 ${draft.location}`);
-  return lines.join("\n");
-}
-
-export function selectedLine(participants: readonly { displayName: string }[]): string {
-  if (participants.length === 0) return "No attendees picked yet.";
-  const names = participants.map((p) => p.displayName);
-  const shown = names.slice(0, 8).join(", ");
-  const rest = names.length - 8;
-  return `**${names.length} selected:** ${shown}${rest > 0 ? ` +${rest} more` : ""}`;
 }
 
 /** What the organizer sees before any invitation goes out. */
@@ -1012,36 +981,46 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     await replyEphemeral(interaction, assignmentCard(value, interaction.user.id));
     return;
   }
-  if (kind === "meet-roster" && value) {
-    // customId is meet-roster:<draftId>:<pageIndex>, already split above, so the
-    // page arrives as `extra`. Draft ids are UUIDs and carry no colons.
-    const draftId = value;
-    const pageIndex = Number(extra ?? "0");
-    if (!Number.isInteger(pageIndex) || pageIndex < 0) throw new Error("This action has expired.");
-    const draft = getMeetingDraft(draftId, interaction.user.id);
+  if (kind === "meet-audience" && value) {
+    const draft = getMeetingDraft(value, interaction.user.id);
     if (!draft) throw new Error("This meeting draft expired. Run /meet create again.");
 
-    const pages = rosterPickerPages();
-    const page = pages[pageIndex];
-    if (!page) throw new Error("This action has expired.");
-
-    // A role pick is all-or-nothing, so touching the per-person list means the
-    // organizer is building a picked audience, not the roster dump.
-    const existing = draft.audience?.audienceKind === "picked" ? draft.audience.participants : [];
-    const participants = mergePageSelection({
-      existing,
-      page,
-      selectedIds: interaction.isStringSelectMenu() ? [...interaction.values] : [],
+    const selections = extractMentionableAudience({
+      values: interaction.isMentionableSelectMenu() ? [...interaction.values] : [],
+      resolved: interaction.isMentionableSelectMenu()
+        ? {
+            users: Object.fromEntries(
+              [...interaction.users.entries()].map(([id, user]) => [
+                id,
+                { username: user.username, global_name: user.globalName },
+              ]),
+            ),
+            roles: Object.fromEntries([...interaction.roles.entries()].map(([id]) => [id, { id }])),
+          }
+        : {},
     });
-    const saved = setMeetingDraftAudience(draftId, interaction.user.id, {
-      audienceKind: "picked",
-      participants,
+    const invite = resolveMeetingInvitees(selections);
+    if (!invite.ok) {
+      // Naming who is unmapped is the point: the guild-wide menu is only
+      // tolerable because picking someone un-inviteable says so immediately.
+      await replyEphemeral(interaction, {
+        content:
+          invite.reason === "unmapped-users"
+            ? formatUnmappedInviteRefusal(invite.unmapped)
+            : "Pick people who already have a roster binding, or use **Invite @Eboard**.",
+        components: audienceRows(value),
+      });
+      return;
+    }
+
+    const saved = setMeetingDraftAudience(value, interaction.user.id, {
+      audienceKind: invite.audienceKind,
+      participants: invite.participants,
     });
     if (!saved) throw new Error("This meeting draft expired. Run /meet create again.");
-
     await replyEphemeral(interaction, {
-      content: `${draftPreviewFor(saved)}\n\n${selectedLine(participants)}`,
-      components: audienceRows(draftId, participants.map((p) => p.userId)),
+      content: confirmSummary(saved),
+      components: [confirmRow(value)],
     });
     return;
   }
@@ -1053,18 +1032,6 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     if (!saved) throw new Error("This meeting draft expired. Run /meet create again.");
     await replyEphemeral(interaction, {
       content: confirmSummary(saved),
-      components: [confirmRow(value)],
-    });
-    return;
-  }
-  if (kind === "meet-picked" && value) {
-    const draft = getMeetingDraft(value, interaction.user.id);
-    if (!draft) throw new Error("This meeting draft expired. Run /meet create again.");
-    if (!draft.audience || draft.audience.participants.length === 0) {
-      throw new Error("Pick at least one attendee, or use the F26 roster button.");
-    }
-    await replyEphemeral(interaction, {
-      content: confirmSummary(draft),
       components: [confirmRow(value)],
     });
     return;

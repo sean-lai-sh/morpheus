@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   MEET_COMMAND,
+  audienceRows,
   confirmSummary,
   meetCreateModal,
   meetingAnnouncement,
@@ -142,5 +143,33 @@ describe("meetingAnnouncement", () => {
 
   test("includes a location when set", () => {
     expect(meetingAnnouncement({ ...meeting, location: "Zoom" }, 1)).toContain("📍 Zoom");
+  });
+});
+
+describe("audience controls offer both a role path and an individual path", () => {
+  const rows = audienceRows("draft-1").map((r) => r.toJSON() as {
+    components: Array<{ type: number; custom_id: string; label?: string; placeholder?: string }>;
+  });
+
+  test("row one is the mentionable select, so anyone in the guild can be added", () => {
+    const select = rows[0]!.components[0]!;
+    expect(select.custom_id).toBe("meet-audience:draft-1");
+    // Type 7 = mentionable select. Kept deliberately: a collaborator from
+    // outside the eboard has no roster binding yet but must still be pickable.
+    expect(select.type).toBe(7);
+    expect(select.placeholder).toContain("individual");
+  });
+
+  test("row two offers @Eboard by name as a one-click button", () => {
+    const buttons = rows[1]!.components;
+    expect(buttons.map((b) => b.custom_id)).toEqual([
+      "meet-roster-all:draft-1",
+      "meet-discard:draft-1",
+    ]);
+    expect(buttons[0]!.label).toBe("Invite @Eboard");
+  });
+
+  test("exactly two rows -- no paged roster menus", () => {
+    expect(rows).toHaveLength(2);
   });
 });
