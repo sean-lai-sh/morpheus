@@ -3,6 +3,7 @@ import { loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 import { redactSecrets } from "../notify/grok-dispatch.ts";
 import { stopJobTyping } from "./typing.ts";
+import { applyCoordinatorJobComplete, parseCoordinatorJobContent } from "../coordinator/calendar-job.ts";
 import {
   failJob,
   getJob,
@@ -218,6 +219,14 @@ export async function completeJobWithReply(
   if (prep.job.result_discord_message_id) {
     stopJobTyping(id);
     const done = markJobCompleted(id, prep.job.result_discord_message_id, opts.now);
+    return { ok: true, status: 200, job: done ?? prep.job, posted: false };
+  }
+
+  if (parseCoordinatorJobContent(prep.job.content)) {
+    applyCoordinatorJobComplete(prep.job.content, reply, opts.now);
+    stopJobTyping(id);
+    const done = markJobCompleted(id, null, opts.now);
+    logger.info({ job_id: id }, "coordinator calendar job completed without Discord reply");
     return { ok: true, status: 200, job: done ?? prep.job, posted: false };
   }
 
