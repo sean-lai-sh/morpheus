@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { EBOARD_ROLE_ID } from "../src/coordinator/roster-map.ts";
 import {
   MEET_COMMAND,
+  audienceLine,
   audienceRows,
   confirmSummary,
   meetCreateModal,
@@ -146,30 +148,77 @@ describe("meetingAnnouncement", () => {
   });
 });
 
-describe("audience controls offer both a role path and an individual path", () => {
+describe("role and person selectors compose into one invitee list", () => {
   const rows = audienceRows("draft-1").map((r) => r.toJSON() as {
-    components: Array<{ type: number; custom_id: string; label?: string; placeholder?: string }>;
+    components: Array<{
+      type: number;
+      custom_id: string;
+      label?: string;
+      placeholder?: string;
+      options?: Array<{ label: string; value: string; default?: boolean }>;
+    }>;
   });
 
-  test("row one is the mentionable select, so anyone in the guild can be added", () => {
-    const select = rows[0]!.components[0]!;
-    expect(select.custom_id).toBe("meet-audience:draft-1");
-    // Type 7 = mentionable select. Kept deliberately: a collaborator from
-    // outside the eboard has no roster binding yet but must still be pickable.
-    expect(select.type).toBe(7);
-    expect(select.placeholder).toContain("individual");
-  });
-
-  test("row two offers @Eboard by name as a one-click button", () => {
-    const buttons = rows[1]!.components;
-    expect(buttons.map((b) => b.custom_id)).toEqual([
-      "meet-roster-all:draft-1",
+  test("three rows: roles, people, actions", () => {
+    expect(rows).toHaveLength(3);
+    expect(rows[0]!.components[0]!.custom_id).toBe("meet-roles:draft-1");
+    expect(rows[1]!.components[0]!.custom_id).toBe("meet-users:draft-1");
+    expect(rows[2]!.components.map((c) => c.custom_id)).toEqual([
+      "meet-review:draft-1",
       "meet-discard:draft-1",
     ]);
-    expect(buttons[0]!.label).toBe("Invite @Eboard");
   });
 
-  test("exactly two rows -- no paged roster menus", () => {
-    expect(rows).toHaveLength(2);
+  test("the role menu names @Eboard and is optional", () => {
+    const roles = rows[0]!.components[0]!;
+    expect(roles.type).toBe(3); // string select
+    expect(roles.options!.map((o) => o.label)).toContain("@Eboard");
+    expect(roles.options!.map((o) => o.value)).toContain(EBOARD_ROLE_ID);
+  });
+
+  test("the person menu is a guild-wide user select, so outside collaborators are reachable", () => {
+    const users = rows[1]!.components[0]!;
+    // Type 5 = user select. A roster-derived menu could never offer someone
+    // who has no binding yet, which is exactly the collaborator case.
+    expect(users.type).toBe(5);
+    expect(users.placeholder).toContain("individual");
+  });
+
+  test("prior selections re-render as defaults so neither half looks cleared", () => {
+    const withRole = audienceRows("d", { roleIds: [EBOARD_ROLE_ID] })[0]!.toJSON() as {
+      components: Array<{ options: Array<{ value: string; default?: boolean }> }>;
+    };
+    const option = withRole.components[0]!.options.find((o) => o.value === EBOARD_ROLE_ID)!;
+    expect(option.default).toBe(true);
+  });
+});
+
+describe("audienceLine tallies the composed audience", () => {
+  test("role only", () => {
+    expect(audienceLine({ audienceKind: "f26_roster", participants: [] })).toContain("@Eboard");
+  });
+
+  test("people only", () => {
+    const out = audienceLine({
+      audienceKind: "picked",
+      participants: [{ displayName: "Ada" }, { displayName: "Bo" }],
+    });
+    expect(out).toContain("**2** individually");
+    expect(out).toContain("Ada, Bo");
+    expect(out).not.toContain("@Eboard");
+  });
+
+  test("role AND people is the whole point -- both are reported", () => {
+    const out = audienceLine({
+      audienceKind: "f26_roster",
+      participants: [{ displayName: "Outside Collab" }],
+    });
+    expect(out).toContain("@Eboard");
+    expect(out).toContain("Outside Collab");
+    expect(out).toContain("plus");
+  });
+
+  test("nothing chosen yet says so rather than rendering an empty list", () => {
+    expect(audienceLine({ audienceKind: "picked", participants: [] })).toContain("No one selected");
   });
 });

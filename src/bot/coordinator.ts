@@ -9,6 +9,7 @@ import {
   StringSelectMenuBuilder,
   TextInputBuilder,
   TextInputStyle,
+  UserSelectMenuBuilder,
   type ChatInputCommandInteraction,
   type Client,
   type GuildMember,
@@ -25,13 +26,14 @@ import {
   expandAudience,
   extractMentionableAudience,
   formatUnmappedInviteRefusal,
-  resolveMeetingInvitees,
 } from "../coordinator/audience.ts";
 import {
   buildRosterSeedPack,
   isRosterSeedCandidate,
   serializeRosterSeedPack,
 } from "../coordinator/seed-job.ts";
+import { EBOARD_ROLE_ID, ROSTER_ROLE_OPTIONS } from "../coordinator/roster-map.ts";
+import { partitionRosterUsers } from "../storage/roster-map.ts";
 import { parseDurationInput, parseWhenInput } from "../coordinator/when-input.ts";
 import { draftPreview, meetingWhenLine } from "../coordinator/meeting-format.ts";
 import {
@@ -644,33 +646,52 @@ function optionalField(interaction: ModalSubmitInteraction, id: string): string 
 }
 
 /**
- * Two ways to answer "who's invited", because they are genuinely different
- * questions.
+ * Two selectors that COMPOSE into one invitee list, rather than two competing
+ * ways to answer the same question.
  *
- * The button is the common case: @Eboard means the F26 roster, one click, no
- * typing, and it does not expand into individual members. It exists as a
- * labelled control because the role was always selectable in the menu below --
- * it was just invisible unless you knew to type it.
+ * Roles are a bulk audience: @Eboard means the F26 sheet, and it is never
+ * expanded into individual members. People are looked up one at a time through
+ * `roster_bindings`. A meeting frequently needs both -- the whole eboard plus a
+ * collaborator from outside it -- so each selector writes its own half of the
+ * draft audience and leaves the other half alone.
  *
- * The mentionable select stays for everyone else. It lists the whole guild
- * (Discord has no role filter for user pickers), which is exactly what you want
- * when the attendee is a collaborator from outside the eboard rather than a
- * roster member. Anyone without a binding is refused by name at selection time,
- * so the breadth costs nothing.
+ * The user select is guild-wide on purpose. Discord has no role filter for user
+ * pickers, but more importantly the outside collaborator is exactly the person
+ * a roster-derived menu could never offer. Picking someone unmapped is refused
+ * by name at selection time.
  */
-export function audienceRows(draftId: string): MessageRow[] {
+export function audienceRows(
+  draftId: string,
+  state: { roleIds?: readonly string[]; userIds?: readonly string[] } = {},
+): MessageRow[] {
+  const roleSelect = new StringSelectMenuBuilder()
+    .setCustomId(`meet-roles:${draftId}`)
+    .setPlaceholder("Add by role")
+    .setMinValues(0)
+    .setMaxValues(ROSTER_ROLE_OPTIONS.length)
+    .addOptions(
+      ROSTER_ROLE_OPTIONS.map((option) => ({
+        label: option.label,
+        value: option.roleId,
+        description: option.description,
+        default: (state.roleIds ?? []).includes(option.roleId),
+      })),
+    );
+
+  const userSelect = new UserSelectMenuBuilder()
+    .setCustomId(`meet-users:${draftId}`)
+    .setPlaceholder("Add individual people")
+    .setMinValues(0)
+    .setMaxValues(25);
+  if (state.userIds?.length) userSelect.setDefaultUsers([...state.userIds]);
+
   return [
-    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
-      new MentionableSelectMenuBuilder()
-        .setCustomId(`meet-audience:${draftId}`)
-        .setPlaceholder("Add individual people")
-        .setMinValues(1)
-        .setMaxValues(25),
-    ),
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(roleSelect),
+    new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(userSelect),
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new ButtonBuilder()
-        .setCustomId(`meet-roster-all:${draftId}`)
-        .setLabel("Invite @Eboard")
+        .setCustomId(`meet-review:${draftId}`)
+        .setLabel("Review & send")
         .setStyle(ButtonStyle.Primary),
       new ButtonBuilder()
         .setCustomId(`meet-discard:${draftId}`)
@@ -678,6 +699,34 @@ export function audienceRows(draftId: string): MessageRow[] {
         .setStyle(ButtonStyle.Secondary),
     ),
   ];
+}
+
+/** Header for a stored draft, re-rendered as the audience is built up. */
+function draftHeader(draft: {
+  title: string;
+  startsAt: number;
+  durationMinutes: number;
+  location: string | null;
+}): string {
+  const lines = [`📅 **${draft.title}**`, meetingWhenLine(draft.startsAt, draft.durationMinutes)];
+  if (draft.location) lines.push(`📍 ${draft.location}`);
+  return lines.join("\n");
+}
+
+/** Running tally of the composed audience, shown while it is being built. */
+export function audienceLine(audience: {
+  audienceKind: "picked" | "f26_roster";
+  participants: readonly { displayName: string }[];
+}): string {
+  const parts: string[] = [];
+  if (audience.audienceKind === "f26_roster") parts.push("**@Eboard** (F26 roster)");
+  if (audience.participants.length > 0) {
+    const names = audience.participants.map((p) => p.displayName);
+    const shown = names.slice(0, 6).join(", ");
+    const rest = names.length - 6;
+    parts.push(`**${names.length}** individually: ${shown}${rest > 0 ? ` +${rest} more` : ""}`);
+  }
+  return parts.length === 0 ? "_No one selected yet._" : `Inviting ${parts.join(" · plus ")}`;
 }
 
 /** Confirm/cancel pair, shown once an audience is settled. */
@@ -981,57 +1030,63 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     await replyEphemeral(interaction, assignmentCard(value, interaction.user.id));
     return;
   }
-  if (kind === "meet-audience" && value) {
+  if ((kind === "meet-roles" || kind === "meet-users") && value) {
     const draft = getMeetingDraft(value, interaction.user.id);
     if (!draft) throw new Error("This meeting draft expired. Run /meet create again.");
 
-    const selections = extractMentionableAudience({
-      values: interaction.isMentionableSelectMenu() ? [...interaction.values] : [],
-      resolved: interaction.isMentionableSelectMenu()
-        ? {
-            users: Object.fromEntries(
-              [...interaction.users.entries()].map(([id, user]) => [
-                id,
-                { username: user.username, global_name: user.globalName },
-              ]),
-            ),
-            roles: Object.fromEntries([...interaction.roles.entries()].map(([id]) => [id, { id }])),
-          }
-        : {},
-    });
-    const invite = resolveMeetingInvitees(selections);
-    if (!invite.ok) {
-      // Naming who is unmapped is the point: the guild-wide menu is only
-      // tolerable because picking someone un-inviteable says so immediately.
-      await replyEphemeral(interaction, {
-        content:
-          invite.reason === "unmapped-users"
-            ? formatUnmappedInviteRefusal(invite.unmapped)
-            : "Pick people who already have a roster binding, or use **Invite @Eboard**.",
-        components: audienceRows(value),
-      });
-      return;
+    // Each selector owns one half of the audience and preserves the other, so
+    // adding a role never clears the individuals and vice versa.
+    let audienceKind = draft.audience?.audienceKind ?? "picked";
+    let participants = [...(draft.audience?.participants ?? [])];
+
+    if (kind === "meet-roles") {
+      const chosen = interaction.isStringSelectMenu() ? [...interaction.values] : [];
+      audienceKind = chosen.length > 0 ? "f26_roster" : "picked";
+    } else {
+      const picked = interaction.isUserSelectMenu()
+        ? [...interaction.users.values()].map((user) => ({
+            id: user.id,
+            displayName: user.globalName ?? user.username ?? user.id,
+          }))
+        : [];
+      const { bound, unmapped } = partitionRosterUsers(picked);
+      if (unmapped.length > 0) {
+        // Named immediately rather than after booking: the picker is guild-wide
+        // so that outside collaborators are reachable, which means "no binding
+        // yet" is a normal answer, not an error state.
+        await replyEphemeral(interaction, {
+          content: `${draftHeader(draft)}\n\n${formatUnmappedInviteRefusal(unmapped)}`,
+          components: audienceRows(value, {
+            roleIds: audienceKind === "f26_roster" ? [EBOARD_ROLE_ID] : [],
+            userIds: participants.map((p) => p.userId),
+          }),
+        });
+        return;
+      }
+      participants = bound;
     }
 
-    const saved = setMeetingDraftAudience(value, interaction.user.id, {
-      audienceKind: invite.audienceKind,
-      participants: invite.participants,
-    });
+    const saved = setMeetingDraftAudience(value, interaction.user.id, { audienceKind, participants });
     if (!saved) throw new Error("This meeting draft expired. Run /meet create again.");
+
     await replyEphemeral(interaction, {
-      content: confirmSummary(saved),
-      components: [confirmRow(value)],
+      content: `${draftHeader(saved)}\n\n${audienceLine({ audienceKind, participants })}`,
+      components: audienceRows(value, {
+        roleIds: audienceKind === "f26_roster" ? [EBOARD_ROLE_ID] : [],
+        userIds: participants.map((p) => p.userId),
+      }),
     });
     return;
   }
-  if (kind === "meet-roster-all" && value) {
-    const saved = setMeetingDraftAudience(value, interaction.user.id, {
-      audienceKind: "f26_roster",
-      participants: [],
-    });
-    if (!saved) throw new Error("This meeting draft expired. Run /meet create again.");
+  if (kind === "meet-review" && value) {
+    const draft = getMeetingDraft(value, interaction.user.id);
+    if (!draft) throw new Error("This meeting draft expired. Run /meet create again.");
+    const audience = draft.audience;
+    if (!audience || (audience.audienceKind !== "f26_roster" && audience.participants.length === 0)) {
+      throw new Error("Pick a role or at least one person first.");
+    }
     await replyEphemeral(interaction, {
-      content: confirmSummary(saved),
+      content: confirmSummary(draft),
       components: [confirmRow(value)],
     });
     return;
