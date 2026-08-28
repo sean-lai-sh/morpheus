@@ -76,6 +76,24 @@ describe("meetings outbox", () => {
     expect(countOutboxByType("meeting.calendar_cancel_requested", id)).toBe(1);
   });
 
+  test("f26 roster may have zero Discord participants", () => {
+    const id = crypto.randomUUID();
+    const result = createScheduledMeeting({
+      id,
+      createdByUserId: "creator-1",
+      title: "Tech@NYU Eboard",
+      startsAt: START + 240_000,
+      durationMinutes: 60,
+      channelId: "1001",
+      participants: [],
+      audienceKind: "f26_roster",
+      recurrence: "weekly",
+      source: "mention",
+    });
+    expect(result.meeting.audienceKind).toBe("f26_roster");
+    expect(result.outboxEvents[0]?.type).toBe("meeting.calendar_sync_requested");
+  });
+
   test("non-creator cannot cancel", () => {
     const id = crypto.randomUUID();
     createScheduledMeeting({

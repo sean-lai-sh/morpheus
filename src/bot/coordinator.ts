@@ -21,6 +21,8 @@ import {
 
 type MessageRow = ActionRowBuilder<MessageActionRowComponentBuilder>;
 import { dateInTimeZone, expandAudience, extractMentionableAudience, parseMeetingStart } from "../coordinator/audience.ts";
+import type { CalendarTarget, DiscordIdentity, MeetingAudienceKind, MeetingRecurrence } from "../coordinator/identity.ts";
+import { identityFromUserLike } from "../coordinator/identity.ts";
 import { assertCoordinatorCreate } from "../coordinator/gates.ts";
 import { publishOutboxEvents, type OutboxDispatchOutcome } from "../coordinator/publisher.ts";
 import {
@@ -34,6 +36,7 @@ import {
   cancelMeeting,
   createScheduledMeeting,
   getMeeting,
+  setMeetingSourceMessageId,
 } from "../storage/coordinator-meetings.ts";
 import {
   activateTask,
@@ -86,6 +89,30 @@ export const MEET_COMMAND = new SlashCommandBuilder()
       )
       .addStringOption((opt) =>
         opt.setName("notes").setDescription("Optional notes").setRequired(false).setMaxLength(2000),
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName("calendar")
+          .setDescription("Eboard Calendar vs hello@ leadership primary")
+          .setRequired(false)
+          .addChoices({ name: "eboard", value: "eboard" }, { name: "leadership", value: "leadership" }),
+      )
+      .addBooleanOption((opt) =>
+        opt.setName("meet").setDescription("Include a Google Meet link (default true)").setRequired(false),
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName("recurrence")
+          .setDescription("Does not repeat, or weekly")
+          .setRequired(false)
+          .addChoices({ name: "none", value: "none" }, { name: "weekly", value: "weekly" }),
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName("audience")
+          .setDescription("Picker (users/roles) or F26 roster tab — not emails")
+          .setRequired(false)
+          .addChoices({ name: "picker", value: "picker" }, { name: "f26", value: "f26" }),
       ),
   )
   .addSubcommand((sub) =>
@@ -108,6 +135,11 @@ interface MeetingDraft {
   notes: string | null;
   channelId: string;
   createdByUserId: string;
+  createdBy: DiscordIdentity;
+  calendarTarget: CalendarTarget;
+  conference: boolean;
+  recurrence: MeetingRecurrence;
+  audienceKind: MeetingAudienceKind;
 }
 
 const pendingMeetings = new Map<string, MeetingDraft>();
@@ -133,6 +165,20 @@ function interactionParentId(interaction: ChatInputCommandInteraction | MessageC
     return ch.parentId ?? null;
   }
   return null;
+}
+
+function creatorIdentity(interaction: {
+  user: { id: string; username: string; globalName?: string | null };
+  member?: unknown;
+}): DiscordIdentity {
+  const member = interaction.member as { nickname?: string | null; displayName?: string } | null;
+  return identityFromUserLike({
+    id: interaction.user.id,
+    username: interaction.user.username,
+    globalName: interaction.user.globalName,
+    nickname: member?.nickname,
+    displayName: member?.displayName,
+  });
 }
 
 function createGate(interaction: ChatInputCommandInteraction) {
@@ -504,9 +550,12 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
   const duration = interaction.options.getInteger("duration", true);
   const timeZone = interaction.options.getString("timezone")?.trim() || "America/New_York";
   const notes = interaction.options.getString("notes");
+  const calendar = (interaction.options.getString("calendar") as CalendarTarget | null) ?? "eboard";
+  const conference = interaction.options.getBoolean("meet") ?? true;
+  const recurrence = (interaction.options.getString("recurrence") as MeetingRecurrence | null) ?? "none";
+  const audience = interaction.options.getString("audience") === "f26" ? "f26_roster" : "picked";
   const startsAt = parseMeetingStart(start, timeZone).getTime();
-  const draftId = crypto.randomUUID();
-  pendingMeetings.set(draftId, {
+  const draft: MeetingDraft = {
     title,
     startsAt,
     durationMinutes: duration,
@@ -514,7 +563,57 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
     notes: notes?.trim() || null,
     channelId: interaction.channelId,
     createdByUserId: interaction.user.id,
-  });
+    createdBy: creatorIdentity(interaction),
+    calendarTarget: calendar === "leadership" ? "leadership" : "eboard",
+    conference,
+    recurrence: recurrence === "weekly" ? "weekly" : "none",
+    audienceKind: audience,
+  };
+  if (draft.audienceKind === "f26_roster") {
+    const result = createScheduledMeeting({
+      createdByUserId: draft.createdByUserId,
+      createdBy: draft.createdBy,
+      title: draft.title,
+      startsAt: draft.startsAt,
+      durationMinutes: draft.durationMinutes,
+      timeZone: draft.timeZone,
+      notes: draft.notes,
+      channelId: draft.channelId,
+      participants: [],
+      calendarTarget: draft.calendarTarget,
+      conference: draft.conference,
+      recurrence: draft.recurrence,
+      audienceKind: "f26_roster",
+      source: "slash",
+    });
+    const when = new Date(result.meeting.startsAt).toLocaleString("en-US", {
+      timeZone: result.meeting.timeZone,
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+    const announcement = `📅 **${result.meeting.title}**\n${when}\nF26 roster (Grok maps Disc→email).\nMeeting ID: \`${result.meeting.id}\`\nCalendar sync queued for Grok (hello@).`;
+    if (interaction.client.isReady()) {
+      try {
+        const postedId = await announceMeeting(interaction.client, draft.channelId, announcement);
+        if (postedId) setMeetingSourceMessageId(result.meeting.id, postedId);
+      } catch (err) {
+        logger.warn({ err, meetingId: result.meeting.id }, "meeting.announce.failed");
+      }
+    }
+    const outcomes = await publish(result.outboxEvents);
+    await interaction.reply({
+      content: `${handoffMessage(
+        outcomes,
+        "Meeting scheduled. Calendar sync handed off to Grok (F26 roster — Grok maps Disc→email).",
+        "Meeting scheduled. Calendar sync is queued for automatic retry.",
+      )}\nMeeting ID: \`${result.meeting.id}\``,
+      ephemeral: true,
+      allowedMentions: ALLOWED_MENTIONS,
+    });
+    return;
+  }
+  const draftId = crypto.randomUUID();
+  pendingMeetings.set(draftId, draft);
   await interaction.reply({
     content: `**${title}**\n${new Date(startsAt).toLocaleString("en-US", { timeZone, dateStyle: "medium", timeStyle: "short" })} (${duration} min)\nSelect Discord users or roles to invite.`,
     ephemeral: true,
@@ -533,7 +632,7 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
 
 async function resolveComponentAudience(
   interaction: MessageComponentInteraction,
-): Promise<Array<{ userId: string; displayName: string }>> {
+): Promise<Array<{ userId: string; displayName: string; username: string | null; globalName: string | null; guildNick: string | null }>> {
   if (!interaction.isMentionableSelectMenu()) throw new Error("Choose Discord users or roles.");
   const selections = extractMentionableAudience({
     values: [...interaction.values],
@@ -549,7 +648,17 @@ async function resolveComponentAudience(
   });
   const people = await expandAudience({ selections, guild: interaction.guild });
   if (people.length === 0) throw new Error("That selection did not resolve to any Discord users.");
-  return people;
+  return people.map((person) => {
+    const user = interaction.users.get(person.userId);
+    const member = interaction.guild?.members.cache.get(person.userId);
+    return {
+      userId: person.userId,
+      displayName: person.displayName,
+      username: user?.username ?? person.username,
+      globalName: user?.globalName ?? person.globalName,
+      guildNick: member?.nickname ?? member?.displayName ?? person.guildNick,
+    };
+  });
 }
 
 async function saveTaskDueDate(
@@ -572,13 +681,14 @@ async function announceMeeting(
   client: Client,
   channelId: string,
   content: string,
-): Promise<void> {
+): Promise<string | null> {
   const channel = await client.channels.fetch(channelId);
-  if (!channel || !("send" in channel)) return;
-  await (channel as TextBasedChannel & { send: (opts: unknown) => Promise<unknown> }).send({
+  if (!channel || !("send" in channel)) return null;
+  const sent = await (channel as TextBasedChannel & { send: (opts: unknown) => Promise<{ id?: string }> }).send({
     content,
     allowedMentions: ALLOWED_MENTIONS,
   });
+  return typeof sent?.id === "string" ? sent.id : null;
 }
 
 async function handleComponent(interaction: MessageComponentInteraction): Promise<void> {
@@ -750,6 +860,7 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     const people = await resolveComponentAudience(interaction);
     const result = createScheduledMeeting({
       createdByUserId: draft.createdByUserId,
+      createdBy: draft.createdBy,
       title: draft.title,
       startsAt: draft.startsAt,
       durationMinutes: draft.durationMinutes,
@@ -757,9 +868,13 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
       notes: draft.notes,
       channelId: draft.channelId,
       participants: people,
+      calendarTarget: draft.calendarTarget,
+      conference: draft.conference,
+      recurrence: draft.recurrence,
+      audienceKind: draft.audienceKind,
+      source: "slash",
     });
     pendingMeetings.delete(value);
-    const outcomes = await publish(result.outboxEvents);
     const when = new Date(result.meeting.startsAt).toLocaleString("en-US", {
       timeZone: result.meeting.timeZone,
       dateStyle: "medium",
@@ -768,11 +883,13 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     const announcement = `📅 **${result.meeting.title}**\n${when}\n${people.length} attendee(s).\nMeeting ID: \`${result.meeting.id}\`\nCalendar sync queued for Grok (hello@).`;
     if (interaction.client.isReady()) {
       try {
-        await announceMeeting(interaction.client, draft.channelId, announcement);
+        const postedId = await announceMeeting(interaction.client, draft.channelId, announcement);
+        if (postedId) setMeetingSourceMessageId(result.meeting.id, postedId);
       } catch (err) {
         logger.warn({ err, meetingId: result.meeting.id }, "meeting.announce.failed");
       }
     }
+    const outcomes = await publish(result.outboxEvents);
     await replyEphemeral(interaction, {
       content: `${handoffMessage(
         outcomes,

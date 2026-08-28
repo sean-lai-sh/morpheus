@@ -1,3 +1,11 @@
+import type {
+  CalendarTarget,
+  DiscordIdentity,
+  MeetingAudienceKind,
+  MeetingRecurrence,
+  MeetingSource,
+} from "../coordinator/identity.ts";
+import { displayNameOf } from "../coordinator/identity.ts";
 import { getDb } from "./db.ts";
 import { insertOutboxEvent, type OutboxEvent } from "./outbox.ts";
 
@@ -6,6 +14,9 @@ export type MeetingStatus = "scheduled" | "cancelled";
 export interface MeetingRow {
   id: string;
   createdByUserId: string;
+  createdByUsername: string | null;
+  createdByGlobalName: string | null;
+  createdByGuildNick: string | null;
   title: string;
   startsAt: number;
   endsAt: number;
@@ -16,6 +27,14 @@ export interface MeetingRow {
   channelId: string | null;
   calendarEventId: string | null;
   meetLink: string | null;
+  calendarTarget: CalendarTarget;
+  conference: boolean;
+  recurrence: MeetingRecurrence;
+  audienceKind: MeetingAudienceKind;
+  source: MeetingSource;
+  sourceMessageId: string | null;
+  sourceText: string | null;
+  requestedNames: string[];
   announcedAt: number | null;
   hourReminderAt: number | null;
   hourReminderSentAt: number | null;
@@ -27,17 +46,26 @@ export interface MeetingParticipantRow {
   meetingId: string;
   userId: string;
   displayName: string | null;
+  username: string | null;
+  globalName: string | null;
+  guildNick: string | null;
   createdAt: number;
 }
 
 export interface MeetingAssigneeInput {
   userId: string;
+  username?: string | null;
+  globalName?: string | null;
+  guildNick?: string | null;
   displayName?: string | null;
 }
 
 interface MeetingDbRow {
   id: string;
   created_by_user_id: string;
+  created_by_username: string | null;
+  created_by_global_name: string | null;
+  created_by_guild_nick: string | null;
   title: string;
   starts_at: number;
   ends_at: number;
@@ -48,11 +76,30 @@ interface MeetingDbRow {
   channel_id: string | null;
   calendar_event_id: string | null;
   meet_link: string | null;
+  calendar_target: string | null;
+  conference: number | null;
+  recurrence: string | null;
+  audience_kind: string | null;
+  source: string | null;
+  source_message_id: string | null;
+  source_text: string | null;
+  requested_names: string | null;
   announced_at: number | null;
   hour_reminder_at: number | null;
   hour_reminder_sent_at: number | null;
   created_at: number;
   updated_at: number;
+}
+
+function parseRequestedNames(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+  } catch {
+    return [];
+  }
 }
 
 const HOUR_MS = 60 * 60_000;
@@ -61,6 +108,9 @@ function mapMeeting(row: MeetingDbRow): MeetingRow {
   return {
     id: row.id,
     createdByUserId: row.created_by_user_id,
+    createdByUsername: row.created_by_username ?? null,
+    createdByGlobalName: row.created_by_global_name ?? null,
+    createdByGuildNick: row.created_by_guild_nick ?? null,
     title: row.title,
     startsAt: row.starts_at,
     endsAt: row.ends_at,
@@ -71,6 +121,14 @@ function mapMeeting(row: MeetingDbRow): MeetingRow {
     channelId: row.channel_id,
     calendarEventId: row.calendar_event_id,
     meetLink: row.meet_link,
+    calendarTarget: row.calendar_target === "leadership" ? "leadership" : "eboard",
+    conference: row.conference !== 0,
+    recurrence: row.recurrence === "weekly" ? "weekly" : "none",
+    audienceKind: row.audience_kind === "f26_roster" ? "f26_roster" : "picked",
+    source: row.source === "mention" ? "mention" : "slash",
+    sourceMessageId: row.source_message_id ?? null,
+    sourceText: row.source_text ?? null,
+    requestedNames: parseRequestedNames(row.requested_names),
     announcedAt: row.announced_at,
     hourReminderAt: row.hour_reminder_at,
     hourReminderSentAt: row.hour_reminder_sent_at,
@@ -87,7 +145,8 @@ export function getMeeting(id: string): MeetingRow | null {
 export function getMeetingParticipants(meetingId: string): MeetingParticipantRow[] {
   return getDb()
     .query<MeetingParticipantRow, [string]>(
-      `SELECT meeting_id AS meetingId, user_id AS userId, display_name AS displayName, created_at AS createdAt
+      `SELECT meeting_id AS meetingId, user_id AS userId, display_name AS displayName,
+              username, global_name AS globalName, guild_nick AS guildNick, created_at AS createdAt
        FROM meeting_participants WHERE meeting_id = ? ORDER BY created_at ASC`,
     )
     .all(meetingId);
@@ -96,6 +155,7 @@ export function getMeetingParticipants(meetingId: string): MeetingParticipantRow
 export function createScheduledMeeting(input: {
   id?: string;
   createdByUserId: string;
+  createdBy?: DiscordIdentity | null;
   title: string;
   startsAt: number;
   durationMinutes: number;
@@ -103,6 +163,14 @@ export function createScheduledMeeting(input: {
   notes?: string | null;
   channelId?: string | null;
   participants: MeetingAssigneeInput[];
+  calendarTarget?: CalendarTarget;
+  conference?: boolean;
+  recurrence?: MeetingRecurrence;
+  audienceKind?: MeetingAudienceKind;
+  source?: MeetingSource;
+  sourceMessageId?: string | null;
+  sourceText?: string | null;
+  requestedNames?: string[];
   now?: number;
 }): { meeting: MeetingRow; outboxEvents: OutboxEvent[] } {
   const now = input.now ?? Date.now();
@@ -113,23 +181,32 @@ export function createScheduledMeeting(input: {
     throw new Error("Duration must be between 15 and 480 minutes.");
   }
   const unique = [...new Map(input.participants.map((p) => [p.userId, p])).values()];
-  if (unique.length === 0) throw new Error("Add at least one attendee.");
+  const audienceKind = input.audienceKind ?? "picked";
+  if (unique.length === 0 && audienceKind !== "f26_roster") {
+    throw new Error("Add at least one attendee.");
+  }
   const endsAt = input.startsAt + input.durationMinutes * 60_000;
   const timeZone = input.timeZone?.trim() || "America/New_York";
   const id = input.id ?? crypto.randomUUID();
   const hourReminderAt = input.startsAt - HOUR_MS;
+  const creator = input.createdBy;
 
   return getDb().transaction(() => {
     getDb()
       .query(
         `INSERT INTO meetings (
-           id, created_by_user_id, title, starts_at, ends_at, time_zone, notes, status, version,
-           channel_id, hour_reminder_at, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?)`,
+           id, created_by_user_id, created_by_username, created_by_global_name, created_by_guild_nick,
+           title, starts_at, ends_at, time_zone, notes, status, version,
+           channel_id, hour_reminder_at, calendar_target, conference, recurrence, audience_kind,
+           source, source_message_id, source_text, requested_names, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
         input.createdByUserId,
+        creator?.username ?? null,
+        creator?.globalName ?? null,
+        creator?.guildNick ?? null,
         title,
         input.startsAt,
         endsAt,
@@ -137,16 +214,41 @@ export function createScheduledMeeting(input: {
         input.notes?.trim() || null,
         input.channelId ?? null,
         hourReminderAt,
+        input.calendarTarget ?? "eboard",
+        input.conference === false ? 0 : 1,
+        input.recurrence ?? "none",
+        audienceKind,
+        input.source ?? "slash",
+        input.sourceMessageId ?? null,
+        input.sourceText?.trim() || null,
+        JSON.stringify(input.requestedNames ?? []),
         now,
         now,
       );
     for (const person of unique) {
+      const display =
+        person.displayName ??
+        displayNameOf({
+          userId: person.userId,
+          username: person.username ?? null,
+          globalName: person.globalName ?? null,
+          guildNick: person.guildNick ?? null,
+        });
       getDb()
         .query(
-          `INSERT INTO meeting_participants (meeting_id, user_id, display_name, created_at)
-           VALUES (?, ?, ?, ?)`,
+          `INSERT INTO meeting_participants (
+             meeting_id, user_id, display_name, username, global_name, guild_nick, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(id, person.userId, person.displayName ?? null, now);
+        .run(
+          id,
+          person.userId,
+          display,
+          person.username ?? null,
+          person.globalName ?? null,
+          person.guildNick ?? null,
+          now,
+        );
     }
     const outbox = insertOutboxEvent({
       type: "meeting.calendar_sync_requested",
@@ -158,6 +260,15 @@ export function createScheduledMeeting(input: {
     if (!meeting) throw new Error("createScheduledMeeting: insert succeeded but row missing");
     return { meeting, outboxEvents: outbox ? [outbox] : [] };
   })();
+}
+
+export function setMeetingSourceMessageId(meetingId: string, messageId: string): MeetingRow | null {
+  const row = getDb()
+    .query<MeetingDbRow, [string, string]>(
+      `UPDATE meetings SET source_message_id = ? WHERE id = ? RETURNING *`,
+    )
+    .get(messageId, meetingId);
+  return row ? mapMeeting(row) : getMeeting(meetingId);
 }
 
 export function cancelMeeting(input: {

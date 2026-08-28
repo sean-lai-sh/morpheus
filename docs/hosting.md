@@ -79,10 +79,13 @@ Mini Doppler does **not** need `NIA_*`. Nia is unsupported; delete leftover Nia 
 
 Ported from [techmate](https://github.com/fahimmehraj/techmate) as a Mini-side slice. No Inngest, no planner UI, no Google secrets on the Mini.
 
-- `/task` and `/meet` register next to `/ask`. Create is fail-closed on `JOB_TRIGGER_ROLE_IDS` and allowlisted channels.
+- `/task` and `/meet` register next to `/ask` and `/background`. Create is fail-closed on `JOB_TRIGGER_ROLE_IDS` and allowlisted channels.
 - Task reminder DMs are sent by the official discord.js bot (Mini holds `DISCORD_BOT_TOKEN`). Grok never gets that token.
-- Calendar create/cancel is an outbox row that becomes a `jobs` row POSTed to `GROK_BOT_WEBHOOK_URL`. Grok (hello@) owns Calendar. The job pack is JSON with meeting times and a participant count — never emails, never the bot token.
-- `outbox_events` is written in the same SQLite transaction as the mutation. `bun run live` tries an immediate 1.5s dispatch, then a minute-level in-process sweeper recovers `pending` rows.
+- **One meeting tool, two doors:** `/meet create` (options + MentionableSelectMenu) and `@official-bot` free-text. Both write `meeting.calendar_sync_requested` and the same Grok pack.
+- Calendar create/cancel stays on Grok as `hello@techatnyu.org`. The pack is JSON: times, calendar target, Discord identities (`user_id`, `username`, `global_name`, `guild_nick`), optional `requested_names`, `audience=f26_roster` for the sheet — **never emails, never the bot token**.
+- Complete parses `{calendar_event_id, meet_link}` (or `{cancelled:true}`). Mini replies with the Meet link when the job is tied to a real Discord message.
+- Grok-side mapper + calendar ids: [`docs/meetings-grok-contract.md`](meetings-grok-contract.md).
+- `outbox_events` is written in the same SQLite transaction as the mutation. Calendar jobs use the **background** lane (always Grok). `bun run live` tries an immediate 1.5s dispatch, then a minute-level in-process sweeper recovers `pending` rows.
 
 ## Operator notes (Mini)
 

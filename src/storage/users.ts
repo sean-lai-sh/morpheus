@@ -28,13 +28,45 @@ export function upsertUser(
     .run(userId, username, displayName, globalName, at);
 }
 
+export function getUser(userId: string): UserRow | null {
+  return (
+    getDb()
+      .query<UserRow, [string]>(
+        `SELECT user_id, username, display_name, global_name, updated_at FROM users WHERE user_id = ?`,
+      )
+      .get(userId) ?? null
+  );
+}
+
+export function listUsers(): UserRow[] {
+  return getDb()
+    .query<UserRow, []>(`SELECT user_id, username, display_name, global_name, updated_at FROM users`)
+    .all();
+}
+
 /** Returns the best known display name for a user: server nickname > global name > username. */
 export function getDisplayName(userId: string): string | null {
-  const row = getDb()
-    .query<Pick<UserRow, "display_name" | "global_name" | "username">, [string]>(
-      `SELECT display_name, global_name, username FROM users WHERE user_id = ?`,
-    )
-    .get(userId);
+  const row = getUser(userId);
   if (!row) return null;
   return row.display_name ?? row.global_name ?? row.username ?? null;
+}
+
+/** Match roster-style name hints against cached Discord profile fields. No emails. */
+export function findUsersByNameHints(hints: string[]): UserRow[] {
+  const cleaned = hints.map((hint) => hint.trim().toLowerCase()).filter((hint) => hint.length >= 2);
+  if (cleaned.length === 0) return [];
+  const found: UserRow[] = [];
+  const seen = new Set<string>();
+  for (const row of listUsers()) {
+    const fields = [row.username, row.display_name, row.global_name]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => value.toLowerCase());
+    const hit = cleaned.some((hint) =>
+      fields.some((field) => field === hint || field.startsWith(`${hint} `) || field.endsWith(` ${hint}`)),
+    );
+    if (!hit || seen.has(row.user_id)) continue;
+    seen.add(row.user_id);
+    found.push(row);
+  }
+  return found;
 }

@@ -7,6 +7,9 @@ export type AudienceSelection =
 export interface ResolvedAssignee {
   userId: string;
   displayName: string;
+  username: string | null;
+  globalName: string | null;
+  guildNick: string | null;
 }
 
 export function extractMentionableAudience(data: {
@@ -49,16 +52,28 @@ export async function expandAudience(input: {
   const byId = new Map<string, ResolvedAssignee>();
   for (const selection of input.selections) {
     if (selection.kind === "user") {
-      byId.set(selection.id, { userId: selection.id, displayName: selection.displayName });
+      byId.set(selection.id, {
+        userId: selection.id,
+        displayName: selection.displayName,
+        username: null,
+        globalName: selection.displayName,
+        guildNick: selection.displayName,
+      });
       continue;
     }
     if (!input.guild) continue;
     const members = await membersWithRole(input.guild, selection.id);
     for (const member of members) {
       if (byId.has(member.id)) continue;
+      const username = member.user.username ?? null;
+      const globalName = member.user.globalName ?? null;
+      const guildNick = member.nickname ?? member.displayName ?? null;
       byId.set(member.id, {
         userId: member.id,
-        displayName: member.displayName || member.user.globalName || member.user.username || member.id,
+        displayName: guildNick || globalName || username || member.id,
+        username,
+        globalName,
+        guildNick,
       });
     }
   }

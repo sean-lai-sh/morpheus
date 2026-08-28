@@ -241,17 +241,31 @@ async function dispatchCalendarJob(
 
   const kind =
     event.type === "meeting.calendar_cancel_requested" ? "meeting.calendar_cancel" : "meeting.calendar_sync";
+  const people = getMeetingParticipants(meeting.id);
   const pack = buildCalendarJobPack({
     kind,
     meeting,
     outboxId: event.id,
     version,
-    participantCount: getMeetingParticipants(meeting.id).length,
+    participants: people.map((person) => ({
+      userId: person.userId,
+      username: person.username,
+      globalName: person.globalName,
+      guildNick: person.guildNick ?? person.displayName,
+    })),
   });
   const content = redactCalendarJobContent(serializeCalendarJobPack(pack));
   if (/discord_bot_token|DISCORD_BOT_TOKEN/i.test(content)) {
     markOutboxFailed(event.id, "refused-discord-token-in-payload", now);
     logger.error(logCorrelate(event), "outbox.publish.refused_token_in_payload");
+    return "unsupported";
+  }
+  const emailLeak = content
+    .replace(/hello@techatnyu\.org/gi, "")
+    .replace(/[A-Za-z0-9._-]+@group\.calendar\.google\.com/gi, "");
+  if (/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(emailLeak)) {
+    markOutboxFailed(event.id, "refused-email-in-payload", now);
+    logger.error(logCorrelate(event), "outbox.publish.refused_email_in_payload");
     return "unsupported";
   }
 
@@ -263,7 +277,9 @@ async function dispatchCalendarJob(
     return "deferred";
   }
 
-  const discordMessageId = coordinatorJobMessageId(event.id);
+  const discordMessageId = /^\d{16,22}$/.test(meeting.sourceMessageId ?? "")
+    ? meeting.sourceMessageId!
+    : coordinatorJobMessageId(event.id);
   const enqueue =
     opts.enqueue ??
     ((input) => {
@@ -275,6 +291,7 @@ async function dispatchCalendarJob(
           authorId: input.authorId,
           namespace: input.namespace,
           content: input.content,
+          lane: "background",
         },
         input.now,
       );
@@ -285,7 +302,7 @@ async function dispatchCalendarJob(
     (async (input) => {
       const job = getJobByDiscordMessageId(input.discordMessageId);
       if (!job) return false;
-      const result = await dispatchEnqueuedJob(job);
+      const result = await dispatchEnqueuedJob(job, { lane: "background" });
       return result.dispatched;
     });
 

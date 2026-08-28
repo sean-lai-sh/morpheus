@@ -274,6 +274,28 @@ function migrateCoordinator(db: Database): void {
       PRIMARY KEY (meeting_id, user_id)
     );
   `);
+  for (const sql of [
+    `ALTER TABLE meetings ADD COLUMN calendar_target TEXT NOT NULL DEFAULT 'eboard'`,
+    `ALTER TABLE meetings ADD COLUMN conference INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE meetings ADD COLUMN recurrence TEXT NOT NULL DEFAULT 'none'`,
+    `ALTER TABLE meetings ADD COLUMN audience_kind TEXT NOT NULL DEFAULT 'picked'`,
+    `ALTER TABLE meetings ADD COLUMN source TEXT NOT NULL DEFAULT 'slash'`,
+    `ALTER TABLE meetings ADD COLUMN source_message_id TEXT`,
+    `ALTER TABLE meetings ADD COLUMN source_text TEXT`,
+    `ALTER TABLE meetings ADD COLUMN requested_names TEXT`,
+    `ALTER TABLE meetings ADD COLUMN created_by_username TEXT`,
+    `ALTER TABLE meetings ADD COLUMN created_by_global_name TEXT`,
+    `ALTER TABLE meetings ADD COLUMN created_by_guild_nick TEXT`,
+    `ALTER TABLE meeting_participants ADD COLUMN username TEXT`,
+    `ALTER TABLE meeting_participants ADD COLUMN global_name TEXT`,
+    `ALTER TABLE meeting_participants ADD COLUMN guild_nick TEXT`,
+  ]) {
+    try {
+      db.exec(sql);
+    } catch {
+      /* already exists */
+    }
+  }
 }
 
 /**

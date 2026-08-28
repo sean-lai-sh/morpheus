@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { withTempDb } from "./helpers.ts";
-import { getDisplayName, upsertUser } from "../src/storage/users.ts";
+import { findUsersByNameHints, getDisplayName, getUser, upsertUser } from "../src/storage/users.ts";
 
 const t = withTempDb();
 beforeAll(() => {});
@@ -41,5 +41,15 @@ describe("storage/users — getDisplayName fallback priority", () => {
   test("returns null when all name fields are null", () => {
     upsertUser("u5", null, null, null, 1_000);
     expect(getDisplayName("u5")).toBeNull();
+  });
+
+  test("findUsersByNameHints matches Disc handle, nick, and First+Last", () => {
+    upsertUser("u-pope", "p6ca", "Pope", "Pope Cruz", 1_000);
+    upsertUser("u-jen", "HFYJ", "Jennifer", "Jennifer Huang", 1_000);
+    expect(findUsersByNameHints(["Pope", "Jennifer"]).map((u) => u.user_id).sort()).toEqual([
+      "u-jen",
+      "u-pope",
+    ]);
+    expect(getUser("u-pope")?.username).toBe("p6ca");
   });
 });

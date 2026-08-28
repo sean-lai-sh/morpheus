@@ -3,7 +3,12 @@ import { loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 import { redactSecrets } from "../notify/grok-dispatch.ts";
 import { stopJobTyping } from "./typing.ts";
-import { applyCoordinatorJobComplete, parseCoordinatorJobContent } from "../coordinator/calendar-job.ts";
+import {
+  applyCoordinatorJobComplete,
+  formatCalendarCompleteAnnouncement,
+  isCoordinatorJobMessageId,
+  parseCoordinatorJobContent,
+} from "../coordinator/calendar-job.ts";
 import {
   failJob,
   getJob,
@@ -224,6 +229,29 @@ export async function completeJobWithReply(
 
   if (parseCoordinatorJobContent(prep.job.content)) {
     applyCoordinatorJobComplete(prep.job.content, reply, opts.now);
+    const announcement = formatCalendarCompleteAnnouncement(prep.job.content, reply);
+    if (
+      announcement &&
+      postReplies !== false &&
+      opts.client &&
+      !isCoordinatorJobMessageId(prep.job.discord_message_id)
+    ) {
+      try {
+        const sent = await postJobReply(prep.job, announcement, {
+          client: opts.client,
+          onFirstSent: (messageId) => {
+            recordJobDiscordSend(id, messageId, opts.now);
+            stopJobTyping(id);
+          },
+        });
+        stopJobTyping(id);
+        const done = markJobCompleted(id, sent.messageId, opts.now);
+        logger.info({ job_id: id, posted: Boolean(sent.messageId) }, "coordinator calendar job completed");
+        return { ok: true, status: 200, job: done ?? prep.job, posted: Boolean(sent.messageId) };
+      } catch (err) {
+        logger.warn({ err, job_id: id }, "coordinator calendar announcement failed; job still completed");
+      }
+    }
     stopJobTyping(id);
     const done = markJobCompleted(id, null, opts.now);
     logger.info({ job_id: id }, "coordinator calendar job completed without Discord reply");
