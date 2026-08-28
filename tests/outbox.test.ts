@@ -1,11 +1,13 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { getDb } from "../src/storage/db.ts";
 import {
   getOutboxEvent,
   insertOutboxEvent,
   listPendingOutbox,
   markOutboxDispatched,
+  markOutboxFailed,
   recordOutboxDispatchFailure,
+  OUTBOX_MAX_ATTEMPTS,
 } from "../src/storage/outbox.ts";
 import {
   activateTask,
@@ -165,5 +167,112 @@ describe("outbox publisher accepted vs deferred + sweeper", () => {
     });
     expect(markOutboxDispatched(event!.id)).toBe(true);
     expect(markOutboxDispatched(event!.id)).toBe(false);
+  });
+});
+
+describe("outbox retry cap dead-letters exhausted rows", () => {
+  beforeEach(() => {
+    // The cap tests assert on the whole pending window (limit clamps at 50),
+    // so start from an empty outbox rather than whatever earlier suites left.
+    getDb().exec(`DELETE FROM outbox_events`);
+  });
+
+  function pendingRow(aggregateId: string, createdAt: number) {
+    const event = insertOutboxEvent(
+      {
+        type: "meeting.calendar_cancel_requested",
+        aggregateId,
+        expectedVersion: 1,
+        payload: { meetingId: aggregateId, version: 1 },
+      },
+      createdAt,
+    );
+    expect(event).not.toBeNull();
+    return event!;
+  }
+
+  test("retries below the cap stay pending and keep being swept", () => {
+    const event = pendingRow("cap-under", 1_000);
+    for (let attempt = 1; attempt < OUTBOX_MAX_ATTEMPTS; attempt += 1) {
+      const result = recordOutboxDispatchFailure(event.id, `boom ${attempt}`);
+      expect(result.updated).toBe(true);
+      expect(result.attempts).toBe(attempt);
+      expect(result.deadLettered).toBe(false);
+      const row = getOutboxEvent(event.id);
+      expect(row?.status).toBe("pending");
+      expect(row?.lastError).toBe(`boom ${attempt}`);
+      expect(listPendingOutbox().map((e) => e.id)).toContain(event.id);
+    }
+  });
+
+  test("the failure that reaches the cap flips the row to failed and drops it from the pending window", () => {
+    const event = pendingRow("cap-exhaust", 1_000);
+    for (let attempt = 1; attempt < OUTBOX_MAX_ATTEMPTS; attempt += 1) {
+      recordOutboxDispatchFailure(event.id, "handoff unavailable");
+    }
+    const last = recordOutboxDispatchFailure(event.id, "handoff unavailable");
+    expect(last.updated).toBe(true);
+    expect(last.attempts).toBe(OUTBOX_MAX_ATTEMPTS);
+    expect(last.deadLettered).toBe(true);
+
+    const row = getOutboxEvent(event.id);
+    expect(row?.status).toBe("failed");
+    expect(row?.attempts).toBe(OUTBOX_MAX_ATTEMPTS);
+    // last_error survives and says this was exhaustion, not a hard refusal.
+    expect(row?.lastError).toContain("exhausted after");
+    expect(row?.lastError).toContain("handoff unavailable");
+    expect(row!.lastError!.length).toBeLessThanOrEqual(500);
+    expect(listPendingOutbox().map((e) => e.id)).not.toContain(event.id);
+
+    // Terminal: further failures are a no-op CAS miss.
+    const after = recordOutboxDispatchFailure(event.id, "again");
+    expect(after).toEqual({ updated: false, attempts: 0, deadLettered: false });
+    expect(getOutboxEvent(event.id)?.attempts).toBe(OUTBOX_MAX_ATTEMPTS);
+  });
+
+  test("last_error is truncated to 500 chars on the exhausting failure", () => {
+    const event = pendingRow("cap-truncate", 1_000);
+    for (let attempt = 1; attempt < OUTBOX_MAX_ATTEMPTS; attempt += 1) {
+      recordOutboxDispatchFailure(event.id, "x");
+    }
+    recordOutboxDispatchFailure(event.id, "y".repeat(2_000));
+    expect(getOutboxEvent(event.id)?.lastError?.length).toBe(500);
+  });
+
+  test("exhausted rows no longer starve newer events at the head of the queue", () => {
+    // listPendingOutbox reads at most 50 rows, oldest first. Fill that whole
+    // window with permanently-failing rows, then queue one good newer event.
+    const dead: string[] = [];
+    for (let i = 0; i < 50; i += 1) {
+      const row = pendingRow(`starve-dead-${i}`, 1_000 + i);
+      dead.push(row.id);
+    }
+    const fresh = pendingRow("starve-fresh", 9_000);
+
+    // Before exhaustion the newer row is invisible: the window is all dead rows.
+    expect(listPendingOutbox().map((e) => e.id)).not.toContain(fresh.id);
+
+    for (let attempt = 0; attempt < OUTBOX_MAX_ATTEMPTS; attempt += 1) {
+      for (const id of dead) recordOutboxDispatchFailure(id, "unknown-namespace");
+    }
+
+    const pending = listPendingOutbox();
+    expect(pending.map((e) => e.id)).toEqual([fresh.id]);
+    for (const id of dead) expect(getOutboxEvent(id)?.status).toBe("failed");
+  });
+
+  test("markOutboxFailed still terminates a hard refusal immediately", () => {
+    const event = pendingRow("cap-hard-refusal", 1_000);
+    recordOutboxDispatchFailure(event.id, "transient");
+    expect(getOutboxEvent(event.id)?.status).toBe("pending");
+
+    expect(markOutboxFailed(event.id, "refused-email-in-payload")).toBe(true);
+    const row = getOutboxEvent(event.id);
+    expect(row?.status).toBe("failed");
+    expect(row?.attempts).toBe(2);
+    expect(row?.lastError).toBe("refused-email-in-payload");
+    expect(row?.lastError).not.toContain("exhausted");
+    expect(listPendingOutbox().map((e) => e.id)).not.toContain(event.id);
+    expect(markOutboxFailed(event.id, "again")).toBe(false);
   });
 });

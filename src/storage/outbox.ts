@@ -9,6 +9,16 @@ export const OUTBOX_TYPES = [
 export type OutboxType = (typeof OUTBOX_TYPES)[number];
 export type OutboxStatus = "pending" | "dispatched" | "failed";
 
+/**
+ * Max dispatch attempts before an outbox row is dead-lettered to `failed`.
+ *
+ * The sweeper runs every 60s, so 6 attempts is roughly a five-minute window of
+ * retries: long enough to ride out a Discord blip, a restart, or a brief
+ * Grok/handoff outage, short enough that a permanently-broken row clears the
+ * head of the queue within minutes instead of blocking newer events forever.
+ */
+export const OUTBOX_MAX_ATTEMPTS = 6;
+
 export type OutboxPayload = Record<string, string | number | boolean | null>;
 
 export interface OutboxEvent {
@@ -130,17 +140,50 @@ export function markOutboxDispatched(id: string, now: number = Date.now()): bool
   return Number(res.changes ?? 0) > 0;
 }
 
-/** Leave pending; record the failure so the minute sweeper can retry. */
-export function recordOutboxDispatchFailure(id: string, error: string, now: number = Date.now()): boolean {
+export interface OutboxDispatchFailureResult {
+  /** False when the row was missing or no longer `pending` (nothing was written). */
+  updated: boolean;
+  /** `attempts` after the increment; 0 when nothing was written. */
+  attempts: number;
+  /** True when this failure hit {@link OUTBOX_MAX_ATTEMPTS} and moved the row to `failed`. */
+  deadLettered: boolean;
+}
+
+/**
+ * Record a soft dispatch failure. The row stays `pending` (the 60s sweeper will
+ * retry it) until it has failed {@link OUTBOX_MAX_ATTEMPTS} times, at which
+ * point it is dead-lettered to the terminal `failed` status so it stops being
+ * selected by {@link listPendingOutbox}.
+ *
+ * Without the cap, a permanently-failing row (unknown namespace, a webhook that
+ * is down for good) sits at the head of the `created_at ASC` window forever and
+ * starves every newer event behind it, because `listPendingOutbox` reads at most
+ * 50 rows.
+ *
+ * The increment and the conditional transition happen in one UPDATE so two
+ * concurrent sweepers cannot double-count or race past the cap.
+ */
+export function recordOutboxDispatchFailure(
+  id: string,
+  error: string,
+  now: number = Date.now(),
+): OutboxDispatchFailureResult {
   void now;
-  const res = getDb()
-    .query(
+  const retryError = error.slice(0, 500);
+  const exhaustedError = `exhausted after ${OUTBOX_MAX_ATTEMPTS} attempts: ${error}`.slice(0, 500);
+  const row = getDb()
+    .query<{ attempts: number; status: string }, [number, string, string, number, string]>(
       `UPDATE outbox_events
-       SET attempts = attempts + 1, last_error = ?, dispatched_at = NULL
-       WHERE id = ? AND status = 'pending'`,
+       SET attempts = attempts + 1,
+           dispatched_at = NULL,
+           last_error = CASE WHEN attempts + 1 >= ? THEN ? ELSE ? END,
+           status = CASE WHEN attempts + 1 >= ? THEN 'failed' ELSE 'pending' END
+       WHERE id = ? AND status = 'pending'
+       RETURNING attempts, status`,
     )
-    .run(error.slice(0, 500), id);
-  return Number(res.changes ?? 0) > 0;
+    .get(OUTBOX_MAX_ATTEMPTS, exhaustedError, retryError, OUTBOX_MAX_ATTEMPTS, id);
+  if (!row) return { updated: false, attempts: 0, deadLettered: false };
+  return { updated: true, attempts: row.attempts, deadLettered: row.status === "failed" };
 }
 
 export function markOutboxFailed(id: string, error: string, now: number = Date.now()): boolean {

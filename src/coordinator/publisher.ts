@@ -196,8 +196,11 @@ async function dispatchTaskReminder(
       error: message.slice(0, 500),
       now,
     });
-    recordOutboxDispatchFailure(event.id, message, now);
-    logger.error(logCorrelate(event, { err: message }), "outbox.publish.deferred");
+    const failure = recordOutboxDispatchFailure(event.id, message, now);
+    logger.error(
+      logCorrelate(event, { err: message, attempts: failure.attempts }),
+      failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+    );
     return "deferred";
   }
 }
@@ -264,8 +267,18 @@ async function dispatchCalendarJob(
   const namespace = namespaceForMeetingChannel(meeting.channelId);
   const channelId = meeting.channelId;
   if (!namespace || !channelId) {
-    recordOutboxDispatchFailure(event.id, "unknown-namespace", now);
-    logger.warn(logCorrelate(event, { reason: "unknown-namespace" }), "outbox.publish.deferred");
+    const failure = recordOutboxDispatchFailure(event.id, "unknown-namespace", now);
+    if (failure.deadLettered) {
+      logger.error(
+        logCorrelate(event, { reason: "unknown-namespace", attempts: failure.attempts }),
+        "outbox.publish.dead_lettered",
+      );
+    } else {
+      logger.warn(
+        logCorrelate(event, { reason: "unknown-namespace", attempts: failure.attempts }),
+        "outbox.publish.deferred",
+      );
+    }
     return "deferred";
   }
 
@@ -320,8 +333,12 @@ async function dispatchCalendarJob(
     logger.info(logCorrelate(event, { meetingId }), "outbox.publish.accepted");
     return "accepted";
   } catch (error) {
-    recordOutboxDispatchFailure(event.id, errorMessage(error), now);
-    logger.error(logCorrelate(event, { err: errorMessage(error), meetingId }), "outbox.publish.deferred");
+    const message = errorMessage(error);
+    const failure = recordOutboxDispatchFailure(event.id, message, now);
+    logger.error(
+      logCorrelate(event, { err: message, meetingId, attempts: failure.attempts }),
+      failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+    );
     return "deferred";
   }
 }
@@ -356,8 +373,12 @@ export async function publishOutboxEvent(
     logger.warn(logCorrelate(event), "outbox.publish.unsupported");
     return { outboxId: event.id, status: "unsupported" };
   } catch (error) {
-    recordOutboxDispatchFailure(event.id, errorMessage(error), now);
-    logger.error(logCorrelate(event, { err: errorMessage(error) }), "outbox.publish.deferred");
+    const message = errorMessage(error);
+    const failure = recordOutboxDispatchFailure(event.id, message, now);
+    logger.error(
+      logCorrelate(event, { err: message, attempts: failure.attempts }),
+      failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+    );
     return { outboxId: event.id, status: "deferred" };
   }
 }
