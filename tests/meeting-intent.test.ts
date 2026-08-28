@@ -55,4 +55,44 @@ describe("meeting intent", () => {
     const parsed = parseMeetingRequest("book eboard this Friday 6:30 ET", { now: FRIDAY_MORNING });
     expect(parsed!.recurrence).toBe("none");
   });
+
+  test("real cal-invite job 1a493bac: Sept 4 6-8pm + Eboard role + F26 sheet", () => {
+    const text =
+      "make a cal invite for Sept 4 EST 6-8pm and invite the Eboard Discord role <@&1203562091500404782> via the F26 contact sheet (gid 1079418365)";
+    expect(isMeetingIntent(text)).toBe(true);
+    const parsed = parseMeetingRequest(text, { now: FRIDAY_MORNING });
+    expect(parsed).not.toBeNull();
+    expect(parsed!.title).toBe("Tech@NYU Eboard");
+    expect(parsed!.audienceKind).toBe("f26_roster");
+    expect(parsed!.calendar).toBe("eboard");
+    expect(parsed!.recurrence).toBe("none");
+    expect(parsed!.conference).toBe(true);
+    expect(parsed!.timeZone).toBe("America/New_York");
+    expect(parsed!.durationMinutes).toBe(120);
+    expect(parsed!.location).toBe("TBD");
+    expect(parsed!.requestedNames).toEqual([]);
+    expect(parsed!.locked).toContain("start");
+    expect(parsed!.locked).toContain("attendees");
+    const local = new Date(parsed!.startsAt).toLocaleString("en-US", {
+      timeZone: "America/New_York",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    expect(local).toMatch(/Sep/);
+    expect(local).toMatch(/4/);
+    expect(local).toMatch(/6:00/);
+    expect(JSON.stringify(parsed)).not.toMatch(/@nyu\.edu/i);
+  });
+
+  test("weekly reshape keeps until 2026-12-15 and does not treat Haley as optional", () => {
+    const parsed = parseMeetingRequest(
+      "book eboard Friday 6:30 ET weekly until 2026-12-15",
+      { now: FRIDAY_MORNING },
+    );
+    expect(parsed!.recurrence).toBe("weekly");
+    expect(parsed!.recurrenceUntil).toBe("2026-12-15");
+    expect(parsed!.durationMinutes).toBe(60);
+  });
 });

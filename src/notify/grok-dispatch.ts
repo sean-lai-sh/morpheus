@@ -3,7 +3,7 @@ import { scopeFor } from "../context/namespace.ts";
 import { parseIndexPath } from "../context/paths.ts";
 import type { Namespace, Scope } from "../context/types.ts";
 import { logger } from "../logger.ts";
-import { MAX_JOB_CHANNEL_IDS, type JobScope } from "../storage/jobs.ts";
+import { MAX_JOB_CHANNEL_IDS, type JobMentionUser, type JobScope } from "../storage/jobs.ts";
 import { isDiscordWebhookUrl } from "./webhooks.ts";
 
 /**
@@ -75,6 +75,8 @@ export interface GrokJobPayload {
     /** Allowlisted Discord channel ids. Empty + scope `workspace` = the whole subtree. */
     channel_ids?: string[];
     content: string;
+    /** Resolved Discord user mentions minus the bot. Never emails. */
+    mentions?: JobMentionUser[];
   };
   /** First-pass only. Grok live-searches the index over Tailscale if this is not enough. */
   snippets: Array<{ id?: string; channelId?: string; path?: string; content: string }>;
@@ -142,6 +144,24 @@ function capChannelIds(ids: string[] | undefined): string[] {
     if (out.includes(raw)) continue;
     out.push(raw);
     if (out.length >= MAX_JOB_CHANNEL_IDS) break;
+  }
+  return out;
+}
+
+function capMentions(mentions: JobMentionUser[], env: Env): JobMentionUser[] {
+  const out: JobMentionUser[] = [];
+  for (const mention of mentions) {
+    if (!mention || typeof mention.id !== "string" || !/^\d+$/.test(mention.id)) continue;
+    const username = redactSecrets(String(mention.username ?? ""), env).replace(
+      /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,
+      "",
+    ).trim().slice(0, 100);
+    const display = redactSecrets(String(mention.display_name ?? ""), env).replace(
+      /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,
+      "",
+    ).trim().slice(0, 100);
+    out.push({ id: mention.id, username, display_name: display });
+    if (out.length >= 25) break;
   }
   return out;
 }
@@ -243,6 +263,7 @@ export function capGrokPayload(payload: GrokJobPayload, env: Env = loadEnv()): G
       ...(job.discord_message_id ? { discord_message_id: job.discord_message_id } : {}),
       ...(job.discord_channel_id ? { discord_channel_id: job.discord_channel_id } : {}),
       ...(job.author_id ? { author_id: job.author_id } : {}),
+      ...(job.mentions && job.mentions.length > 0 ? { mentions: capMentions(job.mentions, env) } : {}),
     },
     // No resolvable workspace → no snippets leave the process.
     snippets: scope == null

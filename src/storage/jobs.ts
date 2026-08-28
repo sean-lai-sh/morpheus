@@ -27,6 +27,12 @@ const FIRST_PASS_LOOKBACK_WORKSPACE = 2000;
 /** Candidates prefetched per FTS pass (strict, then loose) before the job-scope filter. */
 const FIRST_PASS_FTS_CANDIDATES = 200;
 
+export interface JobMentionUser {
+  id: string;
+  username: string;
+  display_name: string;
+}
+
 export interface JobRow {
   id: string;
   discord_message_id: string;
@@ -38,6 +44,7 @@ export interface JobRow {
   scope: JobScope;
   channel_ids: string[];
   content: string;
+  mentions: JobMentionUser[];
   status: JobStatus;
   claimed_by: string | null;
   claimed_at: number | null;
@@ -70,6 +77,34 @@ export interface EnqueueJobInput {
   content: string;
   /** Defaults to `interactive` — the capped, local-SDK lane. */
   lane?: JobLaneName;
+  /** Resolved Discord user mentions minus the bot. Never emails. */
+  mentions?: JobMentionUser[];
+}
+
+function parseMentions(raw: unknown): JobMentionUser[] {
+  if (raw == null || raw === "") return [];
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw) as unknown;
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out: JobMentionUser[] = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as { id?: unknown; username?: unknown; display_name?: unknown };
+    if (typeof row.id !== "string" || !/^\d+$/.test(row.id)) continue;
+    out.push({
+      id: row.id,
+      username: typeof row.username === "string" ? row.username.slice(0, 100) : "",
+      display_name: typeof row.display_name === "string" ? row.display_name.slice(0, 100) : "",
+    });
+    if (out.length >= 25) break;
+  }
+  return out;
 }
 
 function parseChannelIds(raw: unknown): string[] {
@@ -127,6 +162,7 @@ function mapJob(row: JobRow | Record<string, unknown>): JobRow | null {
     namespace,
     scope,
     channel_ids,
+    mentions: parseMentions((r as JobRow & { mentions?: unknown }).mentions),
   };
 }
 
@@ -248,8 +284,8 @@ export function enqueueJob(
       .query(
         `INSERT INTO jobs (
            id, discord_message_id, discord_channel_id, discord_thread_id,
-           author_id, namespace, scope, channel_ids, content, lane, status, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+           author_id, namespace, scope, channel_ids, content, mentions, lane, status, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
       )
       .run(
         id,
@@ -261,6 +297,7 @@ export function enqueueJob(
         scope,
         JSON.stringify(channelIds),
         input.content,
+        JSON.stringify(input.mentions ?? []),
         input.lane ?? "interactive",
         now,
         now,

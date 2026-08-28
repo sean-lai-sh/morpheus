@@ -24,6 +24,7 @@ export interface MeetingMentionInput {
   now?: number;
   author?: DiscordIdentity;
   mentioned?: DiscordIdentity[];
+  mentionedRoleIds?: string[];
 }
 
 export interface MeetingMentionResult {
@@ -67,6 +68,7 @@ export function meetingMentionFromMessage(message: Message, botUserId: string): 
         })
       : undefined,
     mentioned,
+    mentionedRoleIds: [...(message.mentions?.roles?.keys?.() ?? [])],
   };
 }
 
@@ -88,15 +90,22 @@ export async function tryHandleMeetingMention(input: MeetingMentionInput): Promi
   });
   if (!gate.ok) return { handled: false, reason: gate.reason };
 
-  const parsed = parseMeetingRequest(input.content, { now: input.now, botUserId: input.botUserId });
+  const parsed = parseMeetingRequest(input.content, {
+    now: input.now,
+    botUserId: input.botUserId,
+    source: "mention",
+  });
   if (!parsed) return { handled: false, reason: "not-meeting" };
 
-  const mentioned = input.mentioned ?? [];
-  const resolvedHints = findUsersByNameHints(parsed.requestedNames).map(identityFromCachedUser);
+  const roleMentioned = (input.mentionedRoleIds ?? []).length > 0 || /<@&\d+>/.test(input.content);
+  const audienceKind = roleMentioned || parsed.audienceKind === "f26_roster" ? "f26_roster" : parsed.audienceKind;
+  const mentioned = audienceKind === "f26_roster" ? [] : (input.mentioned ?? []);
+  const extraUsers = audienceKind === "f26_roster" ? (input.mentioned ?? []) : [];
+  const resolvedHints = audienceKind === "f26_roster" ? [] : findUsersByNameHints(parsed.requestedNames).map(identityFromCachedUser);
   const byId = new Map<string, DiscordIdentity>();
-  for (const person of [...mentioned, ...resolvedHints]) byId.set(person.userId, person);
-  const participants = [...byId.values()];
-  const unresolved = parsed.requestedNames.filter(
+  for (const person of [...mentioned, ...extraUsers, ...resolvedHints]) byId.set(person.userId, person);
+  const participants = audienceKind === "f26_roster" ? extraUsers : [...byId.values()];
+  const unresolved = audienceKind === "f26_roster" ? [] : parsed.requestedNames.filter(
     (name) =>
       !resolvedHints.some((person) =>
         [person.username, person.globalName, person.guildNick].some(
@@ -116,14 +125,17 @@ export async function tryHandleMeetingMention(input: MeetingMentionInput): Promi
       notes: parsed.notes,
       channelId: input.parentChannelId ?? input.discordChannelId,
       participants,
-      calendarTarget: parsed.calendar,
+      calendarTarget: audienceKind === "f26_roster" ? "eboard" : parsed.calendar,
       conference: parsed.conference,
       recurrence: parsed.recurrence,
-      audienceKind: parsed.audienceKind,
+      audienceKind,
       source: "mention",
       sourceMessageId: input.discordMessageId,
       sourceText: parsed.sourceText,
       requestedNames: unresolved,
+      location: parsed.location,
+      recurrenceUntil: parsed.recurrenceUntil,
+      fieldLocks: parsed.locked,
       now: input.now,
     });
     await publishOutboxEvents(result.outboxEvents);

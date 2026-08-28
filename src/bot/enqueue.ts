@@ -19,7 +19,16 @@ import {
   type TypingClient,
   type TypingScheduler,
 } from "./typing.ts";
-import { isMentionTrigger, isReplyToBot, memberRoleIds, mentionUserIds, threadParentId } from "./triggers.ts";
+import { parseCoordinatorJobContent } from "../coordinator/calendar-job.ts";
+import {
+  isMentionTrigger,
+  isReplyToBot,
+  memberRoleIds,
+  mentionUserIds,
+  mentionUsersFromMessage,
+  type JobMentionUser,
+  threadParentId,
+} from "./triggers.ts";
 
 export type { ChannelResolver };
 
@@ -61,6 +70,8 @@ export interface JobCandidate {
   source: JobSource;
   /** Discord `<#id>` / mentions.channels from the trigger. */
   mentionedChannelIds?: string[];
+  /** Resolved Discord user mentions minus the bot. Never emails. */
+  mentions?: JobMentionUser[];
 }
 
 export interface TryEnqueueOpts {
@@ -126,6 +137,7 @@ export function candidateFromMessage(message: Message, botUserId: string): JobCa
     replyToBot: reply,
     source: "mention",
     mentionedChannelIds: mentionChannelIds(message),
+    mentions: mentionUsersFromMessage(message, botUserId),
   };
 }
 
@@ -240,6 +252,7 @@ export async function tryEnqueueJob(
       channelIds,
       content: candidate.content,
       lane,
+      mentions: candidate.mentions,
     },
     now,
   );
@@ -299,7 +312,8 @@ export async function dispatchEnqueuedJob(
 
   let payload: GrokJobPayload;
   try {
-    const snippets = firstPassSnippets(job, 12, opts.resolveChannel ?? getChannel);
+    const calendarPack = parseCoordinatorJobContent(job.content);
+    const snippets = calendarPack ? [] : firstPassSnippets(job, 12, opts.resolveChannel ?? getChannel);
     payload = {
       first_pass: true,
       job: {
@@ -311,9 +325,10 @@ export async function dispatchEnqueuedJob(
         scope: job.scope,
         channel_ids: job.channel_ids,
         content: job.content,
+        mentions: job.mentions ?? [],
       },
       snippets,
-      feed_hint: routeFeedFromText(job.content),
+      feed_hint: calendarPack ? undefined : routeFeedFromText(job.content),
     };
   } catch (err) {
     logger.error({ err, job_id: job.id }, "job dispatch payload build failed; job remains queued");

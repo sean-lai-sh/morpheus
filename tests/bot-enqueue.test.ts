@@ -103,6 +103,18 @@ describe("tryEnqueueJob positives", () => {
     expect(r.job?.status).toBe("queued");
   });
 
+  test("resolved user mentions persist on the job without emails", async () => {
+    const r = await tryEnqueueJob(
+      candidate({
+        discordMessageId: "e-mentions",
+        mentions: [{ id: "555", username: "Shaszis", display_name: "Sean" }],
+      }),
+      policy,
+    );
+    expect(r.job?.mentions).toEqual([{ id: "555", username: "Shaszis", display_name: "Sean" }]);
+    expect(JSON.stringify(r.job)).not.toMatch(/@nyu\.edu/i);
+  });
+
   test("mention in a leadership thread → namespace=leadership (not the thread id, not a default)", async () => {
     const r = await tryEnqueueJob(
       candidate({
@@ -634,7 +646,12 @@ describe("MVP channel scope", () => {
   });
 
   type Captured = {
-    job?: { scope?: string; channel_ids?: string[]; namespace?: string };
+    job?: {
+      scope?: string;
+      channel_ids?: string[];
+      namespace?: string;
+      mentions?: Array<{ id: string; username: string; display_name: string }>;
+    };
     snippets?: Array<{ content: string; path?: string; channelId?: string }>;
   };
 
@@ -675,6 +692,15 @@ describe("MVP channel scope", () => {
     expect(captured.snippets?.some((s) => s.content.includes("general chat"))).toBe(false);
     expect(captured.snippets?.some((s) => s.content.includes("leadership budget"))).toBe(false);
     expect(captured.snippets?.every((s) => !s.path || s.path.startsWith(`${SPONSORS_PATH}/`))).toBe(true);
+  });
+
+  test("resolved mentions.users ride along on the generic job pack", async () => {
+    const { captured } = await dispatchScope({
+      discordMessageId: "scope-user-mentions",
+      mentions: [{ id: "555", username: "Shaszis", display_name: "Sean" }],
+    });
+    expect(captured.job?.mentions).toEqual([{ id: "555", username: "Shaszis", display_name: "Sean" }]);
+    expect(JSON.stringify(captured)).not.toMatch(/@nyu\.edu/i);
   });
 
   test("eboard @bot mentioning a same-workspace channel with ViewChannel → both", async () => {

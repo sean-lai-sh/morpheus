@@ -14,8 +14,8 @@ Role gate is the same fail-closed `JOB_TRIGGER_ROLE_IDS` set as `/ask` / `/backg
 
 ## Two doors, one tool
 
-1. **`/meet create`** — Discord options + MentionableSelectMenu (users **or** roles, max 25). Optional: `calendar` (eboard \| leadership), `meet` (Meet on/off), `recurrence` (none \| weekly), `audience` (`picker` \| `f26`). `f26` skips the picker and means “invite the F26 roster tab.”
-2. **`@official-bot` free text** — same outbox → `meeting.calendar_sync` job. Examples: “book eboard Friday 6:30 ET”, “meet with Pope and Jennifer tomorrow 3pm”. Mini parses what it can; `source_text` is always in the pack so Grok can refine.
+1. **`/meet create`** — Discord options + MentionableSelectMenu (users **or** roles, max 25). Optional: `calendar` (eboard \| leadership), `meet` (Meet on/off), `recurrence` (none \| weekly), `audience` (`picker` \| `f26`), `location` (default TBD). `f26` skips the picker. A **role** in the picker means F26 Preferred Emails — Mini does **not** expand Discord role members. Explicit users only → `audience=picked`. Slash **locks** title, start, duration, timezone, calendar, recurrence, location, conference, and attendees so Grok does not re-guess them.
+2. **`@official-bot` free text** — same outbox → `meeting.calendar_sync` job. Examples: “book eboard Friday 6:30 ET”, “meet with Pope and Jennifer tomorrow 3pm”, “make a cal invite for Sept 4 EST 6-8pm and invite the Eboard role via the F26 contact sheet”. Role mention (`<@&1203562091500404782>` — same id as `JOB_TRIGGER_ROLE_IDS` Eboard) + sheet URL / gid `1079418365` means **whole F26 tab**, not Discord member expansion and not Disc-handle resolution.
 
 Both write `outbox_events` (`meeting.calendar_sync_requested` / `meeting.calendar_cancel_requested`). The publisher POSTs a `jobs` row to `GROK_BOT_WEBHOOK_URL` on the **background** lane (always Grok, never the local SDK). Complete is `/v1/jobs/:id/complete` as today.
 
@@ -34,11 +34,15 @@ Both write `outbox_events` (`meeting.calendar_sync_requested` / `meeting.calenda
   "endsAt": "2026-09-04T23:30:00.000Z",
   "timeZone": "America/New_York",
   "notes": null,
+  "location": "TBD",
   "calendar": "eboard",
   "calendar_id": "c_9933b833e4985f99fdaf9ce9b7ef54b7bbc478e506c9e83e99743697b82863fb@group.calendar.google.com",
   "conference": true,
   "recurrence": "weekly",
+  "recurrence_until": "2026-12-15",
+  "notify": "all",
   "audience": "f26_roster",
+  "locked": ["title", "start", "duration", "timezone", "calendar", "recurrence", "location", "conference", "attendees"],
   "requester": {
     "user_id": "123",
     "username": "Shaszis",
@@ -62,8 +66,13 @@ Both write `outbox_events` (`meeting.calendar_sync_requested` / `meeting.calenda
   "mapper": {
     "sheet_id": "1NlApvtFAhFTMNafGoVksrYpJhi_oz5dlA6pml5VQ3rw",
     "tab": "F26",
+    "tab_gid": "1079418365",
+    "fallback_tab": "S26",
     "match_order": ["disc", "username", "first_last"],
-    "empty_disc_fallback": "first_last"
+    "empty_disc_fallback": "first_last",
+    "optional_from": ["Position", "S27 Abroad?"],
+    "optional_names": ["Cyan Yan", "Kaylee Chen", "Grace Gao"],
+    "required_despite_abroad": ["Haley Ngai"]
   },
   "instruction": "…"
 }
@@ -78,18 +87,34 @@ Both write `outbox_events` (`meeting.calendar_sync_requested` / `meeting.calenda
 | `eboard` | `c_9933b833e4985f99fdaf9ce9b7ef54b7bbc478e506c9e83e99743697b82863fb@group.calendar.google.com` |
 | `leadership` | hello@ **primary** (`calendar_id`: `primary`) |
 
-Historical job `1a493bac` used the Eboard Calendar, Fridays 6:30–7:30pm `America/New_York` through Dec 14, Meet `https://meet.google.com/vef-zicw-ozo`, event `883hrtefrla9anp17crkpcof1o`.
+Write **only** that calendar. Do not also create the event on hello@ primary or Leadership.
+
+Real job `1a493bac`: “make a cal invite for Sept 4 EST 6-8pm and invite the Eboard Discord role `<@&1203562091500404782>` via the F26 contact sheet (gid 1079418365).” NL invited every F26 Preferred Email (29 people). It did **not** resolve role members or Disc handles. First shot was 18:00–20:00 one-off on the Eboard Calendar; weekly reshape `5a0f8dd7` replaced it with 18:30–19:30 weekly UNTIL 2026-12-15, location TBD, Meet on, notify ALL.
 
 ### `audience`
 
-- `picked` — invite only people Grok can map from `participants` + `requested_names` (plus requester if you want the booker on the event).
-- `f26_roster` — **do not** wait for a Discord picker. Invite every F26 **Preferred Email** from the roster tab. Optional senior advs (Cyan Yan, Kaylee Chen, Grace Gao) if that is still eboard policy — resolve them on Grok from the sheet, not from Mini.
+- `picked` — invite only people Grok can map from `participants` + `requested_names` (plus requester if you want the booker on the event). Explicit `/meet` user picks only.
+- `f26_roster` — invite **every F26 Preferred Email** from tab F26 (gid `1079418365`). S26 is the fallback tab (same Disc column). Do not expand a Discord role. Do not wait for Disc handles in the pack. `participants` may be empty or hold extra explicit user identities; they are not the invite list.
+
+### `locked`
+
+When `locked` includes a field, use the packed value. Do not re-parse `source_text` for title, start, duration, timezone, calendar, recurrence, location, Meet on/off, or attendees.
+
+### `notify` / Meet / location
+
+- `notify`: always `all` (Calendar send-updates ALL).
+- `conference: true` → `addGoogleMeetUrl` true.
+- `location` defaults to `TBD`.
 
 ## Roster mapper (Grok + Drive)
 
 Sheet: https://docs.google.com/spreadsheets/d/1NlApvtFAhFTMNafGoVksrYpJhi_oz5dlA6pml5VQ3rw
 
+F26 tab gid `1079418365`. Fallback tab `S26` has the same Disc column.
+
 F26 columns: `First Name | Last Name | Preferred Email | Phone Number | Position | Fall '26 Year | Major | Previous Role | S27 Abroad? | Disc | Birthday`
+
+Optional vs required (from Position / S27 Abroad? on weekly reshape `5a0f8dd7`): **optional** Cyan Yan, Kaylee Chen, Grace Gao. **Haley Ngai** is also F26-abroad but stays **required**. Resolve that on Grok from the sheet — Mini never packs emails.
 
 `Disc` is a Discord **username/handle**, not a snowflake.
 

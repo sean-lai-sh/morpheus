@@ -82,7 +82,8 @@ Ported from [techmate](https://github.com/fahimmehraj/techmate) as a Mini-side s
 - `/task` and `/meet` register next to `/ask` and `/background`. Create is fail-closed on `JOB_TRIGGER_ROLE_IDS` and allowlisted channels.
 - Task reminder DMs are sent by the official discord.js bot (Mini holds `DISCORD_BOT_TOKEN`). Grok never gets that token.
 - **One meeting tool, two doors:** `/meet create` (options + MentionableSelectMenu) and `@official-bot` free-text. Both write `meeting.calendar_sync_requested` and the same Grok pack.
-- Calendar create/cancel stays on Grok as `hello@techatnyu.org`. The pack is JSON: times, calendar target, Discord identities (`user_id`, `username`, `global_name`, `guild_nick`), optional `requested_names`, `audience=f26_roster` for the sheet — **never emails, never the bot token**.
+- Calendar create/cancel stays on Grok as `hello@techatnyu.org` writing the **Eboard Calendar** for F26/role jobs. The pack is JSON: times, locked fields, location TBD, notify ALL, Discord identities, `audience=f26_roster` = every F26 Preferred Email (role mention is not member expansion) — **never emails, never the bot token**.
+- Generic jobs also carry resolved `mentions.users` as `{id, username, display_name}` (minus the bot). Calendar jobs skip FTS snippets and stay on the background lane.
 - Complete parses `{calendar_event_id, meet_link}` (or `{cancelled:true}`). Mini replies with the Meet link when the job is tied to a real Discord message.
 - Grok-side mapper + calendar ids: [`docs/meetings-grok-contract.md`](meetings-grok-contract.md).
 - `outbox_events` is written in the same SQLite transaction as the mutation. Calendar jobs use the **background** lane (always Grok). `bun run live` tries an immediate 1.5s dispatch, then a minute-level in-process sweeper recovers `pending` rows.

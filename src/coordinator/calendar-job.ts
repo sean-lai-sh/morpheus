@@ -12,6 +12,12 @@ import {
   type MeetingSource,
   type PackedDiscordIdentity,
 } from "./identity.ts";
+import {
+  DEFAULT_MEETING_LOCATION,
+  SLASH_LOCKED_FIELDS,
+  WEEKLY_UNTIL_DEFAULT,
+  type MeetingLockedField,
+} from "./meeting-request.ts";
 
 export const CALENDAR_SYNC_KIND = "meeting.calendar_sync" as const;
 export const CALENDAR_CANCEL_KIND = "meeting.calendar_cancel" as const;
@@ -25,6 +31,12 @@ export const LEADERSHIP_CALENDAR_ID = "primary";
 
 export const ROSTER_SHEET_ID = "1NlApvtFAhFTMNafGoVksrYpJhi_oz5dlA6pml5VQ3rw";
 export const ROSTER_TAB = "F26";
+export const ROSTER_TAB_GID = "1079418365";
+export const ROSTER_FALLBACK_TAB = "S26";
+export const OPTIONAL_ABROAD_NAMES = ["Cyan Yan", "Kaylee Chen", "Grace Gao"] as const;
+export const REQUIRED_DESPITE_ABROAD = ["Haley Ngai"] as const;
+export { DEFAULT_MEETING_LOCATION, SLASH_LOCKED_FIELDS, WEEKLY_UNTIL_DEFAULT };
+export type { MeetingLockedField };
 
 export interface CalendarJobPack {
   kind: CalendarJobKind;
@@ -36,10 +48,13 @@ export interface CalendarJobPack {
   endsAt: string;
   timeZone: string;
   notes: string | null;
+  location: string;
   calendar: CalendarTarget;
   calendar_id: string;
   conference: boolean;
   recurrence: MeetingRecurrence;
+  recurrence_until: string | null;
+  notify: "all";
   audience: MeetingAudienceKind;
   requester: PackedDiscordIdentity;
   participants: PackedDiscordIdentity[];
@@ -49,11 +64,17 @@ export interface CalendarJobPack {
   source_message_id: string | null;
   participantCount: number;
   calendarEventId: string | null;
+  locked: MeetingLockedField[];
   mapper: {
     sheet_id: string;
     tab: string;
+    tab_gid: string;
+    fallback_tab: string;
     match_order: ["disc", "username", "first_last"];
     empty_disc_fallback: "first_last";
+    optional_from: ["Position", "S27 Abroad?"];
+    optional_names: readonly string[];
+    required_despite_abroad: readonly string[];
   };
   instruction: string;
 }
@@ -82,10 +103,10 @@ export function parseCoordinatorJobContent(content: string): CalendarJobPack | n
 }
 
 const MAPPER_HINT =
-  "Map attendees on Grok via Drive roster sheet 1NlApvtFAhFTMNafGoVksrYpJhi_oz5dlA6pml5VQ3rw tab F26: Disc handle, then username, then First+Last vs guild_nick/global_name. Empty Disc → First+Last. audience=f26_roster means invite every F26 Preferred Email (optional senior advs), not the picker. Never expect emails in this pack.";
+  "Map attendees on Grok via Drive roster sheet 1NlApvtFAhFTMNafGoVksrYpJhi_oz5dlA6pml5VQ3rw tab F26 (gid 1079418365; fallback tab S26 has the same Disc column): Disc handle, then username, then First+Last vs guild_nick/global_name. Empty Disc → First+Last. audience=f26_roster means invite every F26 Preferred Email (the whole tab — 29 people on the real 1a493bac job), not Discord role members and not Disc-handle expansion. Role mention + sheet URL is the whole F26 tab. Mark Cyan Yan, Kaylee Chen, Grace Gao optional from Position / S27 Abroad?; Haley Ngai stays required even if abroad. Never expect emails in this pack. locked fields must not be re-guessed from source_text.";
 
 const SYNC_INSTRUCTION =
-  `Create or update the Google Calendar event as hello@techatnyu.org. calendar=eboard writes the Eboard Calendar (${EBOARD_CALENDAR_ID}); calendar=leadership writes hello@ primary. Request a Google Meet conference unless conference=false. Recurrence weekly uses America/New_York through the F26 term (default until 2026-12-14) unless source_text says otherwise. ${MAPPER_HINT} Then complete this job with JSON only: {"calendar_event_id":"...","meet_link":"https://meet.google.com/..."}. Do not include attendee emails in the complete reply. Mini does not hold Google secrets.`;
+  `Create or update the Google Calendar event as hello@techatnyu.org. Write ONLY the calendar named by calendar_id — eboard is the Tech@NYU Eboard Calendar (${EBOARD_CALENDAR_ID}), never hello@ primary or Leadership unless calendar=leadership. Request a Google Meet conference (addGoogleMeetUrl) unless conference=false. Send notifications to ALL attendees (notify=all). Recurrence weekly uses America/New_York until recurrence_until (default ${WEEKLY_UNTIL_DEFAULT}) unless a locked start/duration says otherwise. Location defaults to TBD. ${MAPPER_HINT} Then complete this job with JSON only: {"calendar_event_id":"...","meet_link":"https://meet.google.com/..."}. Do not include attendee emails in the complete reply. Mini does not hold Google secrets.`;
 
 const CANCEL_INSTRUCTION =
   `Cancel the Google Calendar event as hello@techatnyu.org using calendar_event_id when present (eboard calendar vs hello@ primary per calendar). Then complete this job with JSON only: {"cancelled":true}. Do not include attendee emails. Mini does not hold Google secrets.`;
@@ -117,7 +138,11 @@ export function buildCalendarJobPack(input: {
     | "createdByUsername"
     | "createdByGlobalName"
     | "createdByGuildNick"
-  >;
+  > & {
+    location?: string | null;
+    recurrenceUntil?: string | null;
+    fieldLocks?: MeetingLockedField[];
+  };
   outboxId: string;
   version: number;
   participants?: DiscordIdentity[];
@@ -136,6 +161,17 @@ export function buildCalendarJobPack(input: {
   const notes = meeting.notes ? stripEmails(meeting.notes) : null;
   const sourceText = meeting.sourceText ? stripEmails(meeting.sourceText) : null;
   const requested = (meeting.requestedNames ?? []).map((name) => stripEmails(name)).filter(Boolean);
+  const location = stripEmails(meeting.location?.trim() || DEFAULT_MEETING_LOCATION).slice(0, 80);
+  const recurrenceUntil =
+    meeting.recurrence === "weekly"
+      ? meeting.recurrenceUntil?.trim() || WEEKLY_UNTIL_DEFAULT
+      : meeting.recurrenceUntil?.trim() || null;
+  const locked =
+    meeting.fieldLocks && meeting.fieldLocks.length > 0
+      ? meeting.fieldLocks
+      : meeting.source === "slash"
+        ? [...SLASH_LOCKED_FIELDS]
+        : [];
   return {
     kind: input.kind,
     meetingId: meeting.id,
@@ -146,10 +182,13 @@ export function buildCalendarJobPack(input: {
     endsAt: new Date(meeting.endsAt).toISOString(),
     timeZone: meeting.timeZone,
     notes,
+    location,
     calendar: meeting.calendarTarget,
     calendar_id: calendarIdFor(meeting.calendarTarget),
     conference: meeting.conference,
     recurrence: meeting.recurrence,
+    recurrence_until: recurrenceUntil,
+    notify: "all",
     audience: meeting.audienceKind,
     requester,
     participants,
@@ -159,11 +198,17 @@ export function buildCalendarJobPack(input: {
     source_message_id: meeting.sourceMessageId,
     participantCount: participants.length,
     calendarEventId: meeting.calendarEventId,
+    locked,
     mapper: {
       sheet_id: ROSTER_SHEET_ID,
       tab: ROSTER_TAB,
+      tab_gid: ROSTER_TAB_GID,
+      fallback_tab: ROSTER_FALLBACK_TAB,
       match_order: ["disc", "username", "first_last"],
       empty_disc_fallback: "first_last",
+      optional_from: ["Position", "S27 Abroad?"],
+      optional_names: OPTIONAL_ABROAD_NAMES,
+      required_despite_abroad: REQUIRED_DESPITE_ABROAD,
     },
     instruction: input.kind === CALENDAR_SYNC_KIND ? SYNC_INSTRUCTION : CANCEL_INSTRUCTION,
   };

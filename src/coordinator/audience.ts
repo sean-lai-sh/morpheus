@@ -1,4 +1,5 @@
 import type { Guild, GuildMember } from "discord.js";
+import type { MeetingAudienceKind } from "./identity.ts";
 
 export type AudienceSelection =
   | { kind: "user"; id: string; displayName: string }
@@ -42,6 +43,24 @@ export async function membersWithRole(guild: Guild, roleId: string): Promise<Gui
     role = guild.roles.cache.get(roleId) ?? role;
   }
   return [...role.members.values()].filter((member) => !member.user.bot);
+}
+
+/**
+ * Meeting picker: a role means F26 Preferred Emails (whole tab), not Discord
+ * member expansion. Tasks still use expandAudience.
+ */
+export function meetingAudienceFromSelections(selections: AudienceSelection[]): {
+  audienceKind: MeetingAudienceKind;
+  userSelections: Extract<AudienceSelection, { kind: "user" }>[];
+} {
+  const userSelections = selections.filter((selection): selection is Extract<AudienceSelection, { kind: "user" }> => {
+    return selection.kind === "user";
+  });
+  const hasRole = selections.some((selection) => selection.kind === "role");
+  return {
+    audienceKind: hasRole ? "f26_roster" : "picked",
+    userSelections,
+  };
 }
 
 /** Expand Discord users + roles at create time and snapshot membership. */

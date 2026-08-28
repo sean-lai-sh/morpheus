@@ -5,6 +5,12 @@ import type {
   MeetingRecurrence,
   MeetingSource,
 } from "../coordinator/identity.ts";
+import {
+  DEFAULT_MEETING_LOCATION,
+  SLASH_LOCKED_FIELDS,
+  WEEKLY_UNTIL_DEFAULT,
+  type MeetingLockedField,
+} from "../coordinator/meeting-request.ts";
 import { displayNameOf } from "../coordinator/identity.ts";
 import { getDb } from "./db.ts";
 import { insertOutboxEvent, type OutboxEvent } from "./outbox.ts";
@@ -35,6 +41,9 @@ export interface MeetingRow {
   sourceMessageId: string | null;
   sourceText: string | null;
   requestedNames: string[];
+  location: string;
+  recurrenceUntil: string | null;
+  fieldLocks: MeetingLockedField[];
   announcedAt: number | null;
   hourReminderAt: number | null;
   hourReminderSentAt: number | null;
@@ -84,6 +93,9 @@ interface MeetingDbRow {
   source_message_id: string | null;
   source_text: string | null;
   requested_names: string | null;
+  location: string | null;
+  recurrence_until: string | null;
+  field_locks: string | null;
   announced_at: number | null;
   hour_reminder_at: number | null;
   hour_reminder_sent_at: number | null;
@@ -99,6 +111,19 @@ function parseRequestedNames(raw: string | null): string[] {
     return parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
   } catch {
     return [];
+  }
+}
+
+const LOCKED_FIELD_SET = new Set<string>(SLASH_LOCKED_FIELDS);
+
+function parseFieldLocks(raw: string | null, source: MeetingSource): MeetingLockedField[] {
+  if (!raw) return source === "slash" ? [...SLASH_LOCKED_FIELDS] : [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return source === "slash" ? [...SLASH_LOCKED_FIELDS] : [];
+    return parsed.filter((value): value is MeetingLockedField => typeof value === "string" && LOCKED_FIELD_SET.has(value));
+  } catch {
+    return source === "slash" ? [...SLASH_LOCKED_FIELDS] : [];
   }
 }
 
@@ -129,6 +154,9 @@ function mapMeeting(row: MeetingDbRow): MeetingRow {
     sourceMessageId: row.source_message_id ?? null,
     sourceText: row.source_text ?? null,
     requestedNames: parseRequestedNames(row.requested_names),
+    location: row.location?.trim() || DEFAULT_MEETING_LOCATION,
+    recurrenceUntil: row.recurrence_until?.trim() || (row.recurrence === "weekly" ? WEEKLY_UNTIL_DEFAULT : null),
+    fieldLocks: parseFieldLocks(row.field_locks, row.source === "mention" ? "mention" : "slash"),
     announcedAt: row.announced_at,
     hourReminderAt: row.hour_reminder_at,
     hourReminderSentAt: row.hour_reminder_sent_at,
@@ -171,6 +199,9 @@ export function createScheduledMeeting(input: {
   sourceMessageId?: string | null;
   sourceText?: string | null;
   requestedNames?: string[];
+  location?: string | null;
+  recurrenceUntil?: string | null;
+  fieldLocks?: MeetingLockedField[];
   now?: number;
 }): { meeting: MeetingRow; outboxEvents: OutboxEvent[] } {
   const now = input.now ?? Date.now();
@@ -187,6 +218,17 @@ export function createScheduledMeeting(input: {
   }
   const endsAt = input.startsAt + input.durationMinutes * 60_000;
   const timeZone = input.timeZone?.trim() || "America/New_York";
+  const recurrence = input.recurrence ?? "none";
+  const source = input.source ?? "slash";
+  const location = input.location?.trim() || DEFAULT_MEETING_LOCATION;
+  const recurrenceUntil =
+    recurrence === "weekly" ? input.recurrenceUntil?.trim() || WEEKLY_UNTIL_DEFAULT : input.recurrenceUntil?.trim() || null;
+  const fieldLocks =
+    input.fieldLocks && input.fieldLocks.length > 0
+      ? input.fieldLocks
+      : source === "slash"
+        ? [...SLASH_LOCKED_FIELDS]
+        : [];
   const id = input.id ?? crypto.randomUUID();
   const hourReminderAt = input.startsAt - HOUR_MS;
   const creator = input.createdBy;
@@ -198,8 +240,9 @@ export function createScheduledMeeting(input: {
            id, created_by_user_id, created_by_username, created_by_global_name, created_by_guild_nick,
            title, starts_at, ends_at, time_zone, notes, status, version,
            channel_id, hour_reminder_at, calendar_target, conference, recurrence, audience_kind,
-           source, source_message_id, source_text, requested_names, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           source, source_message_id, source_text, requested_names, location, recurrence_until,
+           field_locks, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -216,12 +259,15 @@ export function createScheduledMeeting(input: {
         hourReminderAt,
         input.calendarTarget ?? "eboard",
         input.conference === false ? 0 : 1,
-        input.recurrence ?? "none",
+        recurrence,
         audienceKind,
-        input.source ?? "slash",
+        source,
         input.sourceMessageId ?? null,
         input.sourceText?.trim() || null,
         JSON.stringify(input.requestedNames ?? []),
+        location,
+        recurrenceUntil,
+        JSON.stringify(fieldLocks),
         now,
         now,
       );

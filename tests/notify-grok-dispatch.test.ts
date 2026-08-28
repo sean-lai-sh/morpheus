@@ -617,6 +617,27 @@ describe("capGrokPayload", () => {
     expect(capped.snippets).toEqual([]);
   });
 
+  test("keeps resolved user mentions and strips emails from display names", () => {
+    const capped = capGrokPayload(
+      {
+        job: {
+          id: "j-mentions",
+          namespace: EBOARD,
+          content: "book me and <@555>",
+          mentions: [
+            { id: "555", username: "Shaszis", display_name: "Sean fh2419@nyu.edu" },
+            { id: "not-a-snowflake", username: "x", display_name: "nope" },
+          ],
+        },
+        snippets: [],
+        first_pass: true,
+      },
+      envFor(),
+    );
+    expect(capped.job.mentions).toEqual([{ id: "555", username: "Shaszis", display_name: "Sean" }]);
+    expect(JSON.stringify(capped)).not.toMatch(/@nyu\.edu/i);
+  });
+
   test("drops pathless channel-scope snippets when channel_ids is set", () => {
     const capped = capGrokPayload(
       {

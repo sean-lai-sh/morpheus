@@ -91,6 +91,8 @@ describe("meetings outbox", () => {
       source: "mention",
     });
     expect(result.meeting.audienceKind).toBe("f26_roster");
+    expect(result.meeting.location).toBe("TBD");
+    expect(result.meeting.recurrenceUntil).toBe("2026-12-15");
     expect(result.outboxEvents[0]?.type).toBe("meeting.calendar_sync_requested");
   });
 

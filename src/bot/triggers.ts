@@ -53,3 +53,40 @@ export function mentionUserIds(message: Pick<Message, "mentions"> | { mentions?:
   if (!users) return [];
   return [...users.keys()];
 }
+
+export interface JobMentionUser {
+  id: string;
+  username: string;
+  display_name: string;
+}
+
+/** Resolved Discord user mentions minus the bot. Never emails. */
+export function mentionUsersFromMessage(
+  message: {
+    mentions?: {
+      users?: {
+        values?: () => Iterable<{
+          id: string;
+          bot?: boolean;
+          username?: string | null;
+          globalName?: string | null;
+        }>;
+      };
+    };
+    guild?: { members?: { cache?: { get?: (id: string) => { displayName?: string | null } | undefined } } } | null;
+  },
+  botUserId: string,
+): JobMentionUser[] {
+  const values = message.mentions?.users?.values?.();
+  if (!values) return [];
+  const out: JobMentionUser[] = [];
+  for (const user of values) {
+    if (!user?.id || user.id === botUserId || user.bot) continue;
+    const member = message.guild?.members?.cache?.get?.(user.id);
+    const username = (user.username ?? "").trim().slice(0, 100);
+    const display = (member?.displayName ?? user.globalName ?? user.username ?? "").trim().slice(0, 100);
+    out.push({ id: user.id, username, display_name: display });
+    if (out.length >= 25) break;
+  }
+  return out;
+}

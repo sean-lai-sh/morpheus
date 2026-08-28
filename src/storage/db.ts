@@ -153,6 +153,7 @@ function migrateAlter(db: Database): void {
   // /background (Grok) caps cannot starve each other.
   // Pre-existing rows default to 'interactive', which is what they were.
   try { db.exec(`ALTER TABLE jobs ADD COLUMN lane TEXT NOT NULL DEFAULT 'interactive'`); } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE jobs ADD COLUMN mentions TEXT`); } catch { /* already exists */ }
   // Mini weekday digest idempotency: one successful post per calendar day + channel (#76).
   db.exec(`
     CREATE TABLE IF NOT EXISTS digest_posts (
@@ -289,6 +290,9 @@ function migrateCoordinator(db: Database): void {
     `ALTER TABLE meeting_participants ADD COLUMN username TEXT`,
     `ALTER TABLE meeting_participants ADD COLUMN global_name TEXT`,
     `ALTER TABLE meeting_participants ADD COLUMN guild_nick TEXT`,
+    `ALTER TABLE meetings ADD COLUMN location TEXT`,
+    `ALTER TABLE meetings ADD COLUMN recurrence_until TEXT`,
+    `ALTER TABLE meetings ADD COLUMN field_locks TEXT`,
   ]) {
     try {
       db.exec(sql);

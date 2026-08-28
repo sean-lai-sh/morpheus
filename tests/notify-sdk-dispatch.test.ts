@@ -365,6 +365,7 @@ describe("dispatchEnqueuedJob lane routing", () => {
       scope: "channel",
       channel_ids: [SPONSORS],
       content: "summarize sponsors",
+      mentions: [],
       status: "queued",
       claimed_by: null,
       claimed_at: null,
@@ -434,6 +435,25 @@ describe("dispatchEnqueuedJob lane routing", () => {
     expect(grok.posts.length).toBe(1);
     expect(grok.posts[0]!.url).toBe(GROK_URL);
     expect(sdk.posts.length).toBe(0);
+  });
+
+  test("calendar_sync job content skips FTS snippets and keeps background", async () => {
+    const grok = countingPoster();
+    const row = jobRow("r-cal-fts");
+    row.content = JSON.stringify({
+      kind: "meeting.calendar_sync",
+      meetingId: "meet-fts",
+      version: 1,
+    });
+    const result = await dispatchEnqueuedJob(row, {
+      lane: "background",
+      env: bothConfigured(),
+      poster: grok.poster,
+    });
+    expect(result.dispatched).toBe(true);
+    const body = grok.posts[0]!.body as GrokJobPayload;
+    expect(body.snippets).toEqual([]);
+    expect(body.feed_hint).toBeUndefined();
   });
 
   test("flag off: background lane goes to Grok (as today)", async () => {

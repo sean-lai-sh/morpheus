@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ChannelType } from "discord.js";
-import { isMentionTrigger, isReplyToBot, threadParentId } from "../src/bot/triggers.ts";
+import { isMentionTrigger, isReplyToBot, mentionUsersFromMessage, threadParentId } from "../src/bot/triggers.ts";
 
 const BOT = "123456789012345678";
 
@@ -79,5 +79,24 @@ describe("threadParentId", () => {
 
   test("null for a guild text channel", () => {
     expect(threadParentId({ channel: { type: ChannelType.GuildText } })).toBeNull();
+  });
+});
+
+describe("mentionUsersFromMessage", () => {
+  test("drops the bot and other bots; keeps id/username/display_name only", () => {
+    const users = new Map([
+      [BOT, { id: BOT, bot: true, username: "Morpheus", globalName: "Morpheus" }],
+      ["555", { id: "555", bot: false, username: "Shaszis", globalName: "Sean Lai" }],
+      ["556", { id: "556", bot: true, username: "otherbot", globalName: "Other" }],
+    ]);
+    const packed = mentionUsersFromMessage(
+      {
+        mentions: { users: { values: () => users.values() } },
+        guild: { members: { cache: { get: (id: string) => (id === "555" ? { displayName: "Sean" } : undefined) } } },
+      },
+      BOT,
+    );
+    expect(packed).toEqual([{ id: "555", username: "Shaszis", display_name: "Sean" }]);
+    expect(JSON.stringify(packed)).not.toMatch(/@nyu\.edu/i);
   });
 });

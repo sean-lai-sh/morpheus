@@ -75,6 +75,26 @@ describe("mention meeting door", () => {
     expect(outbox?.n).toBe(1);
   });
 
+  test("role mention + F26 sheet is roster with empty participants", async () => {
+    const result = await mention({
+      content:
+        "<@bot> make a cal invite for Sept 4 EST 6-8pm and invite the Eboard Discord role <@&1203562091500404782> via the F26 contact sheet (gid 1079418365)",
+      discordMessageId: "1400000000000000003",
+      mentionedRoleIds: ["1203562091500404782"],
+      mentioned: [],
+    });
+    expect(result.handled).toBe(true);
+    const meeting = getMeeting(result.meetingId!);
+    expect(meeting?.audienceKind).toBe("f26_roster");
+    expect(meeting?.calendarTarget).toBe("eboard");
+    expect(meeting?.recurrence).toBe("none");
+    expect(meeting?.location).toBe("TBD");
+    expect((meeting!.endsAt - meeting!.startsAt) / 60_000).toBe(120);
+    expect(getMeetingParticipants(meeting!.id)).toEqual([]);
+    expect(meeting?.requestedNames).toEqual([]);
+    expect(JSON.stringify(meeting)).not.toMatch(/@nyu\.edu/i);
+  });
+
   test("named people resolve from users cache without packing emails", async () => {
     const result = await mention({
       content: "<@bot> meet with Pope and Jennifer tomorrow 3pm",

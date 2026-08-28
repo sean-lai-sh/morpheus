@@ -289,9 +289,57 @@ describe("calendar job pack", () => {
     const parsed = JSON.parse(serializeCalendarJobPack(pack));
     expect(parsed.audience).toBe("f26_roster");
     expect(parsed.recurrence).toBe("weekly");
+    expect(parsed.recurrence_until).toBe("2026-12-15");
+    expect(parsed.location).toBe("TBD");
+    expect(parsed.notify).toBe("all");
     expect(parsed.participants).toEqual([]);
-    expect(parsed.calendar_id).toContain("@group.calendar.google.com");
+    expect(parsed.calendar_id).toBe(
+      "c_9933b833e4985f99fdaf9ce9b7ef54b7bbc478e506c9e83e99743697b82863fb@group.calendar.google.com",
+    );
+    expect(parsed.mapper.tab_gid).toBe("1079418365");
+    expect(parsed.mapper.fallback_tab).toBe("S26");
+    expect(parsed.mapper.optional_names).toEqual(["Cyan Yan", "Kaylee Chen", "Grace Gao"]);
+    expect(parsed.mapper.required_despite_abroad).toEqual(["Haley Ngai"]);
+    expect(parsed.instruction).toMatch(/never hello@ primary/i);
     expect(JSON.stringify(parsed)).not.toMatch(/@nyu\.edu/i);
+  });
+
+  test("slash pack locks the fields NL guessed on the real job", () => {
+    const pack = buildCalendarJobPack({
+      kind: "meeting.calendar_sync",
+      meeting: sampleMeeting({
+        source: "slash",
+        location: "TBD",
+        recurrence: "weekly",
+        recurrenceUntil: "2026-12-15",
+        fieldLocks: [
+          "title",
+          "start",
+          "duration",
+          "timezone",
+          "calendar",
+          "recurrence",
+          "location",
+          "conference",
+          "attendees",
+        ],
+      }),
+      outboxId: "outbox-locked",
+      version: 1,
+    });
+    expect(pack.locked).toEqual([
+      "title",
+      "start",
+      "duration",
+      "timezone",
+      "calendar",
+      "recurrence",
+      "location",
+      "conference",
+      "attendees",
+    ]);
+    expect(pack.notify).toBe("all");
+    expect(JSON.stringify(pack)).not.toMatch(/@nyu\.edu/i);
   });
 });
 
