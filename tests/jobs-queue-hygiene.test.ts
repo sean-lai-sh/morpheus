@@ -7,7 +7,9 @@ import {
   countOutstandingJobs,
   enqueueJob,
   getJob,
+  requeueExpiredClaims,
 } from "../src/storage/jobs.ts";
+import { coordinatorJobMessageId } from "../src/coordinator/calendar-job.ts";
 
 const db = withTempDb();
 let cfg: ReturnType<typeof withWorkspaceConfig>;
@@ -73,5 +75,51 @@ describe("cancelStaleQueuedJobs", () => {
     queue("hyg-idem", DEV_CHAT, "author-idem", now - 3 * HOUR);
     expect(cancelStaleQueuedJobs(now, HOUR)).toBe(1);
     expect(cancelStaleQueuedJobs(now, HOUR)).toBe(0);
+  });
+
+  test("does not cancel a job the lease sweeper just requeued", () => {
+    // Both sweepers run back-to-back in the same 30s tick (src/crawler/live.ts).
+    // requeueExpiredClaims moves claimed -> queued WITHOUT touching created_at, so
+    // on age alone this row looks ancient and would be cancelled one statement
+    // later — with an error claiming no worker ever took it, which is false.
+    const now = Date.now();
+    const requeued = queue("hyg-requeued", DEV_CHAT, "author-requeued", now - 5 * HOUR);
+    expect(claimJob(requeued.id, "grok-eboard", now - 4 * HOUR)?.status).toBe("claimed");
+
+    // Lease expired long ago → back to queued, updated_at = now, claimed_by cleared.
+    expect(requeueExpiredClaims(now, HOUR)).toBe(1);
+    expect(getJob(requeued.id)?.status).toBe("queued");
+
+    // Same tick, immediately after: the retry must survive to be dispatched again.
+    expect(cancelStaleQueuedJobs(now, HOUR)).toBe(0);
+    const after = getJob(requeued.id);
+    expect(after?.status).toBe("queued");
+    expect(after?.error).toBeNull();
+    // Still outstanding — the author's slot stays held while the retry is pending.
+    expect(countOutstandingJobs("author-requeued", DEV_CHAT)).toBe(1);
+  });
+
+  test("skips coordinator outbox jobs while still cancelling ordinary ones", () => {
+    // Coordinator/Calendar jobs belong to the outbox retry sweeper in
+    // src/coordinator/publisher.ts. Cancelling one here, with its outbox row
+    // already marked dispatched, silently drops a Calendar handoff.
+    const now = Date.now();
+    const coord = queue(
+      coordinatorJobMessageId("outbox-hyg-1"),
+      SPONSORS,
+      "author-coord",
+      now - 3 * HOUR,
+    );
+    const ordinary = queue("hyg-ordinary-old", SPONSORS, "author-ordinary", now - 3 * HOUR);
+
+    // Exactly one row swept — proves the skip is selective, not the sweeper failing.
+    expect(cancelStaleQueuedJobs(now, HOUR)).toBe(1);
+    expect(getJob(coord.id)?.status).toBe("queued");
+    expect(getJob(coord.id)?.error).toBeNull();
+    expect(getJob(ordinary.id)?.status).toBe("cancelled");
+    expect(getJob(ordinary.id)?.error).toContain("stale");
+    // The outbox job keeps its slot; the ordinary one gives its slot back.
+    expect(countOutstandingJobs("author-coord", SPONSORS)).toBe(1);
+    expect(countOutstandingJobs("author-ordinary", SPONSORS)).toBe(0);
   });
 });

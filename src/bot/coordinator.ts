@@ -534,7 +534,10 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
         content,
         mentionedBot: true,
         replyToBot: false,
-        source: "slash",
+        // Not "slash": the seed needs Grok's Sheets/Gmail tooling (the ack
+        // promises it), so it belongs in the background lane, which is never
+        // routed to the SDK sibling and is capped separately from /ask.
+        source: "coordinator",
       },
       {
         canViewChannel: (id) =>

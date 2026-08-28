@@ -35,16 +35,23 @@ export type EnqueueSkipReason =
   | "duplicate";
 
 /**
- * `mention` (@bot / reply-to-bot) and `slash` (/ask) are the interactive lane.
- * `background` (/background) is the queued lane: always Grok Bot, never the
- * SDK sibling, regardless of CURSOR_SDK_DISPATCH.
+ * `mention` (@bot / reply-to-bot) and `slash` (/ask) are the interactive lane:
+ * short turns that may run on the local Cursor SDK sibling.
+ *
+ * `background` (/background) and `coordinator` (/meet seed, Calendar handoffs)
+ * are the queued lane: always Grok Bot, never the SDK sibling, regardless of
+ * CURSOR_SDK_DISPATCH. Coordinator work needs Google Calendar / Sheets / Gmail
+ * tooling that only the Grok worker has — the /meet seed ack literally promises
+ * "Grok (hello@) will read the F26 sheet" — so it can never be routed to the
+ * sibling. Caps are lane-scoped, so this also keeps a roster seed or a Calendar
+ * retry from eating a human's /ask outstanding slots.
  */
-export type JobSource = "mention" | "slash" | "background";
+export type JobSource = "mention" | "slash" | "background" | "coordinator";
 
 export type JobLane = "interactive" | "background";
 
 export function laneForSource(source: JobSource): JobLane {
-  return source === "background" ? "background" : "interactive";
+  return source === "background" || source === "coordinator" ? "background" : "interactive";
 }
 
 export interface JobCandidate {
@@ -158,6 +165,7 @@ export async function tryEnqueueJob(
   const isTrigger =
     candidate.source === "slash" ||
     candidate.source === "background" ||
+    candidate.source === "coordinator" ||
     candidate.mentionedBot ||
     candidate.replyToBot;
   if (!isTrigger) return { job: null, skipped: "not-trigger" };
@@ -280,6 +288,11 @@ export async function tryEnqueueJob(
  *   - `interactive`, flag off (default)   → Grok Bot webhook, exactly as today.
  *
  * The SDK sibling never receives /background jobs; the flag never steals them.
+ *
+ * `lane` defaults to the lane the row was enqueued in, not to `interactive`:
+ * the persisted lane is what the caps counted and what the ack promised, so a
+ * re-dispatch that forgets the option (the outbox sweeper used to) can no
+ * longer hand a Grok-only job to the SDK sibling.
  */
 export async function dispatchEnqueuedJob(
   job: JobRow,
@@ -295,7 +308,21 @@ export async function dispatchEnqueuedJob(
   } = {},
 ): Promise<{ dispatched: boolean; typingStarted?: boolean }> {
   const env = opts.env ?? loadEnv();
-  const lane = opts.lane ?? "interactive";
+  const lane = opts.lane ?? laneOfRow(job);
+
+  // Only a queued row can still be claimed (claimJob's CAS requires
+  // status='queued'). The outbox sweeper retries every 60s off a stored
+  // discord_message_id, so a row cancelled by cancelStaleQueuedJobs — or
+  // already completed — would otherwise be re-POSTed forever: the webhook
+  // answers 2xx, the caller records a successful handoff, and no worker can
+  // ever pick the job up. Refuse before any POST and log the loop.
+  if (job.status !== "queued") {
+    logger.warn(
+      { job_id: job.id, status: job.status, lane },
+      "job dispatch skipped: row is no longer queued (cannot be claimed)",
+    );
+    return { dispatched: false };
+  }
 
   let payload: GrokJobPayload;
   try {
@@ -341,6 +368,14 @@ export async function dispatchEnqueuedJob(
     logger.error({ err, job_id: job.id, lane }, "job dispatch failed; job remains queued");
     return { dispatched: false };
   }
+}
+
+/**
+ * `jobs.lane` is persisted but not yet part of the `JobRow` type, so read it
+ * defensively; anything unset stays `interactive`, the historical default.
+ */
+function laneOfRow(job: JobRow): JobLane {
+  return (job as JobRow & { lane?: unknown }).lane === "background" ? "background" : "interactive";
 }
 
 async function startTypingAfterDispatch(

@@ -231,11 +231,23 @@ export function countJobsSince(
  * Only rows never claimed are swept: `claimed_by IS NULL` and no reply written.
  * A job a worker is actively holding is the lease sweeper's business, not this
  * one's.
+ *
+ * Two guards that are not obvious:
+ *
+ * `updated_at < cutoff` — `requeueExpiredClaims` puts a row back to `queued`
+ * without touching `created_at`, and it runs immediately before this sweep in
+ * the same interval. On age alone a just-requeued job would be cancelled in the
+ * very next statement, with an error saying no worker claimed it when one had.
+ *
+ * `discord_message_id NOT LIKE 'coordinator-outbox:%'` — coordinator jobs are
+ * owned by the outbox (`src/coordinator/publisher.ts`), which has its own
+ * retry sweeper. Cancelling one here while its outbox row is already
+ * `dispatched` loses a Calendar handoff with no user-visible signal.
  */
 export function cancelStaleQueuedJobs(now: number, maxAgeMs: number): number {
   const cutoff = now - maxAgeMs;
   const rows = getDb()
-    .query<{ id: string }, [number, number]>(
+    .query<{ id: string }, [number, number, number]>(
       `UPDATE jobs
        SET status = 'cancelled',
            error = 'stale: no worker claimed it before the queue timeout',
@@ -243,10 +255,12 @@ export function cancelStaleQueuedJobs(now: number, maxAgeMs: number): number {
        WHERE status = 'queued'
          AND claimed_by IS NULL
          AND created_at < ?
+         AND updated_at < ?
          AND result_discord_message_id IS NULL
+         AND discord_message_id NOT LIKE 'coordinator-outbox:%'
        RETURNING id`,
     )
-    .all(now, cutoff);
+    .all(now, cutoff, cutoff);
   return rows.length;
 }
 

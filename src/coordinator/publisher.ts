@@ -281,6 +281,11 @@ async function dispatchCalendarJob(
           authorId: input.authorId,
           namespace: input.namespace,
           content: input.content,
+          // Calendar handoffs need Grok's Google tooling, which the SDK
+          // sibling does not have; the background lane is never routed there.
+          // It also keeps these machine-issued jobs off the meeting creator's
+          // interactive cap, which is lane-scoped.
+          lane: "background",
         },
         input.now,
       );
@@ -291,7 +296,7 @@ async function dispatchCalendarJob(
     (async (input) => {
       const job = getJobByDiscordMessageId(input.discordMessageId);
       if (!job) return false;
-      const result = await dispatchEnqueuedJob(job);
+      const result = await dispatchEnqueuedJob(job, { lane: "background" });
       return result.dispatched;
     });
 
