@@ -707,8 +707,12 @@ function draftHeader(draft: {
   startsAt: number;
   durationMinutes: number;
   location: string | null;
+  timeZone: string;
 }): string {
-  const lines = [`📅 **${draft.title}**`, meetingWhenLine(draft.startsAt, draft.durationMinutes)];
+  const lines = [
+    `📅 **${draft.title}**`,
+    meetingWhenLine(draft.startsAt, draft.durationMinutes, draft.timeZone),
+  ];
   if (draft.location) lines.push(`📍 ${draft.location}`);
   return lines.join("\n");
 }
@@ -750,6 +754,7 @@ export function confirmSummary(draft: {
   durationMinutes: number;
   location: string | null;
   notes: string | null;
+  timeZone: string;
   audience: { audienceKind: "picked" | "f26_roster"; participants: Array<{ userId: string }> } | null;
 }): string {
   const count = draft.audience?.participants.length ?? 0;
@@ -759,7 +764,7 @@ export function confirmSummary(draft: {
       : `**${count} ${count === 1 ? "person" : "people"}**`;
   const lines = [
     `📅 **${draft.title}**`,
-    meetingWhenLine(draft.startsAt, draft.durationMinutes),
+    meetingWhenLine(draft.startsAt, draft.durationMinutes, draft.timeZone),
   ];
   if (draft.location) lines.push(`📍 ${draft.location}`);
   lines.push("", `Inviting ${who}. A Google Meet link is created automatically.`);
@@ -769,11 +774,22 @@ export function confirmSummary(draft: {
 
 /** The in-channel post. Shared time formatting with the preview by construction. */
 export function meetingAnnouncement(
-  meeting: { title: string; startsAt: number; endsAt: number; location: string | null; id: string; audienceKind: "picked" | "f26_roster" },
+  meeting: {
+    title: string;
+    startsAt: number;
+    endsAt: number;
+    location: string | null;
+    id: string;
+    audienceKind: "picked" | "f26_roster";
+    timeZone: string;
+  },
   participantCount: number,
 ): string {
   const durationMinutes = Math.max(1, Math.round((meeting.endsAt - meeting.startsAt) / 60_000));
-  const lines = [`📅 **${meeting.title}**`, meetingWhenLine(meeting.startsAt, durationMinutes)];
+  const lines = [
+    `📅 **${meeting.title}**`,
+    meetingWhenLine(meeting.startsAt, durationMinutes, meeting.timeZone),
+  ];
   if (meeting.location) lines.push(`📍 ${meeting.location}`);
   lines.push(
     meeting.audienceKind === "f26_roster"
@@ -812,6 +828,7 @@ async function handleMeetCreateModal(interaction: ModalSubmitInteraction): Promi
       durationMinutes,
       rawWhen,
       notes: draft.notes,
+      timeZone,
     }),
     ephemeral: true,
     components: audienceRows(draft.id),

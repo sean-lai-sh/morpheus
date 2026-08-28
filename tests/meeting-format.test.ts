@@ -43,6 +43,23 @@ describe("meetingWhenLine", () => {
     expect(line).toContain(`<t:${START / 1000}:R>`);
     expect(line).toContain("1h");
   });
+
+  test("names the org wall clock, not just the reader's local render", () => {
+    // The confusion this fixes: a Singapore-based organizer typing "friday 2pm"
+    // saw only <t:F>, which rendered as Saturday 02:00 their time, and read a
+    // correct parse as a bug. START is 18:00Z = 2:00 PM in New York.
+    const line = meetingWhenLine(START, 60, "America/New_York");
+    expect(line).toContain("2:00");
+    expect(line).toContain("EDT");
+    expect(line).toContain("in your local time");
+  });
+
+  test("the org zone is explicit, so a non-ET reader is never guessing", () => {
+    const line = meetingWhenLine(START, 30, "Asia/Singapore");
+    // Same instant, different declared zone: 18:00Z is 2:00 AM next day in SGT.
+    expect(line).toContain("2:00");
+    expect(line).toContain("GMT+8");
+  });
 });
 
 describe("draftPreview", () => {

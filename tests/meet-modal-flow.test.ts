@@ -69,6 +69,7 @@ describe("confirmSummary is the last stop before real invitations", () => {
     durationMinutes: 60,
     location: null,
     notes: null,
+    timeZone: "America/New_York",
   };
 
   test("names the roster explicitly when the audience is the whole F26 list", () => {
@@ -123,6 +124,7 @@ describe("meetingAnnouncement", () => {
     location: null,
     id: "m-42",
     audienceKind: "picked" as const,
+    timeZone: "America/New_York",
   };
 
   test("derives duration from the stored window", () => {
