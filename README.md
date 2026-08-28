@@ -107,7 +107,7 @@ doppler secrets set LOG_LEVEL=info HEALTH_PORT=8080
 
 Do **not** set `NIA_*`. Delete them from Doppler if they still exist.
 
-Grok Bot (not Mini) holds `DISCORD_WEBHOOK_SPONSORS` / `_OPPORTUNITIES` / `_SPEAKERS` / `_INBOX`. Never commit any of these.
+Grok Bot holds `DISCORD_WEBHOOK_SPONSORS` / `_OPPORTUNITIES` / `_SPEAKERS` / `_INBOX` for hello@ FYIs. Mini uses the **same** URL names in the same Doppler project when `MINI_DIGEST_ENABLED=true` (`bun run digest`, #76). Never commit any of these.
 
 Run Morpheus on the **Mac Mini** (`docs/hosting.md`). Do not run `bun run live` on AWS, Cursor cloud agents, or Grok Bot's shared computer.
 
@@ -151,6 +151,7 @@ bun run refresh-members   # one-shot: bulk-populate display names from guild mem
 bun run dev               # long-running: live event subscriber
 bun run reconcile         # one-shot: diff last N messages per channel against SQLite
 bun run reindex           # rebuild markdown from SQLite (recovery path)
+bun run digest            # one-shot Mini weekday digest to #sponsors/#opportunities/#speakers/#inbox (default OFF)
 bun run typecheck         # tsc --noEmit
 bun test                  # run test suite
 bun run test:watch        # re-run tests on file change
