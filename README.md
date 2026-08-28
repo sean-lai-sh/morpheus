@@ -126,7 +126,9 @@ bun src/index.ts live
 3. Copy token to Doppler as `DISCORD_BOT_TOKEN`
 4. OAuth2 scopes: `bot` + `applications.commands`, permissions: `View Channels` + `Read Message History`. **For mention replies (#30) also grant Send Messages and Send Messages in Threads.**
 5. Invite to the guild and restrict to the desired channels at the channel-permission level
-6. Set `JOB_TRIGGER_ROLE_IDS` (eboard role snowflakes). Empty list fail-closes enqueue. Mentions (`@bot` / reply-to-bot) and `/ask` enqueue the same SQLite `jobs` table; Mini POSTs a thin first-pass pack to `GROK_BOT_WEBHOOK_URL`. After that webhook returns 2xx, the official bot shows Discord typing in that job's channel (or thread) until the reply posts, the job fails, or `DISCORD_TYPING_MAX_MS` (default on; set `DISCORD_TYPING_ON_DISPATCH=false` to disable). Replies post via `message.reply` as this bot — Grok never holds `DISCORD_BOT_TOKEN` and does not drive typing.
+6. Set `JOB_TRIGGER_ROLE_IDS` (eboard role snowflakes). Empty list fail-closes enqueue. Mentions (`@bot` / reply-to-bot), `/ask`, and `/background` all enqueue the same SQLite `jobs` table; Mini POSTs a thin first-pass pack to a worker. After that webhook returns 2xx, the official bot shows Discord typing in that job's channel (or thread) until the reply posts, the job fails, or `DISCORD_TYPING_MAX_MS` (default on; set `DISCORD_TYPING_ON_DISPATCH=false` to disable). Replies post via `message.reply` as this bot — no worker ever holds `DISCORD_BOT_TOKEN` or drives typing.
+   - **Interactive lane** — `@bot` and `/ask`. Default: Grok Bot webhook (`GROK_BOT_WEBHOOK_URL`). With `CURSOR_SDK_DISPATCH=true` (experiment #47), these go to the sibling Cursor local SDK dispatcher (`bun run sdk-dispatch`) instead, for seconds-scale answers.
+   - **Background lane** — `/background <task>`: longer research/drafting turns on the Grok Bot worker (~2 min wake is fine here). Always `GROK_BOT_WEBHOOK_URL`, regardless of `CURSOR_SDK_DISPATCH`. The command acks "Queued (background)" and the answer arrives later via job-complete → `message.reply`.
 
 ### 4. Configure channels
 

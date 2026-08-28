@@ -13,7 +13,15 @@ import {
   withWorkspaceConfig,
 } from "./jobs-fixture.ts";
 import { handleHttpRequest } from "../src/http/health.ts";
-import { claimJob, enqueueJob, getJob } from "../src/storage/jobs.ts";
+import {
+  claimJob,
+  enqueueJob,
+  failJob,
+  getJob,
+  markJobSendError,
+  prepareComplete,
+  requeueExpiredClaims,
+} from "../src/storage/jobs.ts";
 import { parseEnv, resetEnvForTest } from "../src/config.ts";
 import { isJobTypingActive, startJobTyping, stopAllJobTyping } from "../src/bot/typing.ts";
 
@@ -95,6 +103,162 @@ describe("HTTP /v1/jobs auth", () => {
       else process.env.DISCORD_BOT_TOKEN = savedBot;
       resetEnvForTest();
     }
+  });
+});
+
+describe("claim generation (claimed_at echo)", () => {
+  test("complete without claimed_at keeps the legacy Grok contract (200)", async () => {
+    const job = queue("h-gen-legacy", EBOARD, SPONSORS);
+    await handleHttpRequest(req("POST", `/v1/jobs/${job.id}/claim`, { body: {} }));
+    const res = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/complete`, { body: { reply: "ok" } }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  test("complete echoing the claim's claimed_at succeeds; a wrong one is 409 stale", async () => {
+    const job = queue("h-gen-echo", EBOARD, SPONSORS);
+    const claim = await handleHttpRequest(req("POST", `/v1/jobs/${job.id}/claim`, { body: {} }));
+    const claimed = ((await claim.json()) as { job: { claimed_at: number } }).job;
+
+    const stale = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/complete`, {
+        body: { reply: "late", claimed_at: claimed.claimed_at - 1 },
+      }),
+    );
+    expect(stale.status).toBe(409);
+    expect(getJob(job.id)?.status).toBe("claimed");
+
+    const ok = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/complete`, {
+        body: { reply: "on time", claimed_at: claimed.claimed_at },
+      }),
+    );
+    expect(ok.status).toBe(200);
+    expect(getJob(job.id)?.status).toBe("completed");
+  });
+
+  test("a stale worker cannot complete after lease expiry + reclaim, even with the same claimed_by", async () => {
+    const job = queue("h-gen-stale", EBOARD, SPONSORS);
+    const now = Date.now();
+    // Worker A (SDK sibling) claims and stalls past its lease.
+    const first = claimJob(job.id, "grok-eboard", now - 100_000);
+    expect(first).not.toBeNull();
+    expect(requeueExpiredClaims(now, 60_000)).toBe(1);
+    // Worker B (Grok) reclaims — same token, same claimed_by, NEW claimed_at.
+    const second = claimJob(job.id, "grok-eboard", now);
+    expect(second).not.toBeNull();
+
+    // Worker A wakes up and echoes its old claim generation → refused.
+    const stale = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/complete`, {
+        body: { reply: "stale answer", claimed_at: first!.claimed_at },
+      }),
+    );
+    expect(stale.status).toBe(409);
+    expect(getJob(job.id)?.status).toBe("claimed");
+
+    // Worker B's completion (current generation) lands.
+    const fresh = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/complete`, {
+        body: { reply: "fresh answer", claimed_at: second!.claimed_at },
+      }),
+    );
+    expect(fresh.status).toBe(200);
+    expect(getJob(job.id)?.reply_text).toBe("fresh answer");
+  });
+
+  test("fail with a stale claimed_at is also refused", async () => {
+    const job = queue("h-gen-fail", EBOARD, SPONSORS);
+    const claim = await handleHttpRequest(req("POST", `/v1/jobs/${job.id}/claim`, { body: {} }));
+    const claimed = ((await claim.json()) as { job: { claimed_at: number } }).job;
+    const stale = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/fail`, {
+        body: { error: "boom", claimed_at: claimed.claimed_at + 5 },
+      }),
+    );
+    expect(stale.status).toBe(409);
+    expect(getJob(job.id)?.status).toBe("claimed");
+  });
+
+  // Sol #1: the generation gate must be part of the CAS, not a prior read.
+  // These drive the storage transition directly so the reclaim lands in the
+  // TOCTOU window (after a worker "validated" its generation, before its write).
+  test("prepareComplete is atomic: a reclaim before the write refuses the stale generation", async () => {
+    const job = queue("cas-complete", EBOARD, SPONSORS);
+    const first = claimJob(job.id, "grok-eboard", Date.now() - 100_000)!;
+    // Worker A read t1 and is "about to" complete. Now its lease expires and B reclaims:
+    expect(requeueExpiredClaims(Date.now(), 60_000)).toBe(1);
+    const second = claimJob(job.id, "grok-eboard", Date.now())!;
+    expect(second.claimed_at ?? undefined).not.toBe(first.claimed_at ?? undefined);
+
+    // A resumes with its stale t1 — the CAS predicate refuses it, no write lands.
+    const stale = prepareComplete(job.id, "grok-eboard", { reply: "A's stale answer" }, Date.now(), first.claimed_at ?? undefined);
+    expect(stale.ok).toBe(false);
+    if (!stale.ok) expect(stale.reason).toBe("stale-claim");
+    expect(getJob(job.id)?.reply_text).toBeNull();
+
+    // B's current generation writes cleanly.
+    const fresh = prepareComplete(job.id, "grok-eboard", { reply: "B's answer" }, Date.now(), second.claimed_at ?? undefined);
+    expect(fresh.ok).toBe(true);
+    expect(getJob(job.id)?.reply_text).toBe("B's answer");
+  });
+
+  test("failJob is atomic: a reclaim before the write refuses the stale generation", async () => {
+    const job = queue("cas-fail", EBOARD, SPONSORS);
+    const first = claimJob(job.id, "grok-eboard", Date.now() - 100_000)!;
+    expect(requeueExpiredClaims(Date.now(), 60_000)).toBe(1);
+    const second = claimJob(job.id, "grok-eboard", Date.now())!;
+
+    const staleFail = failJob(job.id, "grok-eboard", "A boom", Date.now(), first.claimed_at ?? undefined);
+    expect(staleFail).toBeNull();
+    expect(getJob(job.id)?.status).toBe("claimed");
+
+    // Current generation may still complete — the stale fail did not terminate it.
+    const ok = prepareComplete(job.id, "grok-eboard", { reply: "B ok" }, Date.now(), second.claimed_at ?? undefined);
+    expect(ok.ok).toBe(true);
+  });
+
+  // Guards the #75 merge resolution: main's #74 claimed_at refresh must NOT
+  // fire on the generation-gated path, or a gated worker's legitimate retry
+  // (echoing its original generation) would be wrongly rejected as stale.
+  test("gated retry after a send error still succeeds (claimed_at not refreshed under a generation gate)", async () => {
+    const job = queue("cas-gated-retry", EBOARD, SPONSORS);
+    const claimed = claimJob(job.id, "grok-eboard", Date.now())!;
+    const gen = claimed.claimed_at ?? undefined;
+
+    // First complete persists reply_text + completion_key (generation gated).
+    const first = prepareComplete(job.id, "grok-eboard", { reply: "answer" }, Date.now(), gen);
+    expect(first.ok).toBe(true);
+    // The generation stayed stable (refresh suppressed while gated).
+    expect(getJob(job.id)?.claimed_at).toBe(claimed.claimed_at);
+
+    // Simulate a Discord send failure that leaves the job claimed for retry.
+    markJobSendError(job.id, "discord 500", Date.now());
+
+    // The same worker retries with its ORIGINAL generation — still matches.
+    const retry = prepareComplete(job.id, "grok-eboard", { reply: "answer" }, Date.now(), gen);
+    expect(retry.ok).toBe(true);
+    expect(getJob(job.id)?.reply_text).toBe("answer");
+  });
+
+  test("legacy path (no generation) refreshes claimed_at on complete (#74)", async () => {
+    const job = queue("cas-legacy-refresh", EBOARD, SPONSORS);
+    const claimed = claimJob(job.id, "grok-eboard", Date.now() - 5_000)!;
+    prepareComplete(job.id, "grok-eboard", { reply: "legacy" }, Date.now());
+    // No generation supplied → claimed_at bumped forward so the sweeper leaves the in-flight send alone.
+    expect(getJob(job.id)!.claimed_at!).toBeGreaterThan(claimed.claimed_at!);
+  });
+
+  test("no claimed_at echo keeps the legacy Grok contract even across a reclaim", async () => {
+    const job = queue("cas-legacy", EBOARD, SPONSORS);
+    claimJob(job.id, "grok-eboard", Date.now() - 100_000);
+    requeueExpiredClaims(Date.now(), 60_000);
+    claimJob(job.id, "grok-eboard", Date.now());
+    // Legacy worker sends no claimed_at → ungated CAS, completes on the live claim.
+    const legacy = prepareComplete(job.id, "grok-eboard", { reply: "legacy" }, Date.now());
+    expect(legacy.ok).toBe(true);
+    expect(getJob(job.id)?.reply_text).toBe("legacy");
   });
 });
 

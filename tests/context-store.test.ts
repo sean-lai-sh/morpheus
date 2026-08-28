@@ -755,4 +755,56 @@ describe("ContextStore search recall (issue #50)", () => {
     const other = hits.find((h) => h.id !== LINK_MSG);
     if (other) expect(other.links).toEqual([]);
   });
+
+  test("a thread pathPrefix filters thread_id in SQL: a busy parent cannot starve its thread", () => {
+    // Ten parent-channel messages and ONE thread message all match the term.
+    for (let i = 0; i < 10; i++) {
+      const id = `2100000000000000${String(i).padStart(2, "0")}`;
+      upsertMessage({
+        id,
+        channelId: "2002",
+        authorId: "u2",
+        authorName: "bob",
+        content: `threadstarve chatter number ${i}`,
+        createdAt: 2_000 + i,
+      });
+      indexFromRow(getMessage(id)!);
+    }
+    const IN_THREAD = "210000000000000099";
+    upsertMessage({
+      id: IN_THREAD,
+      channelId: L_THREAD_ID,
+      parentChannelId: "2002",
+      authorId: "u2",
+      authorName: "bob",
+      content: "threadstarve decision recorded inside the thread",
+      createdAt: 2_100,
+      threadId: L_THREAD_ID,
+      threadName: "Retreat seating",
+    });
+    indexFromRow(getMessage(IN_THREAD)!);
+
+    // Thread slugs end with the LAST 4 digits of the thread id (channelSlug).
+    const threadPath = "/leadership/eboard-teams/leadership-team-2002/threads/retreat-seating-0050";
+    const hits = contextStore.search({
+      query: "threadstarve",
+      scope: leadership,
+      pathPrefix: threadPath,
+      limit: 1,
+    });
+    expect(hits.length).toBe(1);
+    expect(hits[0]!.id).toBe(IN_THREAD);
+    expect(hits[0]!.path.startsWith(threadPath)).toBe(true);
+
+    // An explicit threadId in the query still wins over the prefix-derived one.
+    const explicit = contextStore.search({
+      query: "threadstarve",
+      scope: leadership,
+      pathPrefix: threadPath,
+      threadId: L_THREAD_ID,
+      limit: 1,
+    });
+    expect(explicit.length).toBe(1);
+    expect(explicit[0]!.id).toBe(IN_THREAD);
+  });
 });

@@ -2,7 +2,8 @@ import type { Message } from "discord.js";
 import { getChannel, jobTriggerRoleIds, loadEnv, type Env } from "../config.ts";
 import { logger } from "../logger.ts";
 import { routeFeedFromText } from "../notify/route.ts";
-import { dispatchGrokJob, type HttpsPoster } from "../notify/grok-dispatch.ts";
+import { dispatchGrokJob, type GrokJobPayload, type HttpsPoster } from "../notify/grok-dispatch.ts";
+import { dispatchSdkJob } from "../notify/sdk-dispatch.ts";
 import { namespaceForRow, type ChannelResolver } from "../context/namespace.ts";
 import {
   countJobsSince,
@@ -33,7 +34,18 @@ export type EnqueueSkipReason =
   | "rate-cap"
   | "duplicate";
 
-export type JobSource = "mention" | "slash";
+/**
+ * `mention` (@bot / reply-to-bot) and `slash` (/ask) are the interactive lane.
+ * `background` (/background) is the queued lane: always Grok Bot, never the
+ * SDK sibling, regardless of CURSOR_SDK_DISPATCH.
+ */
+export type JobSource = "mention" | "slash" | "background";
+
+export type JobLane = "interactive" | "background";
+
+export function laneForSource(source: JobSource): JobLane {
+  return source === "background" ? "background" : "interactive";
+}
 
 export interface JobCandidate {
   discordMessageId: string;
@@ -60,6 +72,8 @@ export interface TryEnqueueOpts {
   nodeEnv?: string;
   dispatch?: boolean;
   poster?: HttpsPoster;
+  /** Poster for the sibling Cursor SDK dispatcher (experiment #47, flag-gated off). */
+  sdkPoster?: HttpsPoster;
   env?: Env;
   /** Tests inject a Map so this file does not mutate global channels.yml / cwd. */
   resolveChannel?: ChannelResolver;
@@ -142,7 +156,10 @@ export async function tryEnqueueJob(
   if (candidate.authorIsBot) return { job: null, skipped: "bot-author" };
 
   const isTrigger =
-    candidate.source === "slash" || candidate.mentionedBot || candidate.replyToBot;
+    candidate.source === "slash" ||
+    candidate.source === "background" ||
+    candidate.mentionedBot ||
+    candidate.replyToBot;
   if (!isTrigger) return { job: null, skipped: "not-trigger" };
 
   const resolveChannel = opts.resolveChannel ?? getChannel;
@@ -169,19 +186,35 @@ export async function tryEnqueueJob(
   }
 
   const now = opts.now ?? Date.now();
-  if (countOutstandingJobs(candidate.authorId) >= maxOutstanding) {
-    logger.info(
-      { author_id: candidate.authorId, cap: maxOutstanding },
-      "job enqueue skipped: outstanding cap",
-    );
-    return { job: null, skipped: "outstanding-cap" };
-  }
-  if (countJobsSince(candidate.authorId, now - 3_600_000) >= maxPerHour) {
-    logger.info(
-      { author_id: candidate.authorId, cap: maxPerHour },
-      "job enqueue skipped: hourly cap",
-    );
-    return { job: null, skipped: "rate-cap" };
+  const lane = laneForSource(candidate.source);
+
+  // Caps guard the LOCAL Cursor SDK sibling: one agent per channel, serialized,
+  // on this box. /background hands off to the remote Grok worker, which has its
+  // own capacity, so it is neither capped nor counted here — a queue of
+  // background jobs must never lock someone out of the interactive lane.
+  if (lane === "interactive") {
+    if (
+      countOutstandingJobs(candidate.authorId, candidate.discordChannelId, "interactive") >=
+      maxOutstanding
+    ) {
+      logger.info(
+        {
+          author_id: candidate.authorId,
+          channel_id: candidate.discordChannelId,
+          cap: maxOutstanding,
+          lane,
+        },
+        "job enqueue skipped: outstanding cap (per channel, interactive lane)",
+      );
+      return { job: null, skipped: "outstanding-cap" };
+    }
+    if (countJobsSince(candidate.authorId, now - 3_600_000, "interactive") >= maxPerHour) {
+      logger.info(
+        { author_id: candidate.authorId, cap: maxPerHour, lane },
+        "job enqueue skipped: hourly cap (interactive lane)",
+      );
+      return { job: null, skipped: "rate-cap" };
+    }
   }
 
   const mentionedIds =
@@ -207,6 +240,7 @@ export async function tryEnqueueJob(
       scope,
       channelIds,
       content: candidate.content,
+      lane,
     },
     now,
   );
@@ -227,7 +261,9 @@ export async function tryEnqueueJob(
   if (opts.dispatch === false) return { job };
 
   const dispatched = await dispatchEnqueuedJob(job, {
+    lane: laneForSource(candidate.source),
     poster: opts.poster,
+    sdkPoster: opts.sdkPoster,
     env: loaded,
     resolveChannel,
     typingClient: opts.typingClient,
@@ -237,10 +273,21 @@ export async function tryEnqueueJob(
   return { job, dispatched: dispatched.dispatched, typingStarted: dispatched.typingStarted };
 }
 
+/**
+ * Lane routing (#47 split, Grok Bot stays the long-running queue):
+ *
+ *   - `background` (/background)         → Grok Bot webhook, always.
+ *   - `interactive` + CURSOR_SDK_DISPATCH → sibling Cursor SDK dispatcher.
+ *   - `interactive`, flag off (default)   → Grok Bot webhook, exactly as today.
+ *
+ * The SDK sibling never receives /background jobs; the flag never steals them.
+ */
 export async function dispatchEnqueuedJob(
   job: JobRow,
   opts: {
+    lane?: JobLane;
     poster?: HttpsPoster;
+    sdkPoster?: HttpsPoster;
     env?: Env;
     resolveChannel?: ChannelResolver;
     typingClient?: TypingClient;
@@ -248,31 +295,51 @@ export async function dispatchEnqueuedJob(
     typingScheduler?: TypingScheduler;
   } = {},
 ): Promise<{ dispatched: boolean; typingStarted?: boolean }> {
+  const env = opts.env ?? loadEnv();
+  const lane = opts.lane ?? "interactive";
+
+  let payload: GrokJobPayload;
   try {
     const snippets = firstPassSnippets(job, 12, opts.resolveChannel ?? getChannel);
-    const result = await dispatchGrokJob(
-      {
-        first_pass: true,
-        job: {
-          id: job.id,
-          discord_message_id: job.discord_message_id,
-          discord_channel_id: job.discord_channel_id,
-          author_id: job.author_id,
-          namespace: job.namespace,
-          scope: job.scope,
-          channel_ids: job.channel_ids,
-          content: job.content,
-        },
-        snippets,
-        feed_hint: routeFeedFromText(job.content),
+    payload = {
+      first_pass: true,
+      job: {
+        id: job.id,
+        discord_message_id: job.discord_message_id,
+        discord_channel_id: job.discord_channel_id,
+        author_id: job.author_id,
+        namespace: job.namespace,
+        scope: job.scope,
+        channel_ids: job.channel_ids,
+        content: job.content,
       },
-      { env: opts.env, poster: opts.poster },
-    );
+      snippets,
+      feed_hint: routeFeedFromText(job.content),
+    };
+  } catch (err) {
+    logger.error({ err, job_id: job.id }, "job dispatch payload build failed; job remains queued");
+    return { dispatched: false };
+  }
+
+  try {
+    const useSdk = lane === "interactive" && env.CURSOR_SDK_DISPATCH;
+    const result = useSdk
+      ? await dispatchSdkJob(payload, { env, poster: opts.sdkPoster })
+      : await dispatchGrokJob(payload, { env, poster: opts.poster });
     if (!result.dispatched) return { dispatched: false };
+    // Typing starts after a 2xx from whichever worker took the job (#48);
+    // the official bot on the Mini drives it, never the worker.
+    //
+    // Interactive only. `/background` is explicitly the "this takes minutes,
+    // go away and come back" lane — its slash ack already says so, and a
+    // typing indicator pulsing for several minutes reads as a hung bot rather
+    // than a working one. The ack is the acknowledgement; the reply is the
+    // result.
+    if (lane === "background") return { dispatched: true, typingStarted: false };
     const typing = await startTypingAfterDispatch(job, opts);
     return { dispatched: true, typingStarted: typing };
   } catch (err) {
-    logger.error({ err, job_id: job.id }, "Grok dispatch failed; job remains queued");
+    logger.error({ err, job_id: job.id, lane }, "job dispatch failed; job remains queued");
     return { dispatched: false };
   }
 }
