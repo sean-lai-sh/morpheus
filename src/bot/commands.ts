@@ -12,6 +12,7 @@ import { discordBotToken, loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 import { tryEnqueueJob, type JobCandidate, type JobSource } from "./enqueue.ts";
 import { authorCanViewChannel, mentionChannelIds } from "./job-scope.ts";
+import { MEET_COMMAND, TASK_COMMAND } from "./coordinator.ts";
 
 export const ASK_COMMAND = new SlashCommandBuilder()
   .setName("ask")
@@ -34,6 +35,9 @@ export const BACKGROUND_COMMAND = new SlashCommandBuilder()
     opt.setName("task").setDescription("What to research or draft").setRequired(true).setMaxLength(2000),
   )
   .toJSON();
+
+/** Everything PUT to the guild: job lane (/ask, /background) + coordinator (/task, /meet). */
+export const GUILD_COMMANDS = [ASK_COMMAND, BACKGROUND_COMMAND, TASK_COMMAND, MEET_COMMAND];
 
 interface JobCommandSpec {
   option: string;
@@ -59,10 +63,11 @@ export async function registerGuildJobCommands(client: Client, guildId: string):
     return;
   }
   const rest = new REST({ version: "10" }).setToken(token);
-  await rest.put(Routes.applicationGuildCommands(appId, guildId), {
-    body: [ASK_COMMAND, BACKGROUND_COMMAND],
-  });
-  logger.info({ guild_id: guildId }, "registered guild slash commands /ask and /background");
+  await rest.put(Routes.applicationGuildCommands(appId, guildId), { body: GUILD_COMMANDS });
+  logger.info(
+    { guild_id: guildId, commands: ["ask", "background", "task", "meet"] },
+    "registered guild slash commands",
+  );
 }
 
 function interactionParentId(interaction: ChatInputCommandInteraction): string | null {

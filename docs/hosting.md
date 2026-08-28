@@ -75,6 +75,15 @@ Do not put these in git, in `config/channels.yml`, or in PR text. Do not put `MO
 
 Mini Doppler does **not** need `NIA_*`. Nia is unsupported; delete leftover Nia secrets.
 
+## Coordinator (tasks + meetings)
+
+Ported from [techmate](https://github.com/fahimmehraj/techmate) as a Mini-side slice. No Inngest, no planner UI, no Google secrets on the Mini.
+
+- `/task` and `/meet` register next to `/ask`. Create is fail-closed on `JOB_TRIGGER_ROLE_IDS` and allowlisted channels.
+- Task reminder DMs are sent by the official discord.js bot (Mini holds `DISCORD_BOT_TOKEN`). Grok never gets that token.
+- Calendar create/cancel is an outbox row that becomes a `jobs` row POSTed to `GROK_BOT_WEBHOOK_URL`. Grok (hello@) owns Calendar. The job pack is JSON with meeting times and a participant count — never emails, never the bot token.
+- `outbox_events` is written in the same SQLite transaction as the mutation. `bun run live` tries an immediate 1.5s dispatch, then a minute-level in-process sweeper recovers `pending` rows.
+
 ## Operator notes (Mini)
 
 - Keep `bun run live` under launchd/`brew services` so a reboot restores the gateway.
