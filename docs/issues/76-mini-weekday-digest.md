@@ -15,8 +15,8 @@ Mini weekday digest from the Morpheus index, posted to the existing digest chann
 
 ## Implement
 
-- Query the index (existing FTS/search) for recent hits
-- Bucket with `routeFeedFromText` / `routeFeedChannel`
+- Query the index (existing FTS/search) for recent **eboard-visible** hits (not leadership)
+- Bucket / compose with `routeFeedFromText` / `composeDigestPosts` / `stripPingableMentions`
 - Post **DIGEST** (`urgency: digest`) via `postFeed`
 - Skip channel if webhook unset
 - Skip empty bucket

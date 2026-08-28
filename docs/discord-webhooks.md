@@ -65,8 +65,10 @@ Time-sensitive hello@ vs morning digest: **same webhooks**. Prefix `URGENT` vs `
 
 `bun run digest` on the Mini (`scripts/weekday-digest.ts` → `src/digest/weekday.ts`) queries the existing FTS index for recent hits, buckets them with `routeFeedFromText` / `routeFeedChannel`, and POSTs `urgency: digest` via `postFeed`. This is **not** optional-later anymore; it is the Morpheus-originated digest called out in #36.
 
-- **Source:** classified index hits (sponsor / opportunity / speaker). Unknown → `#inbox` (never guess a named feed).
+- **Source:** classified index hits (sponsor / opportunity / speaker) from the **eboard-visible** workspace only (eboard + descendants). Leadership-only hits never leave that workspace and never appear on feed webhooks.
+- Unknown → `#inbox` (never guess a named feed).
 - **Not** a dump of `#sponsors` / `#opportunities` / `#speakers` / `#inbox` back onto themselves (those channel names are excluded as sources).
+- Compose reuses `src/digest/compose.ts` (`composeDigestPosts` / `stripPingableMentions`) so `@everyone` / `@here` / user / role tokens are neutralized before `postFeed`.
 - **Not** Gmail hello@ (Grok Bot / #42).
 - Default **OFF** (`MINI_DIGEST_ENABLED`). Skip a channel when its webhook is unset or its bucket is empty.
 - Idempotent per America/New_York calendar day + channel (`digest_posts`). `--force` runs on Sat/Sun; it does not bypass the flag or the day+channel lock.
@@ -92,7 +94,7 @@ Time-sensitive hello@ vs morning digest: **same webhooks**. Prefix `URGENT` vs `
 - `src/notify/route.ts` — kind → channel
 - `src/notify/webhooks.ts` — POST to Discord incoming webhook
 - `scripts/post-feed.ts` — `bun run post-feed -- --channel=sponsors --direction=inbound --kind=sponsor --text='...'`
-- `src/digest/` + `scripts/weekday-digest.ts` — Mini weekday digest (`bun run digest`)
-- `tests/notify-route.test.ts`, `tests/notify-webhooks.test.ts`, `tests/digest-weekday.test.ts`
+- `src/digest/` + `scripts/weekday-digest.ts` — Mini weekday digest (`bun run digest`); compose is `src/digest/compose.ts` (PR #77 helper)
+- `tests/notify-route.test.ts`, `tests/notify-webhooks.test.ts`, `tests/digest-weekday.test.ts`, `tests/digest-compose.test.ts`
 
 This is an **output surface**. It does not index Discord, does not replace FTS/`/v1`, and does not talk to Nia.

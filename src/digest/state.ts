@@ -22,3 +22,8 @@ export function reserveDigestPost(day: string, channel: FeedChannelKey, postedAt
 export function releaseDigestPost(day: string, channel: FeedChannelKey): void {
   getDb().query(`DELETE FROM digest_posts WHERE day = ? AND channel = ?`).run(day, channel);
 }
+
+/** Test-only: isolate digest_posts so cases do not depend on run order. */
+export function clearDigestPostsForTest(): void {
+  getDb().exec(`DELETE FROM digest_posts`);
+}

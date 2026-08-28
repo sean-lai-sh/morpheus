@@ -2,23 +2,18 @@ import { loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 import { FEED_CHANNEL_KEYS, FEED_WEBHOOK_ENV, type FeedChannelKey } from "../notify/channels.ts";
 import { redactSecrets } from "../notify/grok-dispatch.ts";
-import { postFeed, webhookUrlFor, type DiscordWebhookPoster } from "../notify/webhooks.ts";
+import { isDiscordWebhookUrl, postFeed, webhookUrlFor, type DiscordWebhookPoster } from "../notify/webhooks.ts";
+import { composeDigestPosts, type DigestHit as ComposeHit } from "./compose.ts";
 import {
   DEFAULT_LOOKBACK_MS,
   bucketDigestHits,
   collectDigestHits,
-  formatDigestBody,
+  sourceChannelLabel,
+  type CollectedDigestHit,
 } from "./collect.ts";
 import { hasDigestPosted, releaseDigestPost, reserveDigestPost } from "./state.ts";
 
 export const DIGEST_TIME_ZONE = "America/New_York";
-
-const KIND_FOR_CHANNEL: Record<FeedChannelKey, string> = {
-  sponsors: "sponsor",
-  opportunities: "opportunity",
-  speakers: "speaker",
-  inbox: "unknown",
-};
 
 export interface DigestChannelResult {
   posted: boolean;
@@ -67,7 +62,19 @@ function emptyChannels(skipped: string): Record<FeedChannelKey, DigestChannelRes
   ) as Record<FeedChannelKey, DigestChannelResult>;
 }
 
-const WEBHOOK_URL_RE = /https:\/\/[^\s]*discord(?:app)?\.com\/api\/(?:v\d+\/)?webhooks\/[^\s]+/gi;
+/**
+ * Replace Discord incoming-webhook URLs using the canonical detector
+ * (`isDiscordWebhookUrl`), including encoded execute paths.
+ */
+export function redactDiscordWebhookUrls(text: string): string {
+  return text.replace(/https:\/\/[^\s]+/gi, (raw) => {
+    const trimmed = raw.replace(/[)\]>.,;:'"]+$/g, "");
+    if (isDiscordWebhookUrl(raw) || isDiscordWebhookUrl(trimmed)) {
+      return "[redacted-webhook]";
+    }
+    return raw;
+  });
+}
 
 /** Strip Mini secrets and any pasted webhook URL from digest bodies. Never log the raw values. */
 export function redactDigestText(text: string, env: NodeJS.ProcessEnv = process.env): string {
@@ -76,7 +83,15 @@ export function redactDigestText(text: string, env: NodeJS.ProcessEnv = process.
     const v = env[key]?.trim();
     if (v && v.length >= 8) out = out.split(v).join("[redacted]");
   }
-  return out.replace(WEBHOOK_URL_RE, "[redacted-webhook]");
+  return redactDiscordWebhookUrls(out);
+}
+
+function composeInputs(hits: CollectedDigestHit[]): ComposeHit[] {
+  return hits.map((h) => ({
+    text: h.text,
+    source: `${h.authorName} in ${sourceChannelLabel(h.sourceChannelId)}`,
+    createdAt: h.createdAt,
+  }));
 }
 
 export async function runWeekdayDigest(opts: DigestRunOpts = {}): Promise<DigestRunResult> {
@@ -96,11 +111,14 @@ export async function runWeekdayDigest(opts: DigestRunOpts = {}): Promise<Digest
 
   const sinceMs = nowMs - (opts.lookbackMs ?? DEFAULT_LOOKBACK_MS);
   const buckets = bucketDigestHits(collectDigestHits({ sinceMs, untilMs: nowMs }));
+  const posts = composeDigestPosts(FEED_CHANNEL_KEYS.flatMap((key) => composeInputs(buckets[key])));
+  const postByChannel = new Map(posts.map((p) => [p.channel, p]));
   const channels = emptyChannels("empty");
 
   for (const key of FEED_CHANNEL_KEYS) {
+    const post = postByChannel.get(key);
     const hits = buckets[key];
-    if (hits.length === 0) {
+    if (!post || hits.length === 0) {
       channels[key] = { posted: false, skipped: "empty", hits: 0 };
       continue;
     }
@@ -121,29 +139,33 @@ export async function runWeekdayDigest(opts: DigestRunOpts = {}): Promise<Digest
       continue;
     }
 
-    const text = redactDigestText(formatDigestBody(key, hits), env);
-    const result = await postFeed(
-      {
-        channel: key,
-        direction: "inbound",
-        kind: KIND_FOR_CHANNEL[key],
-        text,
-        urgency: "digest",
-        source: "mini-index",
-      },
-      { env, poster: opts.poster },
-    );
+    try {
+      const text = redactDigestText(post.text, env);
+      const result = await postFeed(
+        {
+          ...post,
+          text,
+          urgency: "digest",
+          source: "mini-index",
+        },
+        { env, poster: opts.poster },
+      );
 
-    if (!result.posted) {
+      if (!result.posted) {
+        releaseDigestPost(day, key);
+        const skipped = result.skipped ?? `http-${result.status ?? "error"}`;
+        logger.warn({ day, channel: key, skipped }, "weekday digest post failed");
+        channels[key] = { posted: false, skipped, hits: hits.length };
+        continue;
+      }
+
+      logger.info({ day, channel: key, hits: hits.length }, "weekday digest posted");
+      channels[key] = { posted: true, hits: hits.length };
+    } catch {
       releaseDigestPost(day, key);
-      const skipped = result.skipped ?? `http-${result.status ?? "error"}`;
-      logger.warn({ day, channel: key, skipped }, "weekday digest post failed");
-      channels[key] = { posted: false, skipped, hits: hits.length };
-      continue;
+      logger.warn({ day, channel: key }, "weekday digest post threw");
+      channels[key] = { posted: false, skipped: "post-error", hits: hits.length };
     }
-
-    logger.info({ day, channel: key, hits: hits.length }, "weekday digest posted");
-    channels[key] = { posted: true, hits: hits.length };
   }
 
   return { ran: true, day, channels };
