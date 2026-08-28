@@ -79,7 +79,7 @@ export const MEET_COMMAND = new SlashCommandBuilder()
   .addSubcommand((sub) =>
     sub
       .setName("create")
-      .setDescription("Schedule a meeting and queue Calendar sync via Grok")
+      .setDescription("Schedule a meeting and send the Google Calendar invite")
       .addStringOption((opt) => opt.setName("title").setDescription("Meeting title").setRequired(true).setMaxLength(100))
       .addStringOption((opt) =>
         opt.setName("start").setDescription("Start: ISO-8601 or YYYY-MM-DD HH:mm").setRequired(true),
@@ -562,7 +562,7 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
     await interaction.reply({
       content: handoffMessage(
         outcomes,
-        "Meeting cancelled. Calendar cancellation is queued for Grok.",
+        "Meeting cancelled. The Calendar event is being cancelled.",
         "Meeting cancelled. Calendar cancellation is queued for automatic retry.",
       ),
       ephemeral: true,
@@ -876,7 +876,7 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
       audienceKind === "f26_roster"
         ? "F26 Preferred Emails (role is not expanded)."
         : `${people.length} attendee(s).`;
-    const announcement = `📅 **${result.meeting.title}**\n${when}\n${audienceLine}\nMeeting ID: \`${result.meeting.id}\`\nCalendar sync queued for Grok (hello@).`;
+    const announcement = `📅 **${result.meeting.title}**\n${when}\n${audienceLine}\nMeeting ID: \`${result.meeting.id}\`\nCalendar invite going out from hello@.`;
     if (interaction.client.isReady()) {
       try {
         await announceMeeting(interaction.client, draft.channelId, announcement);
@@ -887,7 +887,7 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     await replyEphemeral(interaction, {
       content: `${handoffMessage(
         outcomes,
-        "Meeting scheduled. Calendar sync handed off to Grok.",
+        "Meeting scheduled. The Calendar invite is on its way.",
         "Meeting scheduled. Calendar sync is queued for automatic retry.",
       )}\nMeeting ID: \`${result.meeting.id}\``,
       components: [],
