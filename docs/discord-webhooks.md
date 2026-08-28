@@ -40,9 +40,9 @@ Empty placeholders in `.env.example`:
 - `DISCORD_WEBHOOK_SPEAKERS`
 - `DISCORD_WEBHOOK_INBOX`
 
-**Grok Bot (required for FYIs):** holds `DISCORD_WEBHOOK_*` and `POST`s JSON to Discord. No GitHub. Mini does not need a public inbound IP.
+**Grok Bot (required for hello@ FYIs):** holds `DISCORD_WEBHOOK_*` and `POST`s JSON to Discord. No GitHub. Mini does not need a public inbound IP.
 
-**Mac Mini:** holds `DISCORD_BOT_TOKEN` + `GROK_BOT_WEBHOOK_URL` (that URL **is** the Grok Bot worker — #42). It does not need channel webhook URLs unless you want Mini-originated digests.
+**Mac Mini:** holds `DISCORD_BOT_TOKEN` + `GROK_BOT_WEBHOOK_URL` (that URL **is** the Grok Bot worker — #42). Same Doppler project/config as the rest of Mini — do not add a second env flavor. Channel webhook URLs live in that config when Mini posts the weekday digest (`MINI_DIGEST_ENABLED`). Grok still holds the same URL names in its own secret store for hello@ (#42).
 
 Do **not** put webhook URLs in `config/channels.yml` (that file is channel snowflakes for ingest, and is easy to commit by mistake).
 
@@ -61,6 +61,17 @@ Direction is orthogonal: `inbound` | `outbound`. Both go to the **same** channel
 
 Time-sensitive hello@ vs morning digest: **same webhooks**. Prefix `URGENT` vs `DIGEST` in the payload (`urgency` field). Do not invent extra channels for that.
 
+## Mini weekday digest (#76)
+
+`bun run digest` on the Mini (`scripts/weekday-digest.ts` → `src/digest/weekday.ts`) queries the existing FTS index for recent hits, buckets them with `routeFeedFromText` / `routeFeedChannel`, and POSTs `urgency: digest` via `postFeed`. This is **not** optional-later anymore; it is the Morpheus-originated digest called out in #36.
+
+- **Source:** classified index hits (sponsor / opportunity / speaker). Unknown → `#inbox` (never guess a named feed).
+- **Not** a dump of `#sponsors` / `#opportunities` / `#speakers` / `#inbox` back onto themselves (those channel names are excluded as sources).
+- **Not** Gmail hello@ (Grok Bot / #42).
+- Default **OFF** (`MINI_DIGEST_ENABLED`). Skip a channel when its webhook is unset or its bucket is empty.
+- Idempotent per America/New_York calendar day + channel (`digest_posts`). `--force` runs on Sat/Sun; it does not bypass the flag or the day+channel lock.
+- No tokens or webhook URLs in logs or bodies. Reuses `postFeed` — no parallel webhook client.
+
 ## When to use webhook vs GitHub vs bot reply
 
 | Surface | Use |
@@ -75,12 +86,13 @@ Time-sensitive hello@ vs morning digest: **same webhooks**. Prefix `URGENT` vs `
 - `allowed_mentions: { parse: [], users: [], roles: [] }` so hello@ bodies cannot `@everyone` or ping roles/users.
 - Never send `DISCORD_BOT_TOKEN`, `GROK_BOT_WEBHOOK_URL`, or channel webhook URLs in the message body.
 
-## Code in this PR
+## Code
 
 - `src/notify/channels.ts` — logical keys + env var names
 - `src/notify/route.ts` — kind → channel
 - `src/notify/webhooks.ts` — POST to Discord incoming webhook
 - `scripts/post-feed.ts` — `bun run post-feed -- --channel=sponsors --direction=inbound --kind=sponsor --text='...'`
-- `tests/notify-route.test.ts`, `tests/notify-webhooks.test.ts`
+- `src/digest/` + `scripts/weekday-digest.ts` — Mini weekday digest (`bun run digest`)
+- `tests/notify-route.test.ts`, `tests/notify-webhooks.test.ts`, `tests/digest-weekday.test.ts`
 
 This is an **output surface**. It does not index Discord, does not replace FTS/`/v1`, and does not talk to Nia.

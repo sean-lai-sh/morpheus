@@ -149,6 +149,15 @@ function migrateAlter(db: Database): void {
   try { db.exec(`DROP TABLE IF EXISTS nia_sync_state`); } catch { /* ignore */ }
   try { db.exec(`ALTER TABLE jobs ADD COLUMN scope TEXT`); } catch { /* already exists */ }
   try { db.exec(`ALTER TABLE jobs ADD COLUMN channel_ids TEXT`); } catch { /* already exists */ }
+  // Mini weekday digest idempotency: one successful post per calendar day + channel (#76).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS digest_posts (
+      day TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      posted_at INTEGER NOT NULL,
+      PRIMARY KEY (day, channel)
+    )
+  `);
   migrateSeqAndFts(db);
 }
 
