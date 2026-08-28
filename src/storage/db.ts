@@ -163,6 +163,117 @@ function migrateAlter(db: Database): void {
     )
   `);
   migrateSeqAndFts(db);
+  migrateCoordinator(db);
+}
+
+/**
+ * Coordinator slice (techmate port): transactional outbox, tasks, meetings.
+ * Single-guild Tech@NYU. People are Discord snowflakes already in `users`.
+ */
+function migrateCoordinator(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS outbox_events (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL,
+      aggregate_id TEXT NOT NULL,
+      expected_version INTEGER NOT NULL,
+      payload TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'dispatched', 'failed')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      dispatched_at INTEGER,
+      last_error TEXT,
+      created_at INTEGER NOT NULL,
+      UNIQUE (type, aggregate_id, expected_version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_outbox_status_created
+      ON outbox_events(status, created_at);
+
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      created_by_user_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      due_at INTEGER,
+      time_zone TEXT NOT NULL DEFAULT 'America/New_York',
+      status TEXT NOT NULL CHECK (status IN ('draft', 'open', 'completed', 'cancelled')),
+      revision INTEGER NOT NULL DEFAULT 1,
+      channel_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tasks_creator_status
+      ON tasks(created_by_user_id, status);
+
+    CREATE TABLE IF NOT EXISTS task_assignments (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      display_name TEXT,
+      status TEXT NOT NULL CHECK (status IN ('open', 'completed')),
+      reminder_policy_override TEXT CHECK (
+        reminder_policy_override IS NULL
+        OR reminder_policy_override IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'none')
+      ),
+      reminder_revision INTEGER NOT NULL DEFAULT 1,
+      completed_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE (task_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_assignments_user
+      ON task_assignments(user_id, status);
+
+    CREATE TABLE IF NOT EXISTS person_task_reminder_preferences (
+      user_id TEXT PRIMARY KEY,
+      default_policy TEXT NOT NULL DEFAULT 'daily_until_done' CHECK (
+        default_policy IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'none')
+      ),
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS task_reminder_deliveries (
+      id TEXT PRIMARY KEY,
+      assignment_id TEXT NOT NULL REFERENCES task_assignments(id) ON DELETE CASCADE,
+      reminder_revision INTEGER NOT NULL,
+      scheduled_for INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('sent', 'failed', 'skipped')),
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      UNIQUE (assignment_id, reminder_revision, scheduled_for)
+    );
+
+    CREATE TABLE IF NOT EXISTS meetings (
+      id TEXT PRIMARY KEY,
+      created_by_user_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      starts_at INTEGER NOT NULL,
+      ends_at INTEGER NOT NULL,
+      time_zone TEXT NOT NULL DEFAULT 'America/New_York',
+      notes TEXT,
+      status TEXT NOT NULL CHECK (status IN ('scheduled', 'cancelled')),
+      version INTEGER NOT NULL DEFAULT 1,
+      channel_id TEXT,
+      calendar_event_id TEXT,
+      meet_link TEXT,
+      announced_at INTEGER,
+      hour_reminder_at INTEGER,
+      hour_reminder_sent_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_meetings_creator_status
+      ON meetings(created_by_user_id, status);
+    CREATE INDEX IF NOT EXISTS idx_meetings_hour_reminder
+      ON meetings(hour_reminder_at, hour_reminder_sent_at);
+
+    CREATE TABLE IF NOT EXISTS meeting_participants (
+      meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      display_name TEXT,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (meeting_id, user_id)
+    );
+  `);
 }
 
 /**

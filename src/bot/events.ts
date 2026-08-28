@@ -5,6 +5,7 @@ import { handleReactionChange } from "./reactions.ts";
 import { candidateFromMessage, tryEnqueueJob } from "./enqueue.ts";
 import { authorCanViewChannel } from "./job-scope.ts";
 import { handleJobCommandInteraction, registerJobCommandsOnReady } from "./commands.ts";
+import { handleCoordinatorInteraction } from "./coordinator.ts";
 
 async function fetchIfPartial(
   message: Message | PartialMessage,
@@ -132,7 +133,8 @@ export function registerLiveHandlers(client: Client): void {
 
   client.on(Events.InteractionCreate, async (interaction) => {
     try {
-      await handleJobCommandInteraction(interaction);
+      const handled = await handleCoordinatorInteraction(interaction);
+      if (!handled) await handleJobCommandInteraction(interaction);
     } catch (err) {
       logger.error({ err }, "InteractionCreate handler error");
     }

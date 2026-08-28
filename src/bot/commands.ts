@@ -12,6 +12,7 @@ import { discordBotToken, loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 import { tryEnqueueJob, type JobCandidate, type JobSource } from "./enqueue.ts";
 import { authorCanViewChannel, mentionChannelIds } from "./job-scope.ts";
+import { MEET_COMMAND, TASK_COMMAND } from "./coordinator.ts";
 
 export const ASK_COMMAND = new SlashCommandBuilder()
   .setName("ask")
@@ -60,9 +61,12 @@ export async function registerGuildJobCommands(client: Client, guildId: string):
   }
   const rest = new REST({ version: "10" }).setToken(token);
   await rest.put(Routes.applicationGuildCommands(appId, guildId), {
-    body: [ASK_COMMAND, BACKGROUND_COMMAND],
+    body: [ASK_COMMAND, BACKGROUND_COMMAND, TASK_COMMAND, MEET_COMMAND],
   });
-  logger.info({ guild_id: guildId }, "registered guild slash commands /ask and /background");
+  logger.info(
+    { guild_id: guildId, commands: ["ask", "background", "task", "meet"] },
+    "registered guild slash commands",
+  );
 }
 
 function interactionParentId(interaction: ChatInputCommandInteraction): string | null {

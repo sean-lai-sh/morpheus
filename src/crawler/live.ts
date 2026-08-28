@@ -2,6 +2,7 @@ import type { Client } from "discord.js";
 import cron, { type ScheduledTask } from "node-cron";
 import { registerLiveHandlers } from "../bot/events.ts";
 import { loadChannels, loadEnv } from "../config.ts";
+import { startOutboxSweeper, stopOutboxSweeper } from "../coordinator/sweeper.ts";
 import { logger } from "../logger.ts";
 import { backupDb } from "../storage/backup.ts";
 import { requeueExpiredClaims } from "../storage/jobs.ts";
@@ -20,6 +21,7 @@ let claimSweep: ReturnType<typeof setInterval> | undefined;
  */
 export function startLive(client: Client): void {
   registerLiveHandlers(client);
+  startOutboxSweeper();
   logger.info("live event subscriber attached");
 
   const intervalHours = loadChannels().defaults.reconcile_interval_hours;
@@ -77,6 +79,7 @@ export function stopLive(): void {
   backupTask?.stop();
   autoBackfillTask?.stop();
   if (claimSweep) clearInterval(claimSweep);
+  stopOutboxSweeper();
   reconcileTask = undefined;
   backupTask = undefined;
   autoBackfillTask = undefined;
