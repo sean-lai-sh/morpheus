@@ -282,6 +282,7 @@ async function dispatchCalendarJob(
             endsAt: new Date(input.meeting.endsAt).toISOString(),
             timeZone: input.meeting.timeZone,
             notes: input.meeting.notes,
+            location: input.meeting.location,
             audience: input.meeting.audienceKind ?? "picked",
             participantIds: input.participantIds,
             calendarEventId: input.meeting.calendarEventId,

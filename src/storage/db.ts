@@ -275,6 +275,30 @@ function migrateCoordinator(db: Database): void {
       PRIMARY KEY (meeting_id, user_id)
     );
 
+    -- In-flight /meet create drafts (#89 item 6). Replaces the process-local Map
+    -- in src/bot/coordinator.ts: that map was unbounded, never expired, and every
+    -- restart invalidated live ephemeral selectors. Rows are short-lived by
+    -- design -- see MEETING_DRAFT_TTL_MS in ./meeting-drafts.ts -- and are read
+    -- back only by their creator.
+    CREATE TABLE IF NOT EXISTS meeting_drafts (
+      id TEXT PRIMARY KEY,
+      created_by_user_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      starts_at INTEGER NOT NULL,
+      duration_minutes INTEGER NOT NULL,
+      time_zone TEXT NOT NULL DEFAULT 'America/New_York',
+      notes TEXT,
+      location TEXT,
+      audience_json TEXT,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_meeting_drafts_expires
+      ON meeting_drafts(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_meeting_drafts_owner
+      ON meeting_drafts(created_by_user_id, expires_at);
+
     CREATE TABLE IF NOT EXISTS roster_bindings (
       discord_id TEXT PRIMARY KEY,
       email TEXT NOT NULL,
@@ -289,6 +313,13 @@ function migrateCoordinator(db: Database): void {
   } catch {
     /* already exists */
   }
+  // `location` is free text shown on the Calendar invite (a room, a Zoom URL).
+  // Nullable, so an existing meetings table just picks it up.
+  try { db.exec(`ALTER TABLE meetings ADD COLUMN location TEXT`); } catch { /* already exists */ }
+  // meeting_drafts gained `location` and `audience_json` after the table shipped;
+  // both are nullable, so an existing table just picks them up.
+  try { db.exec(`ALTER TABLE meeting_drafts ADD COLUMN location TEXT`); } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE meeting_drafts ADD COLUMN audience_json TEXT`); } catch { /* already exists */ }
   upsertManualRosterBindings(db);
 }
 

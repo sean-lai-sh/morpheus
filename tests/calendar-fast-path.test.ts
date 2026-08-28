@@ -65,6 +65,7 @@ const SYNC_INPUT = {
   endsAt: "2026-09-01T18:30:00.000Z",
   timeZone: "America/New_York",
   notes: null,
+  location: null,
   calendarEventId: null,
 };
 

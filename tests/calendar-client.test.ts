@@ -66,6 +66,7 @@ function baseInput(overrides: Partial<CalendarEventInput> = {}): CalendarEventIn
     endsAt: "2026-09-01T19:00:00.000Z",
     timeZone: "America/New_York",
     description: "Weekly sync",
+    location: null,
     attendeeEmails: [ATTENDEE],
     requestMeet: true,
     ...overrides,

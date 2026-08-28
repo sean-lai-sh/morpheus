@@ -11,6 +11,8 @@ export interface MeetingRow {
   endsAt: number;
   timeZone: string;
   notes: string | null;
+  /** Free text shown on the Calendar invite: a room, a Zoom URL, an address. */
+  location: string | null;
   status: MeetingStatus;
   version: number;
   channelId: string | null;
@@ -44,6 +46,7 @@ interface MeetingDbRow {
   ends_at: number;
   time_zone: string;
   notes: string | null;
+  location: string | null;
   status: string;
   version: number;
   channel_id: string | null;
@@ -68,6 +71,7 @@ function mapMeeting(row: MeetingDbRow): MeetingRow {
     endsAt: row.ends_at,
     timeZone: row.time_zone,
     notes: row.notes,
+    location: row.location,
     status: row.status as MeetingStatus,
     version: row.version,
     channelId: row.channel_id,
@@ -104,6 +108,7 @@ export function createScheduledMeeting(input: {
   durationMinutes: number;
   timeZone?: string;
   notes?: string | null;
+  location?: string | null;
   channelId?: string | null;
   participants: MeetingAssigneeInput[];
   audienceKind?: "picked" | "f26_roster";
@@ -130,9 +135,9 @@ export function createScheduledMeeting(input: {
     getDb()
       .query(
         `INSERT INTO meetings (
-           id, created_by_user_id, title, starts_at, ends_at, time_zone, notes, status, version,
+           id, created_by_user_id, title, starts_at, ends_at, time_zone, notes, location, status, version,
            channel_id, hour_reminder_at, audience_kind, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -142,6 +147,7 @@ export function createScheduledMeeting(input: {
         endsAt,
         timeZone,
         input.notes?.trim() || null,
+        input.location?.trim().slice(0, 500) || null,
         input.channelId ?? null,
         hourReminderAt,
         audienceKind,

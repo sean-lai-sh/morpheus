@@ -75,6 +75,7 @@ export async function tryMiniCalendarSync(
     endsAt: string;
     timeZone: string;
     notes: string | null;
+    location: string | null;
     audience: MeetingAudienceKind;
     participantIds: string[];
     calendarEventId: string | null;
@@ -112,6 +113,7 @@ export async function tryMiniCalendarSync(
       endsAt: input.endsAt,
       timeZone: input.timeZone,
       description: input.notes,
+      location: input.location,
       attendeeEmails: resolved.emails,
       requestMeet: true,
       eventId: input.calendarEventId,
