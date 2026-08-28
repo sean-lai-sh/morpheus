@@ -4,6 +4,7 @@ import { loadChannels, type Channel } from "../config.ts";
 import { logger } from "../logger.ts";
 import { markReconciled } from "../storage/crawl-state.ts";
 import { nonDeletedMessageIds, nonDeletedThreadMessageIds } from "../storage/messages.ts";
+import { listChannelThreads } from "./threads.ts";
 
 /**
  * Refetch the last N messages of each allowlisted channel and re-ingest them.
@@ -72,38 +73,6 @@ async function tombstoneMissing(fetchedIds: Set<string>, storedIds: string[]): P
   return deleted;
 }
 
-/** Active + paginated public and private archived threads — same listing as backfill. */
-async function listThreads(ch: TextChannel): Promise<AnyThreadChannel[]> {
-  const out: AnyThreadChannel[] = [];
-  const seen = new Set<string>();
-  const add = (t: AnyThreadChannel) => {
-    if (seen.has(t.id)) return;
-    seen.add(t.id);
-    out.push(t);
-  };
-
-  const active = await ch.threads.fetchActive();
-  for (const t of active.threads.values()) add(t);
-
-  const addArchived = async (type: "public" | "private", fetchAll: boolean) => {
-    let hasMore = true;
-    let before: string | undefined;
-    while (hasMore) {
-      const archived = await ch.threads.fetchArchived({ type, fetchAll, limit: 100, before });
-      for (const t of archived.threads.values()) add(t);
-      hasMore = archived.hasMore;
-      const ids = [...archived.threads.keys()];
-      before = ids[ids.length - 1];
-    }
-  };
-
-  await addArchived("public", false);
-  // All private archived (needs Manage Threads). A throw skips this channel's
-  // thread diffs rather than pretending the list was complete (#72).
-  await addArchived("private", true);
-  return out;
-}
-
 async function reconcileChannel(ch: TextChannel, channel: Channel, lookback: number): Promise<void> {
   const parent = await paginateLookback((opts) => ch.messages.fetch(opts), lookback, (m) => ingestMessage(m));
   const deleted = await tombstoneMissing(parent.fetchedIds, nonDeletedMessageIds(ch.id));
@@ -123,7 +92,7 @@ async function reconcileChannelThreads(
 ): Promise<void> {
   let threads: AnyThreadChannel[];
   try {
-    threads = await listThreads(ch);
+    threads = await listChannelThreads(ch);
   } catch (err) {
     logger.warn({ err, channel_id: channel.id }, "thread reconcile listing failed; skipping thread diffs");
     return;

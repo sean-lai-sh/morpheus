@@ -464,4 +464,70 @@ describe("reconcileChannel", () => {
     expect(getMessage(replyId)?.parent_channel_id).toBe(parentId);
     expect(getMessage(replyId)?.thread_id).toBe(threadId);
   });
+
+  test("reconcile last-N paginates archived threads with archiveTimestamp", async () => {
+    const parentId = "4004";
+    const parentMsg = "400000000000040000";
+    const parentContent = "dev parent for archived reconcile pagination";
+    const page1 = {
+      id: "400000000000041000",
+      name: "Reconcile archived p1",
+      archiveTimestamp: 8_000,
+      replyId: "400000000000041050",
+      content: "reconcile-archive-p1 unique-recon-page snacks",
+    };
+    const page2 = {
+      id: "400000000000042000",
+      name: "Reconcile archived p2",
+      archiveTimestamp: 7_000,
+      replyId: "400000000000042050",
+      content: "reconcile-archive-p2 unique-recon-page snacks",
+    };
+    const threadOf = (t: typeof page1) => ({
+      id: t.id,
+      name: t.name,
+      archiveTimestamp: t.archiveTimestamp,
+      messages: {
+        fetch: async () => collectionOf([mockMsg(t.replyId, t.id, t.content)]),
+      },
+    });
+
+    let publicCalls = 0;
+    const parentChannel = {
+      id: parentId,
+      type: ChannelType.GuildText,
+      messages: {
+        fetch: async () => collectionOf([mockMsg(parentMsg, parentId, parentContent)]),
+      },
+      threads: {
+        fetchActive: async () => ({ threads: new Map(), hasMore: false }),
+        fetchArchived: async (opts?: { type?: string; before?: unknown }) => {
+          if (opts?.type === "private") return { threads: new Map(), hasMore: false };
+          publicCalls++;
+          if (publicCalls > 5) throw new Error("archived pagination did not terminate");
+          if (opts?.before == null) {
+            return { threads: collectionOf([threadOf(page1)]), hasMore: true };
+          }
+          expect(opts.before).toBe(8_000);
+          return { threads: collectionOf([threadOf(page2)]), hasMore: false };
+        },
+      },
+    };
+    const client = {
+      channels: {
+        fetch: async (id: string) => {
+          if (id === parentId) return parentChannel;
+          return { id, type: ChannelType.GuildVoice };
+        },
+      },
+    } as unknown as Client;
+
+    const { reconcileAll } = await import("../src/crawler/reconcile.ts");
+    await reconcileAll(client);
+
+    expect(publicCalls).toBe(2);
+    expect(getMessage(page1.replyId)?.thread_id).toBe(page1.id);
+    expect(getMessage(page2.replyId)?.thread_id).toBe(page2.id);
+    expect(getMessage(page2.replyId)?.content).toBe(page2.content);
+  });
 });

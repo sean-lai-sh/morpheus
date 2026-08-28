@@ -7,28 +7,9 @@ import {
   markBackfillComplete,
   setOldestSeen,
 } from "../storage/crawl-state.ts";
+import { forEachArchivedThread } from "./threads.ts";
 
 const PAGE_SIZE = 100;
-
-/** Paginate public or private archived threads (discord.js defaults type to public). */
-async function forEachArchivedThread(
-  ch: TextChannel,
-  type: "public" | "private",
-  fetchAll: boolean,
-  fn: (thread: AnyThreadChannel) => Promise<void>,
-): Promise<void> {
-  let hasMore = true;
-  let before: string | undefined;
-  while (hasMore) {
-    const archived = await ch.threads.fetchArchived({ type, fetchAll, limit: 100, before });
-    for (const [, t] of archived.threads) {
-      await fn(t);
-    }
-    hasMore = archived.hasMore;
-    const ids = [...archived.threads.keys()];
-    before = ids[ids.length - 1];
-  }
-}
 
 async function fetchTextChannel(client: Client, channelId: string): Promise<TextChannel | null> {
   try {
