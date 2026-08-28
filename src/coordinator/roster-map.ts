@@ -2,7 +2,26 @@
 export const ROSTER_SHEET_ID = "1NlApvtFAhFTMNafGoVksrYpJhi_oz5dlA6pml5VQ3rw";
 export const ROSTER_TAB = "F26";
 export const ROSTER_TAB_GID = "1079418365";
+/** Same snowflake as JOB_TRIGGER Eboard. Detect this role mention/select, not the word "eboard". */
 export const EBOARD_ROLE_ID = "1203562091500404782";
+
+/** Mapped Discord role → sheet dump. Add snowflakes here; do not live-expand members. */
+export const ROSTER_ROLE_AUDIENCE = {
+  [EBOARD_ROLE_ID]: "f26_roster",
+} as const;
+
+export type RosterAudienceKind = (typeof ROSTER_ROLE_AUDIENCE)[keyof typeof ROSTER_ROLE_AUDIENCE];
+
+export function isRosterRole(roleId: string): boolean {
+  return Object.prototype.hasOwnProperty.call(ROSTER_ROLE_AUDIENCE, roleId);
+}
+
+export function rosterAudienceForRoles(roleIds: Iterable<string>): RosterAudienceKind | null {
+  for (const id of roleIds) {
+    if (isRosterRole(id)) return ROSTER_ROLE_AUDIENCE[id as keyof typeof ROSTER_ROLE_AUDIENCE];
+  }
+  return null;
+}
 
 export type RosterConfidence = "disc" | "name";
 

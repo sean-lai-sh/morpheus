@@ -1,6 +1,7 @@
 import type { Message } from "discord.js";
 import {
   audienceSelectionsFromMentions,
+  collectMentionRoleIds,
   meetingAudienceFromSelections,
 } from "../coordinator/audience.ts";
 import { assertCoordinatorCreate } from "../coordinator/gates.ts";
@@ -37,7 +38,10 @@ export async function tryEnqueueMeetingMention(message: Message<true>, botUserId
   if (!looksLikeMeetingMention(message.content)) return false;
 
   const mentionedUserIds = [...message.mentions.users.keys()].filter((id) => id !== botUserId);
-  const mentionedRoleIds = [...message.mentions.roles.keys()];
+  const mentionedRoleIds = collectMentionRoleIds({
+    content: message.content,
+    cachedRoleIds: message.mentions.roles.keys(),
+  });
   if (mentionedUserIds.length === 0 && mentionedRoleIds.length === 0) return false;
 
   const gate = assertCoordinatorCreate({

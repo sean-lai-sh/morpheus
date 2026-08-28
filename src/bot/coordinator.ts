@@ -829,10 +829,7 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
         : {},
     });
     const { audienceKind, userSelections } = meetingAudienceFromSelections(selections);
-    const people =
-      audienceKind === "f26_roster"
-        ? userSelections.map((user) => ({ userId: user.id, displayName: user.displayName }))
-        : await resolveComponentAudience(interaction);
+    const people = userSelections.map((user) => ({ userId: user.id, displayName: user.displayName }));
     const result = createScheduledMeeting({
       createdByUserId: draft.createdByUserId,
       title: draft.title,
