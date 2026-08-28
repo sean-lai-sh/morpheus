@@ -4,13 +4,16 @@ import {
   collectMentionRoleIds,
   extractMentionableAudience,
   extractRoleSnowflakes,
+  formatUnmappedInviteRefusal,
   meetingAudienceFromSelections,
+  resolveMeetingInvitees,
 } from "../src/coordinator/audience.ts";
 import { EBOARD_ROLE_ID } from "../src/coordinator/roster-map.ts";
 import { buildCalendarJobPack, serializeCalendarJobPack } from "../src/coordinator/calendar-job.ts";
 import { looksLikeMeetingMention, extractMeetingTitle } from "../src/bot/meeting-mention.ts";
 import { parseAbsoluteWhen } from "../src/coordinator/when.ts";
 import { createScheduledMeeting, getMeeting, getMeetingParticipants } from "../src/storage/coordinator-meetings.ts";
+import { applyRosterSeedResult, getRosterBinding } from "../src/storage/roster-map.ts";
 import { getDb } from "../src/storage/db.ts";
 import { withTempDb } from "./helpers.ts";
 
@@ -98,6 +101,55 @@ describe("meeting audience", () => {
     );
     expect(audience.audienceKind).toBe("f26_roster");
     expect(audience.userSelections.map((u) => u.id)).toEqual(["11"]);
+  });
+
+  test("unmapped extra users are refused; bound extras are kept", () => {
+    applyRosterSeedResult({
+      mappings: [
+        {
+          discord_id: "11",
+          email: "sean@nyu.edu",
+          name: "Sean",
+          disc: "sean",
+          confidence: "disc",
+        },
+      ],
+    });
+    const refused = resolveMeetingInvitees(
+      audienceSelectionsFromMentions({
+        users: [{ id: "22", displayName: "Stranger" }],
+        roleIds: [EBOARD_ROLE_ID],
+      }),
+    );
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.reason).toBe("unmapped-users");
+      expect(formatUnmappedInviteRefusal(refused.unmapped)).toContain("Stranger");
+      expect(formatUnmappedInviteRefusal(refused.unmapped)).not.toContain("@nyu.edu");
+    }
+    const ok = resolveMeetingInvitees(
+      audienceSelectionsFromMentions({
+        users: [{ id: "11", displayName: "Sean" }],
+        roleIds: [EBOARD_ROLE_ID],
+      }),
+    );
+    expect(ok).toEqual({
+      ok: true,
+      audienceKind: "f26_roster",
+      participants: [{ userId: "11", displayName: "Sean" }],
+    });
+    expect(getRosterBinding("22")).toBeNull();
+  });
+
+  test("picked users without a roster binding have no audience", () => {
+    const result = resolveMeetingInvitees(
+      audienceSelectionsFromMentions({
+        users: [{ id: "33", displayName: "Nobody" }],
+        roleIds: [],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("unmapped-users");
   });
 
   test("f26_roster meeting may have zero participants; pack has audience and no emails", () => {

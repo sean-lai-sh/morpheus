@@ -24,14 +24,15 @@ import {
   dateInTimeZone,
   expandAudience,
   extractMentionableAudience,
-  meetingAudienceFromSelections,
+  formatUnmappedInviteRefusal,
   parseMeetingStart,
+  resolveMeetingInvitees,
 } from "../coordinator/audience.ts";
 import { buildRosterSeedPack, serializeRosterSeedPack } from "../coordinator/seed-job.ts";
 import { ephemeralSlashAckMessageId } from "./reply.ts";
 import { tryEnqueueJob } from "./enqueue.ts";
 import { authorCanViewChannel } from "./job-scope.ts";
-import { assertCoordinatorCreate } from "../coordinator/gates.ts";
+import { assertCoordinatorCreate, assertMeetInvoke } from "../coordinator/gates.ts";
 import { publishOutboxEvents, type OutboxDispatchOutcome } from "../coordinator/publisher.ts";
 import {
   formatReminderPolicy,
@@ -154,6 +155,14 @@ function createGate(interaction: ChatInputCommandInteraction) {
     channelId: interaction.channelId,
     parentChannelId: interactionParentId(interaction),
     triggerRoleIds: jobTriggerRoleIds(),
+  });
+}
+
+function meetGate(interaction: ChatInputCommandInteraction | MessageComponentInteraction) {
+  return assertMeetInvoke({
+    roleIds: interactionRoleIds(interaction),
+    channelId: interaction.channelId,
+    parentChannelId: interactionParentId(interaction),
   });
 }
 
@@ -482,20 +491,20 @@ async function handleTaskCommand(interaction: ChatInputCommandInteraction): Prom
 }
 
 async function handleMeetCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const gate = meetGate(interaction);
+  if (!gate.ok) {
+    await interaction.reply({
+      content:
+        gate.reason === "role-gate"
+          ? "Only Eboard (or Leadership / Senior Adv) can use /meet."
+          : "Use /meet from an allowlisted eboard channel.",
+      ephemeral: true,
+      allowedMentions: ALLOWED_MENTIONS,
+    });
+    return;
+  }
   const sub = interaction.options.getSubcommand();
   if (sub === "seed") {
-    const gate = createGate(interaction);
-    if (!gate.ok) {
-      await interaction.reply({
-        content:
-          gate.reason === "role-gate"
-            ? "You need an eboard trigger role to seed the roster map."
-            : "Seed the roster from an allowlisted eboard channel.",
-        ephemeral: true,
-        allowedMentions: ALLOWED_MENTIONS,
-      });
-      return;
-    }
     await interaction.reply({
       content: "Queued roster seed. Grok (hello@) will read the F26 sheet and I'll store Discord→email bindings. The result will post in this channel.",
       ephemeral: true,
@@ -547,19 +556,6 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
         "Meeting cancelled. Calendar cancellation is queued for Grok.",
         "Meeting cancelled. Calendar cancellation is queued for automatic retry.",
       ),
-      ephemeral: true,
-      allowedMentions: ALLOWED_MENTIONS,
-    });
-    return;
-  }
-
-  const gate = createGate(interaction);
-  if (!gate.ok) {
-    await interaction.reply({
-      content:
-        gate.reason === "role-gate"
-          ? "You need an eboard trigger role to create meetings."
-          : "Create meetings from an allowlisted eboard channel.",
       ephemeral: true,
       allowedMentions: ALLOWED_MENTIONS,
     });
@@ -828,8 +824,27 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
           }
         : {},
     });
-    const { audienceKind, userSelections } = meetingAudienceFromSelections(selections);
-    const people = userSelections.map((user) => ({ userId: user.id, displayName: user.displayName }));
+    const invite = resolveMeetingInvitees(selections);
+    if (!invite.ok) {
+      await replyEphemeral(interaction, {
+        content:
+          invite.reason === "unmapped-users"
+            ? formatUnmappedInviteRefusal(invite.unmapped)
+            : "Select @Eboard (F26 roster) and/or Discord users who already have a roster binding.",
+        components: [
+          new ActionRowBuilder<MentionableSelectMenuBuilder>().addComponents(
+            new MentionableSelectMenuBuilder()
+              .setCustomId(`meet-audience:${value}`)
+              .setPlaceholder("Add @Eboard and/or roster users")
+              .setMinValues(1)
+              .setMaxValues(25),
+          ),
+        ],
+      });
+      return;
+    }
+    const people = invite.participants;
+    const audienceKind = invite.audienceKind;
     const result = createScheduledMeeting({
       createdByUserId: draft.createdByUserId,
       title: draft.title,

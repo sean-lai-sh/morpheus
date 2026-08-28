@@ -2,9 +2,10 @@ import type { Message } from "discord.js";
 import {
   audienceSelectionsFromMentions,
   collectMentionRoleIds,
-  meetingAudienceFromSelections,
+  formatUnmappedInviteRefusal,
+  resolveMeetingInvitees,
 } from "../coordinator/audience.ts";
-import { assertCoordinatorCreate } from "../coordinator/gates.ts";
+import { assertMeetInvoke } from "../coordinator/gates.ts";
 import { publishOutboxEvents } from "../coordinator/publisher.ts";
 import { parseAbsoluteWhen } from "../coordinator/when.ts";
 import { createScheduledMeeting } from "../storage/coordinator-meetings.ts";
@@ -44,12 +45,21 @@ export async function tryEnqueueMeetingMention(message: Message<true>, botUserId
   });
   if (mentionedUserIds.length === 0 && mentionedRoleIds.length === 0) return false;
 
-  const gate = assertCoordinatorCreate({
+  const gate = assertMeetInvoke({
     roleIds: memberRoleIds(message.member),
     channelId: message.channelId,
     parentChannelId: threadParentId(message),
   });
-  if (!gate.ok) return false;
+  if (!gate.ok) {
+    await message.reply({
+      content:
+        gate.reason === "role-gate"
+          ? "Only Eboard (or Leadership / Senior Adv) can book meetings."
+          : "Book meetings from an allowlisted eboard channel.",
+      allowedMentions: ALLOWED_MENTIONS,
+    });
+    return true;
+  }
 
   const parsed = parseAbsoluteWhen(message.content, new Date());
   if (!parsed) {
@@ -61,7 +71,7 @@ export async function tryEnqueueMeetingMention(message: Message<true>, botUserId
     return true;
   }
 
-  const audience = meetingAudienceFromSelections(
+  const invite = resolveMeetingInvitees(
     audienceSelectionsFromMentions({
       users: mentionedUserIds.map((id) => {
         const user = message.mentions.users.get(id);
@@ -73,6 +83,16 @@ export async function tryEnqueueMeetingMention(message: Message<true>, botUserId
       roleIds: mentionedRoleIds,
     }),
   );
+  if (!invite.ok) {
+    await message.reply({
+      content:
+        invite.reason === "unmapped-users"
+          ? formatUnmappedInviteRefusal(invite.unmapped)
+          : "Mention @Eboard (F26 roster) and/or Discord users who already have a roster binding.",
+      allowedMentions: ALLOWED_MENTIONS,
+    });
+    return true;
+  }
 
   const durationMinutes = Math.max(
     15,
@@ -86,20 +106,17 @@ export async function tryEnqueueMeetingMention(message: Message<true>, botUserId
     timeZone: parsed.timeZone,
     notes: message.content,
     channelId: message.channelId,
-    participants: audience.userSelections.map((user) => ({
-      userId: user.id,
-      displayName: user.displayName,
-    })),
-    audienceKind: audience.audienceKind,
+    participants: invite.participants,
+    audienceKind: invite.audienceKind,
   });
   const outcomes = await publishOutboxEvents(result.outboxEvents);
   const handed = outcomes.some((outcome) => outcome.status === "accepted")
     ? "Calendar sync handed off to Grok."
     : "Calendar sync is queued for automatic retry.";
   const audienceLine =
-    audience.audienceKind === "f26_roster"
+    invite.audienceKind === "f26_roster"
       ? "F26 Preferred Emails (role is not expanded)."
-      : `${audience.userSelections.length} attendee(s).`;
+      : `${invite.participants.length} attendee(s).`;
   await message.reply({
     content: `📅 **${result.meeting.title}**\n${audienceLine}\nMeeting ID: \`${result.meeting.id}\`\n${handed}`,
     allowedMentions: ALLOWED_MENTIONS,

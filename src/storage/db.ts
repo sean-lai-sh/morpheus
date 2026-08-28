@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { upsertManualRosterBindings } from "./roster-map.ts";
 
 /** Resolved SQLite path. Honors `MORPHEUS_DB_PATH` (tests, non-default Mini volume). */
 export function dbPath(): string {
@@ -288,6 +289,7 @@ function migrateCoordinator(db: Database): void {
   } catch {
     /* already exists */
   }
+  upsertManualRosterBindings(db);
 }
 
 /**

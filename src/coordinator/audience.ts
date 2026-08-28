@@ -1,4 +1,5 @@
 import type { Guild, GuildMember } from "discord.js";
+import { partitionRosterUsers } from "../storage/roster-map.ts";
 import { isRosterRole, rosterAudienceForRoles } from "./roster-map.ts";
 
 const ROLE_MENTION_RE = /<@&(\d+)>/g;
@@ -92,6 +93,28 @@ export function meetingAudienceFromSelections(selections: AudienceSelection[]): 
     audienceKind: rosterAudienceForRoles(roleIds) ?? "picked",
     userSelections,
   };
+}
+
+export function formatUnmappedInviteRefusal(unmapped: Array<{ displayName: string }>): string {
+  const names = unmapped.map((row) => row.displayName).filter(Boolean);
+  return `I can only invite F26 / @Eboard plus people already on the roster map. I will not invent emails. Unmapped: ${names.join(", ") || "unknown user"}.`;
+}
+
+/** F26 role dump and/or users who already have roster_bindings. Refuse unmapped @users. */
+export function resolveMeetingInvitees(selections: AudienceSelection[]):
+  | {
+      ok: true;
+      audienceKind: "picked" | "f26_roster";
+      participants: Array<{ userId: string; displayName: string }>;
+    }
+  | { ok: false; reason: "unmapped-users" | "no-audience"; unmapped: Array<{ id: string; displayName: string }> } {
+  const audience = meetingAudienceFromSelections(selections);
+  const { bound, unmapped } = partitionRosterUsers(audience.userSelections);
+  if (unmapped.length > 0) return { ok: false, reason: "unmapped-users", unmapped };
+  if (audience.audienceKind !== "f26_roster" && bound.length === 0) {
+    return { ok: false, reason: "no-audience", unmapped: [] };
+  }
+  return { ok: true, audienceKind: audience.audienceKind, participants: bound };
 }
 
 /** Expand Discord users + roles at create time and snapshot membership. */

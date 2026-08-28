@@ -4,11 +4,57 @@ export const ROSTER_TAB = "F26";
 export const ROSTER_TAB_GID = "1079418365";
 /** Same snowflake as JOB_TRIGGER Eboard. Detect this role mention/select, not the word "eboard". */
 export const EBOARD_ROLE_ID = "1203562091500404782";
+export const LEADERSHIP_ROLE_ID = "1203562091517321230";
+export const SENIOR_ADV_ROLE_ID = "1322388298634756156";
+
+/** /meet create|cancel|seed and mention-booking. Not the full JOB_TRIGGER set. */
+export const MEET_INVOKE_ROLE_IDS = new Set([
+  EBOARD_ROLE_ID,
+  LEADERSHIP_ROLE_ID,
+  SENIOR_ADV_ROLE_ID,
+]);
 
 /** Mapped Discord role → sheet dump. Add snowflakes here; do not live-expand members. */
 export const ROSTER_ROLE_AUDIENCE = {
   [EBOARD_ROLE_ID]: "f26_roster",
 } as const;
+
+/**
+ * Empty-Disc F26 rows that ARE on Discord. One-shot upsert only — do not guess
+ * further accounts. Do not bind khidir_41052.
+ */
+export const MANUAL_ROSTER_BINDINGS: RosterMapping[] = [
+  {
+    discord_id: "397295320859541514",
+    email: "marc.lam@nyu.edu",
+    name: "Marc Lam",
+    disc: "m.lam",
+    confidence: "name",
+  },
+  {
+    discord_id: "461685240138694667",
+    email: "zjk2012@nyu.edu",
+    name: "Zachary Kublaisingh",
+    disc: "zach4100",
+    confidence: "name",
+  },
+  {
+    discord_id: "780412168754561045",
+    email: "kka6822@nyu.edu",
+    name: "Khidir Ahmed",
+    disc: "khidirahm",
+    confidence: "name",
+  },
+  {
+    discord_id: "196692594443550720",
+    email: "fmh9301@nyu.edu",
+    name: "Fahim Hussain",
+    disc: "frykher",
+    confidence: "name",
+  },
+];
+
+export const EXCLUDED_ROSTER_DISCORD_IDS = new Set(["1379449057474379819"]);
 
 export type RosterAudienceKind = (typeof ROSTER_ROLE_AUDIENCE)[keyof typeof ROSTER_ROLE_AUDIENCE];
 
