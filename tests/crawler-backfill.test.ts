@@ -414,3 +414,30 @@ describe("backfillChannel include_threads", () => {
     expect(result.complete).toBe(true);
   }, 20_000);
 });
+
+describe("parseBackfillChannelFlag / channelFilterForBackfill", () => {
+  test("reads --channel=<id> and ignores unrelated args", async () => {
+    const { parseBackfillChannelFlag } = await import("../src/crawler/backfill.ts");
+    expect(parseBackfillChannelFlag(["--channel=1001"])).toBe("1001");
+    expect(parseBackfillChannelFlag(["--hot", "--channel=2002"])).toBe("2002");
+    expect(parseBackfillChannelFlag([])).toBeUndefined();
+    expect(parseBackfillChannelFlag(["--channel="])).toBeUndefined();
+    expect(parseBackfillChannelFlag(["--channel", "1001"])).toBeUndefined();
+  });
+
+  test("filter keeps only the named allowlisted channel", async () => {
+    const { channelFilterForBackfill } = await import("../src/crawler/backfill.ts");
+    const channels = [
+      { id: "1001", name: "sponsors" },
+      { id: "2002", name: "leadership-team" },
+    ] as any;
+    const filter = channelFilterForBackfill("1001", channels)!;
+    expect(channels.filter(filter).map((c: { id: string }) => c.id)).toEqual(["1001"]);
+  });
+
+  test("unknown --channel throws rather than crawling nothing", async () => {
+    const { channelFilterForBackfill } = await import("../src/crawler/backfill.ts");
+    expect(() => channelFilterForBackfill("9999", [{ id: "1001" }] as any)).toThrow(/unknown --channel 9999/);
+    expect(channelFilterForBackfill(undefined, [{ id: "1001" }] as any)).toBeUndefined();
+  });
+});

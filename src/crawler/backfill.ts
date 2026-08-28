@@ -171,6 +171,29 @@ async function backfillThread(
   }
 }
 
+/** Parse `--channel=<id>` from CLI args (issue #4). Empty value is ignored. */
+export function parseBackfillChannelFlag(args: string[]): string | undefined {
+  const eq = args.find((a) => a.startsWith("--channel="));
+  if (!eq) return undefined;
+  const id = eq.slice("--channel=".length).trim();
+  return id.length > 0 ? id : undefined;
+}
+
+/**
+ * Restrict backfill to one allowlisted channel. Unknown ids throw so a typo
+ * cannot silently crawl nothing (or everything).
+ */
+export function channelFilterForBackfill(
+  channelId: string | undefined,
+  channels: Channel[],
+): ((c: Channel) => boolean) | undefined {
+  if (!channelId) return undefined;
+  if (!channels.some((c) => c.id === channelId)) {
+    throw new Error(`unknown --channel ${channelId}`);
+  }
+  return (c) => c.id === channelId;
+}
+
 /**
  * Backfill all allowlisted channels with bounded concurrency.
  * Concurrency cap = 2 (per plan) — gentle on Discord's per-token rate limits.
