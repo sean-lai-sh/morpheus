@@ -142,8 +142,13 @@ export interface FileWindow {
  * default — these files are append-ordered oldest → newest, so the last bytes
  * are the recent conversation an agent almost always wants first.
  *
- * The window is snapped forward to the next block boundary so a read never
- * begins mid-message, and the file header is always prepended so the agent
+ * The window is snapped backward to the previous block boundary so a read
+ * never begins mid-message. Snap-forward would skip the current (often last)
+ * block when it is larger than `bytes`, returning an empty newest window and
+ * a `before=${start}` that loops on the same empty range.
+ *
+ * Accepting a slightly larger window is the point: the last block is what
+ * "recent" questions need. The file header is always prepended so the agent
  * knows which channel it is looking at even when reading from the middle.
  *
  * `before` pages backwards: pass the previous window's `start`.
@@ -166,11 +171,12 @@ export function readFileWindow(
       : size;
   let start = Math.max(bodyFloor, anchorEnd - bytes);
 
-  // Snap forward to a whole block so the window never opens mid-message.
-  if (start > bodyFloor) {
-    const nextBlock = buf.indexOf(BLOCK_START, start);
-    if (nextBlock >= 0 && nextBlock < anchorEnd) start = nextBlock + 1;
-    else start = anchorEnd;
+  // Snap backward to a whole-block start. If the last (or current) block is
+  // larger than `bytes`, include that whole block rather than emptying.
+  if (start > bodyFloor && start < anchorEnd) {
+    const prev = buf.lastIndexOf(BLOCK_START, start - 1);
+    if (prev >= bodyFloor) start = prev + 1;
+    else start = bodyFloor;
   }
 
   return {

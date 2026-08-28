@@ -53,9 +53,9 @@ export interface JobRow {
 /**
  * Which worker path a job takes. `interactive` (@mention, reply, /ask) runs on
  * the local Cursor SDK sibling — a single serialized agent per channel, so it
- * is the scarce resource the per-author caps protect. `background`
- * (/background) goes to the remote Grok worker and is deliberately uncapped
- * here.
+ * is the scarce resource the per-author interactive caps protect. `background`
+ * (/background) goes to the remote Grok worker and is counted separately so a
+ * Grok flood cannot lock the Mini slot, and /background is not unbounded.
  */
 export type JobLaneName = "interactive" | "background";
 

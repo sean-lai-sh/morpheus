@@ -188,33 +188,32 @@ export async function tryEnqueueJob(
   const now = opts.now ?? Date.now();
   const lane = laneForSource(candidate.source);
 
-  // Caps guard the LOCAL Cursor SDK sibling: one agent per channel, serialized,
-  // on this box. /background hands off to the remote Grok worker, which has its
-  // own capacity, so it is neither capped nor counted here — a queue of
-  // background jobs must never lock someone out of the interactive lane.
-  if (lane === "interactive") {
-    if (
-      countOutstandingJobs(candidate.authorId, candidate.discordChannelId, "interactive") >=
-      maxOutstanding
-    ) {
-      logger.info(
-        {
-          author_id: candidate.authorId,
-          channel_id: candidate.discordChannelId,
-          cap: maxOutstanding,
-          lane,
-        },
-        "job enqueue skipped: outstanding cap (per channel, interactive lane)",
-      );
-      return { job: null, skipped: "outstanding-cap" };
-    }
-    if (countJobsSince(candidate.authorId, now - 3_600_000, "interactive") >= maxPerHour) {
-      logger.info(
-        { author_id: candidate.authorId, cap: maxPerHour, lane },
-        "job enqueue skipped: hourly cap (interactive lane)",
-      );
-      return { job: null, skipped: "rate-cap" };
-    }
+  // Caps are lane-scoped: interactive (local SDK) and background (Grok) each
+  // have their own outstanding/hourly counters. Passing `lane` into the
+  // existing counters keeps a Grok flood from locking the Mini slot, and
+  // keeps /background from enqueueing unboundedly. Role gate above still
+  // fail-closes for every lane.
+  if (
+    countOutstandingJobs(candidate.authorId, candidate.discordChannelId, lane) >=
+    maxOutstanding
+  ) {
+    logger.info(
+      {
+        author_id: candidate.authorId,
+        channel_id: candidate.discordChannelId,
+        cap: maxOutstanding,
+        lane,
+      },
+      "job enqueue skipped: outstanding cap (per channel, per lane)",
+    );
+    return { job: null, skipped: "outstanding-cap" };
+  }
+  if (countJobsSince(candidate.authorId, now - 3_600_000, lane) >= maxPerHour) {
+    logger.info(
+      { author_id: candidate.authorId, cap: maxPerHour, lane },
+      "job enqueue skipped: hourly cap (per lane)",
+    );
+    return { job: null, skipped: "rate-cap" };
   }
 
   const mentionedIds =

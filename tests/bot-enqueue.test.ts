@@ -20,7 +20,7 @@ import { authorPassesRoleGate, tryEnqueueJob, type JobCandidate } from "../src/b
 import { parseEnv } from "../src/config.ts";
 import type { ChannelResolver } from "../src/context/namespace.ts";
 import { upsertMessage } from "../src/storage/messages.ts";
-import { getJobByDiscordMessageId } from "../src/storage/jobs.ts";
+import { countOutstandingJobs, getJobByDiscordMessageId } from "../src/storage/jobs.ts";
 import { stopAllJobTyping } from "../src/bot/typing.ts";
 
 const ROLE = "role-eboard";
@@ -243,6 +243,77 @@ describe("tryEnqueueJob negatives", () => {
       maxOutstanding: 50,
     });
     expect(r.skipped).toBe("rate-cap");
+  });
+
+  test("/background is lane-capped and does not consume the interactive slot", async () => {
+    const author = "bg-cap-u";
+    const bgOpts = { ...policy, maxOutstanding: 2, maxPerHour: 50 };
+    for (const id of ["e-bg-cap-1", "e-bg-cap-2"]) {
+      const queued = await tryEnqueueJob(
+        candidate({ discordMessageId: id, authorId: author, source: "background" }),
+        bgOpts,
+      );
+      expect(queued.skipped).toBeUndefined();
+    }
+    expect(countOutstandingJobs(author, SPONSORS, "background")).toBe(2);
+    expect(countOutstandingJobs(author, SPONSORS, "interactive")).toBe(0);
+    const blocked = await tryEnqueueJob(
+      candidate({ discordMessageId: "e-bg-cap-3", authorId: author, source: "background" }),
+      bgOpts,
+    );
+    expect(blocked.skipped).toBe("outstanding-cap");
+    // Interactive lane is still free for the same author in the same channel.
+    const interactive = await tryEnqueueJob(
+      candidate({ discordMessageId: "e-bg-cap-ix", authorId: author }),
+      bgOpts,
+    );
+    expect(interactive.skipped).toBeUndefined();
+    expect(countOutstandingJobs(author, SPONSORS, "interactive")).toBe(1);
+    expect(countOutstandingJobs(author, SPONSORS, "background")).toBe(2);
+  });
+
+  test("/background hourly cap is lane-scoped; interactive hourly remains independent", async () => {
+    const author = "bg-rate-u";
+    const now = 20_000_000;
+    const bgOpts = { ...policy, now, maxPerHour: 2, maxOutstanding: 50 };
+    for (const id of ["e-bg-rate-1", "e-bg-rate-2"]) {
+      const queued = await tryEnqueueJob(
+        candidate({ discordMessageId: id, authorId: author, source: "background" }),
+        bgOpts,
+      );
+      expect(queued.skipped).toBeUndefined();
+    }
+    const blocked = await tryEnqueueJob(
+      candidate({ discordMessageId: "e-bg-rate-3", authorId: author, source: "background" }),
+      { ...bgOpts, now: now + 1000 },
+    );
+    expect(blocked.skipped).toBe("rate-cap");
+    const interactive = await tryEnqueueJob(
+      candidate({ discordMessageId: "e-bg-rate-ix", authorId: author }),
+      { ...bgOpts, now: now + 1000 },
+    );
+    expect(interactive.skipped).toBeUndefined();
+  });
+
+  test("/background still fail-closes on the role gate", async () => {
+    const noRoles = await tryEnqueueJob(
+      candidate({
+        discordMessageId: "e-bg-norole",
+        authorId: "bg-role-u",
+        source: "background",
+        authorRoleIds: [],
+      }),
+      policy,
+    );
+    expect(noRoles.skipped).toBe("role-gate");
+    expect(noRoles.job).toBeNull();
+
+    const emptySet = await tryEnqueueJob(
+      candidate({ discordMessageId: "e-bg-empty-roles", authorId: "bg-role-u2", source: "background" }),
+      { ...policy, triggerRoleIds: new Set(), nodeEnv: "production" },
+    );
+    expect(emptySet.skipped).toBe("role-gate");
+    expect(emptySet.job).toBeNull();
   });
 
   test("duplicate discord_message_id is skipped", async () => {

@@ -146,6 +146,33 @@ describe("readFileWindow", () => {
     expect(w.body).toContain("message body number 0 ");
     expect(w.body).toContain("message body number 2");
   });
+
+  test("a last block larger than `bytes` still returns that newest block (no empty snap-forward)", () => {
+    const dir = resolve(discordDir(), SPONSORS_DIR);
+    mkdirSync(dir, { recursive: true });
+    const header = ["# #sponsors", "- channel_id: 1001", "- guild_id: 1", ""].join("\n");
+    const last = `## [2026-08-28 00:00 UTC] @someone (msg:9999)\nOVERSIZED LAST BLOCK ${"z".repeat(4_000)}`;
+    const older = `## [2026-01-01 00:00 UTC] @someone (msg:1000)\noldest small block`;
+    writeFileSync(resolve(dir, "main.md"), `${header}\n---\n${older}\n\n${last}\n`);
+
+    const ref = rawFilePathFor(SPONSORS_PATH, scopeFor(EBOARD)!)!;
+    const w = readFileWindow(ref, { bytes: 200 });
+
+    expect(w.body.length).toBeGreaterThan(0);
+    expect(w.body).toContain("OVERSIZED LAST BLOCK");
+    expect(w.body).toContain("msg:9999");
+    expect(w.body.startsWith("## [")).toBe(true);
+    expect(w.end).toBe(w.size);
+    expect(w.hasOlder).toBe(true);
+    expect(w.start).toBeLessThan(w.end);
+
+    // Paging with before=${start} must move, not loop on the same empty range.
+    const prev = readFileWindow(ref, { bytes: 200, before: w.start });
+    expect(prev.end).toBe(w.start);
+    expect(prev.start).toBeLessThan(w.start);
+    expect(prev.body).toContain("oldest small block");
+    expect(prev.body).not.toBe(w.body);
+  });
 });
 
 describe("fileEtag", () => {
