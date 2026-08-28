@@ -27,6 +27,12 @@ import {
   redactCalendarJobContent,
   serializeCalendarJobPack,
 } from "./calendar-job.ts";
+import {
+  tryMiniCalendarCancel,
+  tryMiniCalendarSync,
+  type FastPathOutcome,
+} from "./calendar-fast-path.ts";
+import { applyCalendarSyncResult, type MeetingRow } from "../storage/coordinator-meetings.ts";
 
 export const OUTBOX_HANDOFF_TIMEOUT_MS = 1_500;
 
@@ -220,12 +226,22 @@ export interface CalendarJobDispatch {
   (input: { discordMessageId: string }): Promise<boolean>;
 }
 
+export interface CalendarFastPath {
+  (input: {
+    kind: "meeting.calendar_sync" | "meeting.calendar_cancel";
+    meeting: MeetingRow;
+    participantIds: string[];
+  }): Promise<FastPathOutcome>;
+}
+
 async function dispatchCalendarJob(
   event: OutboxEvent,
   now: number,
   opts: {
     enqueue?: CalendarJobEnqueue;
     dispatch?: CalendarJobDispatch;
+    /** Test seam. Omitted in production so the real credential check runs. */
+    fastPath?: CalendarFastPath;
   } = {},
 ): Promise<OutboxDispatchStatus> {
   const meetingId = String(event.payload.meetingId ?? event.aggregateId);
@@ -244,13 +260,63 @@ async function dispatchCalendarJob(
 
   const kind =
     event.type === "meeting.calendar_cancel_requested" ? "meeting.calendar_cancel" : "meeting.calendar_sync";
+  const participantIds = getMeetingParticipants(meeting.id).map((person) => person.userId);
+
+  // Deterministic path first. The Mini holds `roster_bindings`, so it is the
+  // only process that can turn these snowflakes into addresses -- Grok cannot
+  // query them, which is why the remote pack carries only counts and ids. Any
+  // skip falls through to the Grok handoff below, so a miss costs latency, not
+  // the meeting.
+  const runFastPath =
+    opts.fastPath ??
+    ((input) =>
+      input.kind === "meeting.calendar_cancel"
+        ? tryMiniCalendarCancel({
+            meetingId: input.meeting.id,
+            calendarEventId: input.meeting.calendarEventId,
+          })
+        : tryMiniCalendarSync({
+            meetingId: input.meeting.id,
+            title: input.meeting.title,
+            startsAt: new Date(input.meeting.startsAt).toISOString(),
+            endsAt: new Date(input.meeting.endsAt).toISOString(),
+            timeZone: input.meeting.timeZone,
+            notes: input.meeting.notes,
+            audience: input.meeting.audienceKind ?? "picked",
+            participantIds: input.participantIds,
+            calendarEventId: input.meeting.calendarEventId,
+          }));
+
+  const fast = await runFastPath({ kind, meeting, participantIds });
+  if (fast.ok) {
+    if (kind === "meeting.calendar_sync") {
+      applyCalendarSyncResult({
+        meetingId: meeting.id,
+        version,
+        calendarEventId: fast.calendarEventId,
+        meetLink: fast.meetLink,
+        now,
+      });
+    }
+    markOutboxDispatched(event.id, now);
+    logger.info(
+      logCorrelate(event, { meetingId, attendees: fast.attendeeCount, path: "mini" }),
+      "outbox.publish.accepted",
+    );
+    return "accepted";
+  }
+  logger.info(
+    logCorrelate(event, { meetingId, skip: fast.skip }),
+    "calendar fast path skipped; handing off to Grok",
+  );
+
   const pack = buildCalendarJobPack({
     kind,
     meeting,
     outboxId: event.id,
     version,
-    participantCount: getMeetingParticipants(meeting.id).length,
-    participantIds: getMeetingParticipants(meeting.id).map((person) => person.userId),
+    participantCount: participantIds.length,
+    participantIds,
   });
   const content = redactCalendarJobContent(serializeCalendarJobPack(pack));
   if (/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(content.replace(/hello@techatnyu\.org/gi, ""))) {
@@ -350,6 +416,8 @@ export async function publishOutboxEvent(
     sendDm?: ReminderDmSender["send"];
     enqueueCalendar?: CalendarJobEnqueue;
     dispatchCalendar?: CalendarJobDispatch;
+    /** Test seam for the Mini-side Calendar insert; see `dispatchCalendarJob`. */
+    calendarFastPath?: CalendarFastPath;
   } = {},
 ): Promise<OutboxDispatchOutcome> {
   const now = opts.now ?? Date.now();
@@ -366,6 +434,7 @@ export async function publishOutboxEvent(
       const status = await dispatchCalendarJob(event, now, {
         enqueue: opts.enqueueCalendar,
         dispatch: opts.dispatchCalendar,
+        fastPath: opts.calendarFastPath,
       });
       return { outboxId: event.id, status };
     }

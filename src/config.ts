@@ -129,6 +129,14 @@ const envSchema = z
      */
     CURSOR_API_KEY: z.preprocess(emptyToUndef, z.string().min(1).optional()),
     NVIDIA_API_KEY: z.string().min(1).optional(),
+    /**
+     * Service-account key for the Mini's deterministic Calendar insert. Held so
+     * `redactSecrets` and the fail-closed payload scan can strip it from any
+     * outbound pack or Discord reply -- a leaked key is a full Workspace
+     * compromise, so it is a first-class Mini secret even though only
+     * `google-auth.ts` reads it for real (via `parseGoogleAuthEnv`).
+     */
+    GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: z.preprocess(emptyToUndef, z.string().min(1).optional()),
     LOG_LEVEL: z.string().default("info"),
     HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8080),
     /** Bind address for Morpheus HTTP. Loopback or Tailscale only. Default 127.0.0.1. */

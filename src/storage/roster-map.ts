@@ -48,6 +48,21 @@ export function lookupRosterBindings(discordIds: string[]): RosterBindingRow[] {
   return discordIds.map(getRosterBinding).filter((row): row is RosterBindingRow => row !== null);
 }
 
+/**
+ * Every binding the seed produced, ordered for stable output.
+ *
+ * This is the `f26_roster` audience as the Mini can see it: the intersection of
+ * the F26 sheet and the Discord guild. Sheet rows whose Disc never matched a
+ * member are reported as `unmatched` at seed time and not persisted, so they are
+ * absent here -- see the count the caller reports back to the organizer.
+ */
+export function listAllRosterBindings(): RosterBindingRow[] {
+  return getDb()
+    .query<BindingDbRow, []>(`SELECT * FROM roster_bindings ORDER BY discord_id ASC`)
+    .all()
+    .map(mapRow);
+}
+
 function upsertMappings(db: Database, mappings: RosterMapping[], now: number): number {
   let mapped = 0;
   db.transaction(() => {
