@@ -349,11 +349,11 @@ export function parseNaturalStart(text: string, timeZone: string, now: number): 
 
 function parseTimeRange(text: string): { hour: number; minute: number; durationMinutes: number } | null {
   const mer = /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*[-–]\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i.exec(text);
-  if (mer?.[1] && mer[4] && mer[5]) {
-    const endMeridiem = mer[5].toLowerCase();
-    const startMeridiem = (mer[3] ?? mer[5]).toLowerCase();
+  if (mer?.[1] && mer[4] && mer[6]) {
+    const endMeridiem = mer[6].toLowerCase();
+    const startMeridiem = (mer[3] ?? mer[6]).toLowerCase();
     const start = toClock(Number(mer[1]), Number(mer[2] ?? "0"), startMeridiem);
-    const end = toClock(Number(mer[4]), Number(mer[6] ?? "0"), endMeridiem);
+    const end = toClock(Number(mer[4]), Number(mer[5] ?? "0"), endMeridiem);
     if (!start || !end) return null;
     let duration = (end.hour * 60 + end.minute) - (start.hour * 60 + start.minute);
     if (duration <= 0) duration += 12 * 60;

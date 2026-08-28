@@ -14,6 +14,7 @@ import {
   type GuildMember,
   type Interaction,
   type MessageActionRowComponentBuilder,
+  type MentionableSelectMenuInteraction,
   type MessageComponentInteraction,
   type ModalSubmitInteraction,
   type TextBasedChannel,
@@ -650,8 +651,12 @@ async function handleMeetCommand(interaction: ChatInputCommandInteraction): Prom
   });
 }
 
-function mentionableSelections(interaction: MessageComponentInteraction) {
+function asMentionableSelect(interaction: MessageComponentInteraction): MentionableSelectMenuInteraction {
   if (!interaction.isMentionableSelectMenu()) throw new Error("Choose Discord users or roles.");
+  return interaction;
+}
+
+function mentionableSelections(interaction: MentionableSelectMenuInteraction) {
   return extractMentionableAudience({
     values: [...interaction.values],
     resolved: {
@@ -667,7 +672,7 @@ function mentionableSelections(interaction: MessageComponentInteraction) {
 }
 
 function hydratePickerUsers(
-  interaction: MessageComponentInteraction,
+  interaction: MentionableSelectMenuInteraction,
   people: Array<{ userId: string; displayName: string; username: string | null; globalName: string | null; guildNick: string | null }>,
 ) {
   return people.map((person) => {
@@ -686,10 +691,11 @@ function hydratePickerUsers(
 async function resolveComponentAudience(
   interaction: MessageComponentInteraction,
 ): Promise<Array<{ userId: string; displayName: string; username: string | null; globalName: string | null; guildNick: string | null }>> {
-  const selections = mentionableSelections(interaction);
-  const people = await expandAudience({ selections, guild: interaction.guild });
+  const select = asMentionableSelect(interaction);
+  const selections = mentionableSelections(select);
+  const people = await expandAudience({ selections, guild: select.guild });
   if (people.length === 0) throw new Error("That selection did not resolve to any Discord users.");
-  return hydratePickerUsers(interaction, people);
+  return hydratePickerUsers(select, people);
 }
 
 /** Meetings: roles mean F26 Preferred Emails. Do not expand role members. */
@@ -705,13 +711,14 @@ async function resolveMeetingPicker(
     guildNick: string | null;
   }>;
 }> {
-  const selections = mentionableSelections(interaction);
+  const select = asMentionableSelect(interaction);
+  const selections = mentionableSelections(select);
   const { audienceKind, userSelections } = meetingAudienceFromSelections(selections);
-  const people = await expandAudience({ selections: userSelections, guild: interaction.guild });
+  const people = await expandAudience({ selections: userSelections, guild: select.guild });
   if (audienceKind === "picked" && people.length === 0) {
     throw new Error("That selection did not resolve to any Discord users.");
   }
-  return { audienceKind, participants: hydratePickerUsers(interaction, people) };
+  return { audienceKind, participants: hydratePickerUsers(select, people) };
 }
 
 async function saveTaskDueDate(
