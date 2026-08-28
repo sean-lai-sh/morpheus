@@ -149,6 +149,10 @@ function migrateAlter(db: Database): void {
   try { db.exec(`DROP TABLE IF EXISTS nia_sync_state`); } catch { /* ignore */ }
   try { db.exec(`ALTER TABLE jobs ADD COLUMN scope TEXT`); } catch { /* already exists */ }
   try { db.exec(`ALTER TABLE jobs ADD COLUMN channel_ids TEXT`); } catch { /* already exists */ }
+  // Lane split (#47): caps are enforced against the LOCAL SDK lane only, so the
+  // counters must be able to tell an interactive job from a /background one.
+  // Pre-existing rows default to 'interactive', which is what they were.
+  try { db.exec(`ALTER TABLE jobs ADD COLUMN lane TEXT NOT NULL DEFAULT 'interactive'`); } catch { /* already exists */ }
   migrateSeqAndFts(db);
 }
 

@@ -50,6 +50,15 @@ export interface JobRow {
   updated_at: number;
 }
 
+/**
+ * Which worker path a job takes. `interactive` (@mention, reply, /ask) runs on
+ * the local Cursor SDK sibling — a single serialized agent per channel, so it
+ * is the scarce resource the per-author caps protect. `background`
+ * (/background) goes to the remote Grok worker and is deliberately uncapped
+ * here.
+ */
+export type JobLaneName = "interactive" | "background";
+
 export interface EnqueueJobInput {
   discordMessageId: string;
   discordChannelId: string;
@@ -59,6 +68,8 @@ export interface EnqueueJobInput {
   scope?: JobScope;
   channelIds?: string[];
   content: string;
+  /** Defaults to `interactive` — the capped, local-SDK lane. */
+  lane?: JobLaneName;
 }
 
 function parseChannelIds(raw: unknown): string[] {
@@ -148,24 +159,62 @@ export function listQueued(scope: Scope, limit = 20): JobRow[] {
   return rows.map(mapJob).filter((j): j is JobRow => j !== null);
 }
 
-export function countOutstandingJobs(authorId: string): number {
+/**
+ * Outstanding jobs for an author, counted PER CHANNEL when a channel is given.
+ *
+ * The cap exists to stop one person flooding the worker, but a global count
+ * meant a stuck job in one channel silently blocked that author everywhere —
+ * so a dead `programs-dev` job made `#eboard-chat` reject new work with no
+ * signal beyond a log line. Scoping it to the channel keeps the per-channel
+ * limit while letting an author work in several channels at once.
+ *
+ * Omitting `channelId` keeps the old global behavior (used by callers that
+ * have no channel context).
+ */
+export function countOutstandingJobs(
+  authorId: string,
+  channelId?: string,
+  lane?: JobLaneName,
+): number {
+  const db = getDb();
+  const where = ["author_id = ?", "status IN ('queued', 'claimed')"];
+  const params: string[] = [authorId];
+  if (channelId != null) {
+    where.push("discord_channel_id = ?");
+    params.push(channelId);
+  }
+  if (lane != null) {
+    where.push("lane = ?");
+    params.push(lane);
+  }
   return (
-    getDb()
-      .query<{ n: number }, [string]>(
-        `SELECT COUNT(*) AS n FROM jobs
-         WHERE author_id = ? AND status IN ('queued', 'claimed')`,
-      )
-      .get(authorId)?.n ?? 0
+    db
+      .query<{ n: number }, string[]>(`SELECT COUNT(*) AS n FROM jobs WHERE ${where.join(" AND ")}`)
+      .get(...params)?.n ?? 0
   );
 }
 
-export function countJobsSince(authorId: string, sinceMs: number): number {
+export function countJobsSince(
+  authorId: string,
+  sinceMs: number,
+  lane?: JobLaneName,
+): number {
+  const db = getDb();
+  if (lane == null) {
+    return (
+      db
+        .query<{ n: number }, [string, number]>(
+          `SELECT COUNT(*) AS n FROM jobs WHERE author_id = ? AND created_at >= ?`,
+        )
+        .get(authorId, sinceMs)?.n ?? 0
+    );
+  }
   return (
-    getDb()
-      .query<{ n: number }, [string, number]>(
-        `SELECT COUNT(*) AS n FROM jobs WHERE author_id = ? AND created_at >= ?`,
+    db
+      .query<{ n: number }, [string, number, string]>(
+        `SELECT COUNT(*) AS n FROM jobs WHERE author_id = ? AND created_at >= ? AND lane = ?`,
       )
-      .get(authorId, sinceMs)?.n ?? 0
+      .get(authorId, sinceMs, lane)?.n ?? 0
   );
 }
 
@@ -199,8 +248,8 @@ export function enqueueJob(
       .query(
         `INSERT INTO jobs (
            id, discord_message_id, discord_channel_id, discord_thread_id,
-           author_id, namespace, scope, channel_ids, content, status, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+           author_id, namespace, scope, channel_ids, content, lane, status, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
       )
       .run(
         id,
@@ -212,6 +261,7 @@ export function enqueueJob(
         scope,
         JSON.stringify(channelIds),
         input.content,
+        input.lane ?? "interactive",
         now,
         now,
       );

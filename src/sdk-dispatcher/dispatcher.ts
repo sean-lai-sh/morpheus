@@ -442,6 +442,9 @@ export class SdkDispatcher {
         channel_ids: row.channelIds,
         discord_channel_id: row.discordChannelId,
       }),
+      // Also from the claimed row: local file reads re-derive the workspace
+      // boundary from this, since no bearer is involved in a disk read.
+      namespace: row.namespace,
       claimedAt: row.claimedAt,
       redactValues,
       ...(this.opts.fetcher ? { fetcher: this.opts.fetcher } : {}),

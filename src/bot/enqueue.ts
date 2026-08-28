@@ -186,19 +186,35 @@ export async function tryEnqueueJob(
   }
 
   const now = opts.now ?? Date.now();
-  if (countOutstandingJobs(candidate.authorId) >= maxOutstanding) {
-    logger.info(
-      { author_id: candidate.authorId, cap: maxOutstanding },
-      "job enqueue skipped: outstanding cap",
-    );
-    return { job: null, skipped: "outstanding-cap" };
-  }
-  if (countJobsSince(candidate.authorId, now - 3_600_000) >= maxPerHour) {
-    logger.info(
-      { author_id: candidate.authorId, cap: maxPerHour },
-      "job enqueue skipped: hourly cap",
-    );
-    return { job: null, skipped: "rate-cap" };
+  const lane = laneForSource(candidate.source);
+
+  // Caps guard the LOCAL Cursor SDK sibling: one agent per channel, serialized,
+  // on this box. /background hands off to the remote Grok worker, which has its
+  // own capacity, so it is neither capped nor counted here — a queue of
+  // background jobs must never lock someone out of the interactive lane.
+  if (lane === "interactive") {
+    if (
+      countOutstandingJobs(candidate.authorId, candidate.discordChannelId, "interactive") >=
+      maxOutstanding
+    ) {
+      logger.info(
+        {
+          author_id: candidate.authorId,
+          channel_id: candidate.discordChannelId,
+          cap: maxOutstanding,
+          lane,
+        },
+        "job enqueue skipped: outstanding cap (per channel, interactive lane)",
+      );
+      return { job: null, skipped: "outstanding-cap" };
+    }
+    if (countJobsSince(candidate.authorId, now - 3_600_000, "interactive") >= maxPerHour) {
+      logger.info(
+        { author_id: candidate.authorId, cap: maxPerHour, lane },
+        "job enqueue skipped: hourly cap (interactive lane)",
+      );
+      return { job: null, skipped: "rate-cap" };
+    }
   }
 
   const mentionedIds =
@@ -224,6 +240,7 @@ export async function tryEnqueueJob(
       scope,
       channelIds,
       content: candidate.content,
+      lane,
     },
     now,
   );
@@ -312,6 +329,13 @@ export async function dispatchEnqueuedJob(
     if (!result.dispatched) return { dispatched: false };
     // Typing starts after a 2xx from whichever worker took the job (#48);
     // the official bot on the Mini drives it, never the worker.
+    //
+    // Interactive only. `/background` is explicitly the "this takes minutes,
+    // go away and come back" lane — its slash ack already says so, and a
+    // typing indicator pulsing for several minutes reads as a hung bot rather
+    // than a working one. The ack is the acknowledgement; the reply is the
+    // result.
+    if (lane === "background") return { dispatched: true, typingStarted: false };
     const typing = await startTypingAfterDispatch(job, opts);
     return { dispatched: true, typingStarted: typing };
   } catch (err) {

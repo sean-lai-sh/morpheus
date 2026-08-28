@@ -1,6 +1,9 @@
 import type { SDKCustomTool } from "@cursor/sdk";
 import { getChannel } from "../config.ts";
 import { channelIndexPath, parseIndexPath, sanitizeIndexPath } from "../context/paths.ts";
+import { rawFilePathFor, readFileWindow } from "../context/files.ts";
+import { scopeFor } from "../context/namespace.ts";
+import type { Scope } from "../context/types.ts";
 import { logger } from "../logger.ts";
 
 /**
@@ -41,6 +44,13 @@ export interface JobToolDeps {
   jobId: string;
   /** Job scope from the CLAIMED ROW: `workspace` = token subtree; `channel` = only these ids. */
   scope: JobAccessScope;
+  /**
+   * The job's workspace id. Required for local file reads: `pathInJobScope`
+   * returns true for ANY path under a `workspace`-scoped job because the
+   * server's bearer normally owns the workspace boundary. A disk read has no
+   * server in the loop, so the boundary must be re-derived here.
+   */
+  namespace: string;
   /** claimed_at from our claim, echoed on complete so a stale worker cannot win. */
   claimedAt?: number;
   /** Secrets this process holds; scrubbed from every tool result before the model sees it. */
@@ -55,6 +65,12 @@ const MAX_TOOL_RESULT_CHARS = 30_000;
 const MAX_REPLY_CHARS = 4_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_PATH_CHARS = 200;
+/** Default raw-markdown window: the newest 30k, matching the listing cap. */
+const RAW_WINDOW_BYTES = 30_000;
+/** Ceiling on an agent-requested window, so one tool call cannot pull 676 KB. */
+const RAW_WINDOW_MAX_BYTES = 120_000;
+/** Cap for raw results; above the window ceiling so header + meta always fit. */
+const RAW_RESULT_MAX_CHARS = RAW_WINDOW_MAX_BYTES + 2_000;
 const SEARCH_LIMIT_DEFAULT = 10;
 const LINKS_LIMIT_DEFAULT = 50;
 
@@ -204,6 +220,29 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
     return { content: [{ type: "text", text: scrubText(filtered, scrubList).slice(0, MAX_TOOL_RESULT_CHARS) }] };
   }
 
+  /**
+   * Raw markdown is not a JSON listing, so `filterListingForScope` (which
+   * parses `hits`/`nodes`/`documents`) does not apply — authorization for this
+   * path happened before the read, in `rawFilePathFor` under the job's
+   * workspace scope. Secrets are still scrubbed, and the cap is the window cap
+   * rather than the 30k listing cap so a requested window is never silently
+   * halved.
+   */
+  function finishRaw(text: string): { content: Array<{ type: "text"; text: string }> } {
+    return {
+      content: [{ type: "text", text: scrubText(text, scrubList).slice(0, RAW_RESULT_MAX_CHARS) }],
+    };
+  }
+
+  /**
+   * Context provenance: one line per successful retrieval so an operator can
+   * see WHICH files/paths a job actually pulled, not just that it finished.
+   * Metadata only — never content, never the bearer.
+   */
+  function logContext(tool: string, fields: Record<string, unknown>): void {
+    logger.info({ job_id: deps.jobId, namespace: deps.namespace, tool, ...fields }, "job context read");
+  }
+
   function errorResult(text: string): { content: Array<{ type: "text"; text: string }>; isError: true } {
     return { content: [{ type: "text", text: scrubText(text, scrubList).slice(0, MAX_TOOL_RESULT_CHARS) }], isError: true };
   }
@@ -298,6 +337,7 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
         try {
           const res = await getRaw(`/v1/fs/tree?path=${encodeURIComponent(path)}`);
           if (!res.ok) return errorResult(`morpheus api ${res.status}`);
+          logContext("morpheus_fs_tree", { path });
           return finish(res.text);
         } catch {
           logger.error({ job_id: deps.jobId, tool: "morpheus_fs_tree" }, "morpheus fs GET failed");
@@ -353,6 +393,7 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
           const merged = fannedOut
             ? mergeScopedListings(texts, "hits", (h) => String(h.id ?? JSON.stringify(h)), compareHits, limit)
             : (texts[0] ?? JSON.stringify({ hits: [] }));
+          logContext("morpheus_fs_search", { query, limit, queries: bodies.length });
           return finish(merged);
         } catch {
           logger.error({ job_id: deps.jobId, tool: "morpheus_fs_search" }, "morpheus fs search failed");
@@ -375,10 +416,69 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
         try {
           const res = await getRaw(`/v1/fs/read?path=${encodeURIComponent(path)}`);
           if (!res.ok) return errorResult(`morpheus api ${res.status}`);
+          logContext("morpheus_fs_read", { path, chars: res.text.length });
           return finish(res.text);
         } catch {
           logger.error({ job_id: deps.jobId, tool: "morpheus_fs_read" }, "morpheus fs GET failed");
           return errorResult("morpheus api unreachable");
+        }
+      },
+    },
+    morpheus_fs_file: {
+      description:
+        "Read the raw markdown export backing a channel or thread — the same file the crawler " +
+        "writes, one message per '## [UTC date] @author' block, oldest first. Returns the NEWEST " +
+        "window by default, which is what 'recent'/'lately'/'what happened' questions need. " +
+        "Page backwards by passing `before` = the `window.start` from the previous call. " +
+        "Use morpheus_fs_tree to discover thread paths, and morpheus_fs_search to jump to a topic.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Channel or thread index path" },
+          bytes: { type: "number", description: `Window size, default ${RAW_WINDOW_BYTES}` },
+          before: {
+            type: "number",
+            description: "Read the window ending at this byte offset (page backwards)",
+          },
+        },
+        required: ["path"],
+      },
+      async execute(args) {
+        const path = str(args.path);
+        if (!path) return errorResult("path is required");
+        if (!pathInJobScope(path, deps.scope)) return errorResult(OUT_OF_SCOPE);
+        let scope: Scope | null;
+        try {
+          scope = scopeFor(deps.namespace);
+        } catch {
+          scope = null;
+        }
+        // No resolvable workspace → no file leaves the box.
+        if (!scope) return errorResult(OUT_OF_SCOPE);
+        const ref = rawFilePathFor(path, scope);
+        if (!ref) return errorResult("no markdown export for that path");
+        try {
+          const bytes = Math.min(
+            Math.max(typeof args.bytes === "number" ? Math.trunc(args.bytes) : RAW_WINDOW_BYTES, 1),
+            RAW_WINDOW_MAX_BYTES,
+          );
+          const before = typeof args.before === "number" ? args.before : undefined;
+          const w = readFileWindow(ref, before != null ? { bytes, before } : { bytes });
+          const nav = w.hasOlder
+            ? `older content exists: call again with before=${w.start} for the preceding window`
+            : "this is the start of the file; no older content";
+          const meta = `<!-- morpheus: ${ref.indexPath} | bytes ${w.start}-${w.end} of ${w.size} | ${nav} -->`;
+          logContext("morpheus_fs_file", {
+            path: ref.indexPath,
+            file: ref.fileName,
+            bytes: `${w.start}-${w.end}/${w.size}`,
+            chars: w.body.length,
+            has_older: w.hasOlder,
+          });
+          return finishRaw([w.header, meta, w.body].filter(Boolean).join("\n"));
+        } catch {
+          logger.error({ job_id: deps.jobId, tool: "morpheus_fs_file" }, "raw markdown read failed");
+          return errorResult("could not read that export file");
         }
       },
     },

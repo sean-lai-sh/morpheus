@@ -414,6 +414,32 @@ describe("tryEnqueueJob grok dispatch", () => {
     expect(typed).toEqual([SPONSORS]);
   });
 
+  test("/background dispatches but never starts typing (the slash ack is the acknowledgement)", async () => {
+    const typed: string[] = [];
+    const r = await tryEnqueueJob(
+      candidate({ discordMessageId: "e-typing-background", authorId: "disp-bg", source: "background" }),
+      {
+        ...policy,
+        dispatch: true,
+        env: parseEnv({
+          ...process.env,
+          GROK_BOT_WEBHOOK_URL: "https://example.com/grok-routine",
+          GROK_BOT_WEBHOOK_SECRET: "grok-sender-key-for-tests",
+          GROK_DISPATCH_WORKSPACES: DISPATCHABLE,
+          DISCORD_TYPING_ON_DISPATCH: "true",
+        }),
+        poster: async () => ({ ok: true, status: 200 }),
+        sendTyping: async (id) => {
+          typed.push(id);
+        },
+      },
+    );
+    // Dispatch still happens — only the typing indicator is suppressed.
+    expect(r.dispatched).toBe(true);
+    expect(r.typingStarted).toBe(false);
+    expect(typed).toEqual([]);
+  });
+
   test("DISCORD_TYPING_ON_DISPATCH=false skips typing after 2xx", async () => {
     const typed: string[] = [];
     const r = await tryEnqueueJob(candidate({ discordMessageId: "e-typing-off", authorId: "disp-type-off" }), {

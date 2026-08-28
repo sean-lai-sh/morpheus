@@ -754,10 +754,11 @@ describe("custom tools", () => {
     return h.runtime.sends[0]!;
   }
 
-  test("agent gets exactly the five morpheus tools", async () => {
+  test("agent gets exactly the six morpheus tools", async () => {
     const h = makeHarness();
     const run = await startJob(h);
     expect(Object.keys(run.customTools ?? {}).sort()).toEqual([
+      "morpheus_fs_file",
       "morpheus_fs_links",
       "morpheus_fs_read",
       "morpheus_fs_search",

@@ -52,7 +52,7 @@ export function channelFilePath(channel: ChannelKey): string {
   return resolve(channelDirPath(channel), "main.md");
 }
 
-function threadFilePath(channel: ChannelKey, threadId: string, threadName: string): string {
+export function threadFilePath(channel: ChannelKey, threadId: string, threadName: string): string {
   return resolve(channelDirPath(channel), "threads", `${channelSlug(threadName, threadId)}.md`);
 }
 
