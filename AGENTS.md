@@ -1,4 +1,16 @@
 
+## Cursor Cloud specific instructions
+
+This VM is for **code, typecheck, and unit tests**. It is not a Discord host.
+
+- Do **not** run `bun run live`, `bun run dev`, `doppler run`, or connect to Discord from this VM.
+- Do **not** put `DISCORD_BOT_TOKEN`, Tailscale IPs, or Doppler tokens in the repo or in `.cursor/environment.json`.
+- The official discord.js process stays on Sean’s Mac Mini. Cloud agents open PRs only.
+- Default verify: `bun run typecheck` and `bun test`.
+- `bun test` does not need live Discord or Doppler. Tests inject fake tokens and use temp SQLite — same as CI. The full suite is the default; there are no secret-gated tests to skip.
+
+---
+
 Default to using Bun instead of Node.js.
 
 - Use `bun <file>` instead of `node <file>` or `ts-node <file>`
