@@ -50,6 +50,15 @@ export interface JobRow {
   updated_at: number;
 }
 
+/**
+ * Which worker path a job takes. `interactive` (@mention, reply, /ask) runs on
+ * the local Cursor SDK sibling — a single serialized agent per channel, so it
+ * is the scarce resource the per-author interactive caps protect. `background`
+ * (/background) goes to the remote Grok worker and is counted separately so a
+ * Grok flood cannot lock the Mini slot, and /background is not unbounded.
+ */
+export type JobLaneName = "interactive" | "background";
+
 export interface EnqueueJobInput {
   discordMessageId: string;
   discordChannelId: string;
@@ -59,6 +68,8 @@ export interface EnqueueJobInput {
   scope?: JobScope;
   channelIds?: string[];
   content: string;
+  /** Defaults to `interactive` — the capped, local-SDK lane. */
+  lane?: JobLaneName;
 }
 
 function parseChannelIds(raw: unknown): string[] {
@@ -148,25 +159,109 @@ export function listQueued(scope: Scope, limit = 20): JobRow[] {
   return rows.map(mapJob).filter((j): j is JobRow => j !== null);
 }
 
-export function countOutstandingJobs(authorId: string): number {
+/**
+ * Outstanding jobs for an author, counted PER CHANNEL when a channel is given.
+ *
+ * The cap exists to stop one person flooding the worker, but a global count
+ * meant a stuck job in one channel silently blocked that author everywhere —
+ * so a dead `programs-dev` job made `#eboard-chat` reject new work with no
+ * signal beyond a log line. Scoping it to the channel keeps the per-channel
+ * limit while letting an author work in several channels at once.
+ *
+ * Omitting `channelId` keeps the old global behavior (used by callers that
+ * have no channel context).
+ */
+export function countOutstandingJobs(
+  authorId: string,
+  channelId?: string,
+  lane?: JobLaneName,
+): number {
+  const db = getDb();
+  const where = ["author_id = ?", "status IN ('queued', 'claimed')"];
+  const params: string[] = [authorId];
+  if (channelId != null) {
+    where.push("discord_channel_id = ?");
+    params.push(channelId);
+  }
+  if (lane != null) {
+    where.push("lane = ?");
+    params.push(lane);
+  }
   return (
-    getDb()
-      .query<{ n: number }, [string]>(
-        `SELECT COUNT(*) AS n FROM jobs
-         WHERE author_id = ? AND status IN ('queued', 'claimed')`,
-      )
-      .get(authorId)?.n ?? 0
+    db
+      .query<{ n: number }, string[]>(`SELECT COUNT(*) AS n FROM jobs WHERE ${where.join(" AND ")}`)
+      .get(...params)?.n ?? 0
   );
 }
 
-export function countJobsSince(authorId: string, sinceMs: number): number {
+export function countJobsSince(
+  authorId: string,
+  sinceMs: number,
+  lane?: JobLaneName,
+): number {
+  const db = getDb();
+  if (lane == null) {
+    return (
+      db
+        .query<{ n: number }, [string, number]>(
+          `SELECT COUNT(*) AS n FROM jobs WHERE author_id = ? AND created_at >= ?`,
+        )
+        .get(authorId, sinceMs)?.n ?? 0
+    );
+  }
   return (
-    getDb()
-      .query<{ n: number }, [string, number]>(
-        `SELECT COUNT(*) AS n FROM jobs WHERE author_id = ? AND created_at >= ?`,
+    db
+      .query<{ n: number }, [string, number, string]>(
+        `SELECT COUNT(*) AS n FROM jobs WHERE author_id = ? AND created_at >= ? AND lane = ?`,
       )
-      .get(authorId, sinceMs)?.n ?? 0
+      .get(authorId, sinceMs, lane)?.n ?? 0
   );
+}
+
+/**
+ * Cancel jobs that have sat `queued` past `maxAgeMs` without a worker ever
+ * claiming them.
+ *
+ * Dispatch is a one-shot wakeup POST at enqueue time; nothing re-POSTs a row
+ * whose dispatch failed (worker offline, webhook refused, workspace not in the
+ * dispatch allowlist). Such a row stays `queued` forever and permanently
+ * consumes one of its author's outstanding slots. `requeueExpiredClaims`
+ * cannot help — it only moves `claimed` back to `queued`.
+ *
+ * Only rows never claimed are swept: `claimed_by IS NULL` and no reply written.
+ * A job a worker is actively holding is the lease sweeper's business, not this
+ * one's.
+ *
+ * Two guards that are not obvious:
+ *
+ * `updated_at < cutoff` — `requeueExpiredClaims` puts a row back to `queued`
+ * without touching `created_at`, and it runs immediately before this sweep in
+ * the same interval. On age alone a just-requeued job would be cancelled in the
+ * very next statement, with an error saying no worker claimed it when one had.
+ *
+ * `discord_message_id NOT LIKE 'coordinator-outbox:%'` — coordinator jobs are
+ * owned by the outbox (`src/coordinator/publisher.ts`), which has its own
+ * retry sweeper. Cancelling one here while its outbox row is already
+ * `dispatched` loses a Calendar handoff with no user-visible signal.
+ */
+export function cancelStaleQueuedJobs(now: number, maxAgeMs: number): number {
+  const cutoff = now - maxAgeMs;
+  const rows = getDb()
+    .query<{ id: string }, [number, number, number]>(
+      `UPDATE jobs
+       SET status = 'cancelled',
+           error = 'stale: no worker claimed it before the queue timeout',
+           updated_at = ?
+       WHERE status = 'queued'
+         AND claimed_by IS NULL
+         AND created_at < ?
+         AND updated_at < ?
+         AND result_discord_message_id IS NULL
+         AND discord_message_id NOT LIKE 'coordinator-outbox:%'
+       RETURNING id`,
+    )
+    .all(now, cutoff, cutoff);
+  return rows.length;
 }
 
 function isUniqueConstraint(err: unknown): boolean {
@@ -199,8 +294,8 @@ export function enqueueJob(
       .query(
         `INSERT INTO jobs (
            id, discord_message_id, discord_channel_id, discord_thread_id,
-           author_id, namespace, scope, channel_ids, content, status, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+           author_id, namespace, scope, channel_ids, content, lane, status, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
       )
       .run(
         id,
@@ -212,6 +307,7 @@ export function enqueueJob(
         scope,
         JSON.stringify(channelIds),
         input.content,
+        input.lane ?? "interactive",
         now,
         now,
       );
@@ -244,7 +340,7 @@ export function claimJob(id: string, claimedBy: string, now: number = Date.now()
 
 export type PrepareCompleteResult =
   | { ok: true; job: JobRow; alreadyCompleted: boolean }
-  | { ok: false; reason: "not-found" | "claimed-by-mismatch" | "not-claimed" | "in-progress" };
+  | { ok: false; reason: "not-found" | "claimed-by-mismatch" | "not-claimed" | "in-progress" | "stale-claim" };
 
 export interface CompleteInput {
   reply: string;
@@ -264,6 +360,14 @@ export function prepareComplete(
   claimedBy: string,
   input: CompleteInput,
   now: number = Date.now(),
+  /**
+   * Claim generation (`claimed_at`) the worker was handed on its own claim.
+   * When provided it is part of the CAS predicate below — one atomic SQLite
+   * transition, no read-then-check — so a worker whose lease expired and was
+   * reclaimed cannot write into the new claim. `undefined` keeps the legacy
+   * Grok contract (no generation gate).
+   */
+  expectedClaimedAt?: number,
 ): PrepareCompleteResult {
   const worker = claimedBy.trim();
   const job = getJob(id);
@@ -280,17 +384,29 @@ export function prepareComplete(
 
   const completionKey = (input.completion_key?.trim() || job.completion_key || `complete:${id}`).slice(0, 200);
   const github = input.github_issue_url ?? job.github_issue_url ?? null;
+  const gen = expectedClaimedAt ?? null;
 
   const updated = getDb()
-    .query<JobRow, [string, string, string | null, number, number, string, string, string]>(
+    // Combines two fixes:
+    //   #74 (main): refresh claimed_at to `now` so an in-flight, post-lease-expiry
+    //   send is not treated as a crash by the sweeper.
+    //   #49 (this PR): atomic generation gate `AND (? IS NULL OR claimed_at = ?)`
+    //   so a worker whose lease expired and was RECLAIMED cannot write here.
+    // The refresh is applied only on the legacy path (no generation supplied).
+    // When a generation IS gated, claimed_at is left stable so the same worker's
+    // legitimate retry (echoing its original generation) still matches — the
+    // completion_key set here already keeps the sweeper off the row either way.
+    .query<JobRow, [string, string, string | null, number, number | null, number, string, string, string, number | null, number | null]>(
       `UPDATE jobs
-       SET reply_text = ?, completion_key = ?, github_issue_url = ?, updated_at = ?, claimed_at = ?, error = NULL
+       SET reply_text = ?, completion_key = ?, github_issue_url = ?, updated_at = ?,
+           claimed_at = CASE WHEN ? IS NULL THEN ? ELSE claimed_at END, error = NULL
        WHERE id = ? AND status = 'claimed' AND claimed_by = ?
          AND result_discord_message_id IS NULL
          AND (completion_key IS NULL OR (completion_key = ? AND error IS NOT NULL))
+         AND (? IS NULL OR claimed_at = ?)
        RETURNING *`,
     )
-    .get(input.reply, completionKey, github, now, now, id, worker, completionKey);
+    .get(input.reply, completionKey, github, now, gen, now, id, worker, completionKey, gen, gen);
 
   const mapped = updated ? mapJob(updated) : null;
   if (mapped) return { ok: true, job: mapped, alreadyCompleted: false };
@@ -300,6 +416,10 @@ export function prepareComplete(
   if (current.claimed_by !== worker) return { ok: false, reason: "claimed-by-mismatch" };
   if (current.status === "completed" || current.result_discord_message_id) {
     return { ok: true, job: current, alreadyCompleted: true };
+  }
+  // Distinguish a stale generation (lease expired + reclaimed) from a live retry.
+  if (expectedClaimedAt != null && current.claimed_at !== expectedClaimedAt) {
+    return { ok: false, reason: "stale-claim" };
   }
   if (current.status === "claimed") return { ok: false, reason: "in-progress" };
   return { ok: false, reason: "not-claimed" };
@@ -354,22 +474,31 @@ export function markJobSendError(id: string, error: string, now: number = Date.n
   return row ? mapJob(row) : null;
 }
 
-export function failJob(id: string, claimedBy: string, error: string, now: number = Date.now()): JobRow | null {
+export function failJob(
+  id: string,
+  claimedBy: string,
+  error: string,
+  now: number = Date.now(),
+  /** Claim generation gate — part of the CAS, same contract as prepareComplete. */
+  expectedClaimedAt?: number,
+): JobRow | null {
   const worker = claimedBy.trim();
   const job = getJob(id);
   if (!job) return null;
   if (job.status === "completed") return null;
   if (job.status !== "claimed" || job.claimed_by !== worker) return null;
   if (job.result_discord_message_id) return null;
+  const gen = expectedClaimedAt ?? null;
 
   const row = getDb()
-    .query<JobRow, [string, number, string, string]>(
+    .query<JobRow, [string, number, string, string, number | null, number | null]>(
       `UPDATE jobs
        SET status = 'failed', error = ?, updated_at = ?
        WHERE id = ? AND status = 'claimed' AND claimed_by = ?
+         AND (? IS NULL OR claimed_at = ?)
        RETURNING *`,
     )
-    .get(error.slice(0, 2000), now, id, worker);
+    .get(error.slice(0, 2000), now, id, worker, gen, gen);
   return row ? mapJob(row) : null;
 }
 

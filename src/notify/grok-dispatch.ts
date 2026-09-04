@@ -7,12 +7,33 @@ import { MAX_JOB_CHANNEL_IDS, type JobScope } from "../storage/jobs.ts";
 import { isDiscordWebhookUrl } from "./webhooks.ts";
 
 /**
- * Every configured workspace bearer. FAIL CLOSED: a config/env error here must
- * abort the caller (refuse dispatch / refuse posting), never silently shrink the
- * redaction list — the text may contain the very tokens we failed to load.
+ * Every Mini secret that must never leave the process, by env name (values
+ * never logged). Includes the CURSOR_SDK_* / CURSOR_API_KEY secrets a shared
+ * Doppler config may inject into the Mini (experiment #47).
  */
-function workspaceTokenValues(): string[] {
-  return loadWorkspaceTokens().map((t) => t.token);
+function knownSecrets(env: Env): Array<{ name: string; value: string | undefined }> {
+  return [
+    { name: "DISCORD_BOT_TOKEN", value: env.DISCORD_BOT_TOKEN },
+    { name: "DISCORD_TOKEN", value: env.DISCORD_TOKEN },
+    ...loadWorkspaceTokenEntries(),
+    { name: "GROK_BOT_WEBHOOK_URL", value: env.GROK_BOT_WEBHOOK_URL },
+    { name: "GROK_BOT_WEBHOOK_SECRET", value: env.GROK_BOT_WEBHOOK_SECRET },
+    { name: "CURSOR_SDK_WEBHOOK_URL", value: env.CURSOR_SDK_WEBHOOK_URL },
+    { name: "CURSOR_SDK_WEBHOOK_SECRET", value: env.CURSOR_SDK_WEBHOOK_SECRET },
+    { name: "CURSOR_API_KEY", value: env.CURSOR_API_KEY },
+    { name: "NVIDIA_API_KEY", value: env.NVIDIA_API_KEY },
+    { name: "GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY", value: env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY },
+  ];
+}
+
+/**
+ * No try/catch: if the configured workspace bearers cannot be enumerated, the
+ * secret scanner must fail CLOSED (callers refuse to dispatch / refuse posting),
+ * never behave as if there were no secrets to strip — the text may contain the
+ * very tokens we failed to load. Matches main's fail-closed policy (#59).
+ */
+function loadWorkspaceTokenEntries(): Array<{ name: string; value: string }> {
+  return loadWorkspaceTokens().map((t) => ({ name: t.envName, value: t.token }));
 }
 
 /**
@@ -21,20 +42,25 @@ function workspaceTokenValues(): string[] {
  * that as "do not send" (fail closed), not "nothing to redact".
  */
 export function redactSecrets(text: string, env: Env = loadEnv()): string {
-  const secrets = [
-    env.DISCORD_BOT_TOKEN,
-    env.DISCORD_TOKEN,
-    ...workspaceTokenValues(),
-    env.GROK_BOT_WEBHOOK_URL,
-    env.GROK_BOT_WEBHOOK_SECRET,
-    env.NVIDIA_API_KEY,
-  ];
   let out = text;
-  for (const v of secrets) {
-    const s = v?.trim();
+  for (const { value } of knownSecrets(env)) {
+    const s = value?.trim();
     if (s && s.length >= 8) out = out.split(s).join("[redacted]");
   }
   return out;
+}
+
+/**
+ * Fail-closed tripwire: after capping/redaction, scan the serialized payload
+ * for every known Mini secret. Returns the leaked secret's env NAME (never the
+ * value) or null. Anything ≥8 chars counts — shorter would false-positive.
+ */
+export function findLeakedSecretEnv(serialized: string, env: Env = loadEnv()): string | null {
+  for (const { name, value } of knownSecrets(env)) {
+    const s = value?.trim();
+    if (s && s.length >= 8 && serialized.includes(s)) return name;
+  }
+  return null;
 }
 
 export interface GrokJobPayload {
@@ -356,8 +382,15 @@ export async function dispatchGrokJob(
   let capped: GrokJobPayload;
   try {
     capped = capGrokPayload(payload, env);
+    const leaked = findLeakedSecretEnv(JSON.stringify(capped), env);
+    if (leaked) {
+      logger.error({ leaked_env: leaked, job_id: payload.job.id }, "refusing Grok dispatch: a Mini secret survived redaction (fail closed)");
+      return { dispatched: false, skipped: "refused-secret-in-payload" };
+    }
   } catch (err) {
-    logger.error({ err }, "refusing Grok dispatch: secret redaction unavailable (workspace tokens failed to load)");
+    // The redactor/scanner could not enumerate the Mini's secrets — that is a
+    // refusal to dispatch, never "no secrets to strip" (main #59 fail-closed).
+    logger.error({ err, job_id: payload.job.id }, "refusing Grok dispatch: secret redaction unavailable (workspace tokens failed to load)");
     return { dispatched: false, skipped: "secret-redaction-unavailable" };
   }
   const result = await poster(url, capped, headers);

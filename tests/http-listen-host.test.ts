@@ -60,6 +60,17 @@ describe("resolveListenHost", () => {
     expect(resolveListenHost()).toBe("::1");
   });
 
+  test("Tailscale IPv6 means fd7a:115c:a1e0::/48, not every fd7a: ULA", () => {
+    isolate();
+    process.env.DISCORD_BOT_TOKEN = "bot-token";
+    process.env.DISCORD_GUILD_ID = "123456789012345678";
+    process.env.HEALTH_HOST = "fd7a:115c:a1e0::1234";
+    expect(resolveListenHost()).toBe("fd7a:115c:a1e0::1234");
+    resetEnvForTest();
+    process.env.HEALTH_HOST = "fd7a:9999::1";
+    expect(() => loadEnv()).toThrow(/loopback|Tailscale/);
+  });
+
   test("wildcard and LAN/WAN unicasts are refused", () => {
     isolate();
     process.env.DISCORD_BOT_TOKEN = "bot-token";

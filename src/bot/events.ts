@@ -4,7 +4,8 @@ import { ingestDelete, ingestMessage } from "./ingest.ts";
 import { handleReactionChange } from "./reactions.ts";
 import { candidateFromMessage, tryEnqueueJob } from "./enqueue.ts";
 import { authorCanViewChannel } from "./job-scope.ts";
-import { handleAskInteraction, registerAskOnReady } from "./commands.ts";
+import { handleJobCommandInteraction, registerJobCommandsOnReady } from "./commands.ts";
+import { handleCoordinatorInteraction } from "./coordinator.ts";
 
 async function fetchIfPartial(
   message: Message | PartialMessage,
@@ -132,15 +133,16 @@ export function registerLiveHandlers(client: Client): void {
 
   client.on(Events.InteractionCreate, async (interaction) => {
     try {
-      await handleAskInteraction(interaction);
+      const handled = await handleCoordinatorInteraction(interaction);
+      if (!handled) await handleJobCommandInteraction(interaction);
     } catch (err) {
       logger.error({ err }, "InteractionCreate handler error");
     }
   });
 
-  const registerAsk = () => {
-    void registerAskOnReady(client);
+  const registerCommands = () => {
+    void registerJobCommandsOnReady(client);
   };
-  if (client.isReady()) registerAsk();
-  else client.once(Events.ClientReady, registerAsk);
+  if (client.isReady()) registerCommands();
+  else client.once(Events.ClientReady, registerCommands);
 }

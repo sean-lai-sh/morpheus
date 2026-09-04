@@ -20,7 +20,7 @@ import { authorPassesRoleGate, tryEnqueueJob, type JobCandidate } from "../src/b
 import { parseEnv } from "../src/config.ts";
 import type { ChannelResolver } from "../src/context/namespace.ts";
 import { upsertMessage } from "../src/storage/messages.ts";
-import { getJobByDiscordMessageId } from "../src/storage/jobs.ts";
+import { countOutstandingJobs, getJobByDiscordMessageId } from "../src/storage/jobs.ts";
 import { stopAllJobTyping } from "../src/bot/typing.ts";
 
 const ROLE = "role-eboard";
@@ -245,6 +245,77 @@ describe("tryEnqueueJob negatives", () => {
     expect(r.skipped).toBe("rate-cap");
   });
 
+  test("/background is lane-capped and does not consume the interactive slot", async () => {
+    const author = "bg-cap-u";
+    const bgOpts = { ...policy, maxOutstanding: 2, maxPerHour: 50 };
+    for (const id of ["e-bg-cap-1", "e-bg-cap-2"]) {
+      const queued = await tryEnqueueJob(
+        candidate({ discordMessageId: id, authorId: author, source: "background" }),
+        bgOpts,
+      );
+      expect(queued.skipped).toBeUndefined();
+    }
+    expect(countOutstandingJobs(author, SPONSORS, "background")).toBe(2);
+    expect(countOutstandingJobs(author, SPONSORS, "interactive")).toBe(0);
+    const blocked = await tryEnqueueJob(
+      candidate({ discordMessageId: "e-bg-cap-3", authorId: author, source: "background" }),
+      bgOpts,
+    );
+    expect(blocked.skipped).toBe("outstanding-cap");
+    // Interactive lane is still free for the same author in the same channel.
+    const interactive = await tryEnqueueJob(
+      candidate({ discordMessageId: "e-bg-cap-ix", authorId: author }),
+      bgOpts,
+    );
+    expect(interactive.skipped).toBeUndefined();
+    expect(countOutstandingJobs(author, SPONSORS, "interactive")).toBe(1);
+    expect(countOutstandingJobs(author, SPONSORS, "background")).toBe(2);
+  });
+
+  test("/background hourly cap is lane-scoped; interactive hourly remains independent", async () => {
+    const author = "bg-rate-u";
+    const now = 20_000_000;
+    const bgOpts = { ...policy, now, maxPerHour: 2, maxOutstanding: 50 };
+    for (const id of ["e-bg-rate-1", "e-bg-rate-2"]) {
+      const queued = await tryEnqueueJob(
+        candidate({ discordMessageId: id, authorId: author, source: "background" }),
+        bgOpts,
+      );
+      expect(queued.skipped).toBeUndefined();
+    }
+    const blocked = await tryEnqueueJob(
+      candidate({ discordMessageId: "e-bg-rate-3", authorId: author, source: "background" }),
+      { ...bgOpts, now: now + 1000 },
+    );
+    expect(blocked.skipped).toBe("rate-cap");
+    const interactive = await tryEnqueueJob(
+      candidate({ discordMessageId: "e-bg-rate-ix", authorId: author }),
+      { ...bgOpts, now: now + 1000 },
+    );
+    expect(interactive.skipped).toBeUndefined();
+  });
+
+  test("/background still fail-closes on the role gate", async () => {
+    const noRoles = await tryEnqueueJob(
+      candidate({
+        discordMessageId: "e-bg-norole",
+        authorId: "bg-role-u",
+        source: "background",
+        authorRoleIds: [],
+      }),
+      policy,
+    );
+    expect(noRoles.skipped).toBe("role-gate");
+    expect(noRoles.job).toBeNull();
+
+    const emptySet = await tryEnqueueJob(
+      candidate({ discordMessageId: "e-bg-empty-roles", authorId: "bg-role-u2", source: "background" }),
+      { ...policy, triggerRoleIds: new Set(), nodeEnv: "production" },
+    );
+    expect(emptySet.skipped).toBe("role-gate");
+    expect(emptySet.job).toBeNull();
+  });
+
   test("duplicate discord_message_id is skipped", async () => {
     const author = "dup-u";
     await tryEnqueueJob(candidate({ discordMessageId: "e-dup", authorId: author }), policy);
@@ -412,6 +483,32 @@ describe("tryEnqueueJob grok dispatch", () => {
     expect(r.dispatched).toBe(true);
     expect(r.typingStarted).toBe(true);
     expect(typed).toEqual([SPONSORS]);
+  });
+
+  test("/background dispatches but never starts typing (the slash ack is the acknowledgement)", async () => {
+    const typed: string[] = [];
+    const r = await tryEnqueueJob(
+      candidate({ discordMessageId: "e-typing-background", authorId: "disp-bg", source: "background" }),
+      {
+        ...policy,
+        dispatch: true,
+        env: parseEnv({
+          ...process.env,
+          GROK_BOT_WEBHOOK_URL: "https://example.com/grok-routine",
+          GROK_BOT_WEBHOOK_SECRET: "grok-sender-key-for-tests",
+          GROK_DISPATCH_WORKSPACES: DISPATCHABLE,
+          DISCORD_TYPING_ON_DISPATCH: "true",
+        }),
+        poster: async () => ({ ok: true, status: 200 }),
+        sendTyping: async (id) => {
+          typed.push(id);
+        },
+      },
+    );
+    // Dispatch still happens — only the typing indicator is suppressed.
+    expect(r.dispatched).toBe(true);
+    expect(r.typingStarted).toBe(false);
+    expect(typed).toEqual([]);
   });
 
   test("DISCORD_TYPING_ON_DISPATCH=false skips typing after 2xx", async () => {

@@ -5,13 +5,13 @@ import { z } from "zod";
 import { isAllowedListenHost } from "./http/listen-allowlist.ts";
 import { isDiscordWebhookUrl } from "./notify/webhooks.ts";
 
-const emptyToUndef = (v: unknown) => {
+export const emptyToUndef = (v: unknown) => {
   if (v == null) return undefined;
   if (typeof v === "string" && v.trim() === "") return undefined;
   return v;
 };
 
-const parseBoolish = (v: unknown) => {
+export const parseBoolish = (v: unknown) => {
   if (v == null || v === "") return undefined;
   if (typeof v === "boolean") return v;
   if (typeof v === "string") {
@@ -86,7 +86,57 @@ const envSchema = z
       emptyToUndef,
       z.coerce.number().int().min(1_000).max(120_000).default(10_000),
     ),
+    /**
+     * Experiment (#47): gate for POSTing job packs to the sibling Cursor SDK
+     * dispatcher. Default OFF — the Grok path is unaffected unless this is
+     * explicitly enabled.
+     */
+    CURSOR_SDK_DISPATCH: z.preprocess(parseBoolish, z.boolean().default(false)),
+    /**
+     * Sibling Cursor SDK dispatcher URL. Same thin job pack as Grok dispatch.
+     * The sibling runs next to `bun run live`, so the host must be loopback, a
+     * Tailscale address, or a tailnet MagicDNS name (*.ts.net) — never an
+     * arbitrary internet host (http or https). Not :1340, not a Discord webhook.
+     */
+    CURSOR_SDK_WEBHOOK_URL: z.preprocess(
+      emptyToUndef,
+      z
+        .string()
+        .url()
+        .refine((u) => {
+          try {
+            const parsed = new URL(u);
+            if (parsed.port === "1340") return false;
+            if (isDiscordWebhookUrl(parsed.href)) return false;
+            if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+            const host = parsed.hostname.toLowerCase();
+            return isAllowedListenHost(host) || host.endsWith(".ts.net");
+          } catch {
+            return false;
+          }
+        }, "host must be loopback, Tailscale (100.64/10, fd7a:115c:a1e0::/48), or *.ts.net; not :1340; not a Discord webhook")
+        .optional(),
+    ),
+    /** Bearer for the sibling SDK dispatcher webhook. Auth only, never in the body. Same min as the sibling. */
+    CURSOR_SDK_WEBHOOK_SECRET: z.preprocess(
+      emptyToUndef,
+      z.string().min(16, "must be at least 16 chars").optional(),
+    ),
+    /**
+     * Sibling-only secret, but a shared Doppler config may inject it into the
+     * Mini too. The Mini never uses it — it is parsed solely so redactSecrets
+     * and the fail-closed payload scan can strip it from outbound packs.
+     */
+    CURSOR_API_KEY: z.preprocess(emptyToUndef, z.string().min(1).optional()),
     NVIDIA_API_KEY: z.string().min(1).optional(),
+    /**
+     * Service-account key for the Mini's deterministic Calendar insert. Held so
+     * `redactSecrets` and the fail-closed payload scan can strip it from any
+     * outbound pack or Discord reply -- a leaked key is a full Workspace
+     * compromise, so it is a first-class Mini secret even though only
+     * `google-auth.ts` reads it for real (via `parseGoogleAuthEnv`).
+     */
+    GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: z.preprocess(emptyToUndef, z.string().min(1).optional()),
     LOG_LEVEL: z.string().default("info"),
     HEALTH_PORT: z.coerce.number().int().min(1).max(65535).default(8080),
     /** Bind address for Morpheus HTTP. Loopback or Tailscale only. Default 127.0.0.1. */
@@ -110,6 +160,15 @@ const envSchema = z
     JOB_MAX_PER_AUTHOR_PER_HOUR: z.preprocess(
       emptyToUndef,
       z.coerce.number().int().min(1).max(1000).default(5),
+    ),
+    /**
+     * How long a job may sit `queued` with no worker claim before the sweeper
+     * cancels it. Dispatch is a one-shot wakeup, so a row whose dispatch failed
+     * would otherwise hold an outstanding slot forever. Default 1 hour.
+     */
+    JOB_QUEUE_MAX_AGE_MS: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().int().min(60_000).max(86_400_000).default(3_600_000),
     ),
     JOB_CLAIM_LEASE_MS: z.preprocess(
       emptyToUndef,

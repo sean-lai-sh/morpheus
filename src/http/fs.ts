@@ -3,6 +3,7 @@ import { authorizeV1 } from "./auth.ts";
 import { contextStore, toFtsQuery } from "../context/store.ts";
 import { channelIdsForScope, constrainIndexPath, indexPathForRow, parseIndexPath } from "../context/paths.ts";
 import { rowInScope } from "../context/namespace.ts";
+import { fileEtag, parseByteRange, rawFilePathFor } from "../context/files.ts";
 import { getChannel, loadChannels, loadEnv } from "../config.ts";
 import { isLinkKind, queryLinks } from "../storage/links.ts";
 import type { MessageRow } from "../storage/messages.ts";
@@ -81,6 +82,9 @@ export async function handleV1(req: Request): Promise<Response> {
     }
     if (url.pathname === "/v1/fs/read" && req.method === "GET") {
       return handleRead(url, namespace);
+    }
+    if (url.pathname === "/v1/fs/file" && (req.method === "GET" || req.method === "HEAD")) {
+      return handleFile(req, url, namespace);
     }
     const msgMatch = /^\/v1\/messages\/([^/]+)$/.exec(url.pathname);
     if (msgMatch && req.method === "GET") {
@@ -210,6 +214,74 @@ function handleRead(url: URL, namespace: Scope): Response {
     return json({ path: safe, documents: result });
   }
   return json({ path: safe, document: result });
+}
+
+/**
+ * Serve the raw `.md` that backs a channel or thread, with ordinary file
+ * download semantics so any HTTP client (curl -r, a Range-aware fetcher, a
+ * resumable downloader) can take a slice without a bespoke pagination API.
+ *
+ * `HEAD` answers size + validators so a caller can decide how much to pull
+ * before pulling any of it. The whole-file `GET` is the "just read it" path;
+ * `Range: bytes=-32768` is the "give me the newest 32 KB" path, since these
+ * files are append-ordered oldest → newest.
+ */
+function handleFile(req: Request, url: URL, namespace: Scope): Response {
+  const raw = url.searchParams.get("path");
+  if (raw == null) return json({ error: "not found" }, 404);
+  const bad = rejectPath(raw, namespace);
+  if (bad) return bad;
+
+  const ref = rawFilePathFor(raw, namespace);
+  // One 404 for "no such path", "not visible to you", and "no backing file",
+  // so the response never confirms the existence of something out of scope.
+  if (ref == null) return json({ error: "not found" }, 404);
+
+  const etag = fileEtag(ref);
+  const lastModified = new Date(ref.mtimeMs).toUTCString();
+  const baseHeaders: Record<string, string> = {
+    "content-type": "text/markdown; charset=utf-8",
+    "content-disposition": `attachment; filename="${ref.fileName}"`,
+    "accept-ranges": "bytes",
+    etag,
+    "last-modified": lastModified,
+    "cache-control": "no-store",
+    // Lets a caller map the bytes back to the index without re-deriving it.
+    "x-morpheus-index-path": ref.indexPath,
+  };
+
+  if (req.method === "HEAD") {
+    return new Response(null, {
+      status: 200,
+      headers: { ...baseHeaders, "content-length": String(ref.size) },
+    });
+  }
+
+  const range = parseByteRange(req.headers.get("range"), ref.size);
+  if (range === "unsatisfiable") {
+    return new Response(null, {
+      status: 416,
+      headers: { ...baseHeaders, "content-range": `bytes */${ref.size}` },
+    });
+  }
+
+  const file = Bun.file(ref.absPath);
+  if (range) {
+    const length = range.end - range.start + 1;
+    return new Response(file.slice(range.start, range.end + 1), {
+      status: 206,
+      headers: {
+        ...baseHeaders,
+        "content-range": `bytes ${range.start}-${range.end}/${ref.size}`,
+        "content-length": String(length),
+      },
+    });
+  }
+
+  return new Response(file, {
+    status: 200,
+    headers: { ...baseHeaders, "content-length": String(ref.size) },
+  });
 }
 
 function handleMessage(id: string, namespace: Scope): Response {

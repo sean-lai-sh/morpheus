@@ -2,9 +2,10 @@ import type { Client } from "discord.js";
 import cron, { type ScheduledTask } from "node-cron";
 import { registerLiveHandlers } from "../bot/events.ts";
 import { loadChannels, loadEnv } from "../config.ts";
+import { startOutboxSweeper, stopOutboxSweeper } from "../coordinator/sweeper.ts";
 import { logger } from "../logger.ts";
 import { backupDb } from "../storage/backup.ts";
-import { requeueExpiredClaims } from "../storage/jobs.ts";
+import { cancelStaleQueuedJobs, requeueExpiredClaims } from "../storage/jobs.ts";
 import { getState } from "../storage/crawl-state.ts";
 import { backfillAll } from "./backfill.ts";
 import { reconcileAll } from "./reconcile.ts";
@@ -20,6 +21,7 @@ let claimSweep: ReturnType<typeof setInterval> | undefined;
  */
 export function startLive(client: Client): void {
   registerLiveHandlers(client);
+  startOutboxSweeper();
   logger.info("live event subscriber attached");
 
   const intervalHours = loadChannels().defaults.reconcile_interval_hours;
@@ -60,13 +62,24 @@ export function startLive(client: Client): void {
   });
   logger.info({ cron: "17 3 * * *" }, "nightly db backup scheduled");
 
-  const leaseMs = loadEnv().JOB_CLAIM_LEASE_MS;
+  const env = loadEnv();
+  const leaseMs = env.JOB_CLAIM_LEASE_MS;
+  const queueMaxAgeMs = env.JOB_QUEUE_MAX_AGE_MS;
   claimSweep = setInterval(() => {
     try {
       const n = requeueExpiredClaims(Date.now(), leaseMs);
       if (n > 0) logger.info({ n }, "requeued expired job claims");
     } catch (err) {
       logger.error({ err }, "job claim sweeper failed");
+    }
+    // Separate concern from the lease sweep above: these were never claimed at
+    // all, so no worker is coming back for them. Left alone they hold an
+    // author's outstanding slot forever.
+    try {
+      const n = cancelStaleQueuedJobs(Date.now(), queueMaxAgeMs);
+      if (n > 0) logger.info({ n, max_age_ms: queueMaxAgeMs }, "cancelled stale queued jobs");
+    } catch (err) {
+      logger.error({ err }, "stale queue sweeper failed");
     }
   }, 30_000);
   claimSweep.unref?.();
@@ -77,6 +90,7 @@ export function stopLive(): void {
   backupTask?.stop();
   autoBackfillTask?.stop();
   if (claimSweep) clearInterval(claimSweep);
+  stopOutboxSweeper();
   reconcileTask = undefined;
   backupTask = undefined;
   autoBackfillTask = undefined;

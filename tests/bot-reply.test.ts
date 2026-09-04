@@ -3,7 +3,10 @@ import {
   JOB_ALLOWED_MENTIONS,
   allowlistedGithubIssueUrl,
   completeJobWithReply,
+  ephemeralSlashAckMessageId,
+  isUnknownDiscordMessageError,
   postJobReply,
+  shouldAnnounceInChannel,
   splitDiscordContent,
 } from "../src/bot/reply.ts";
 import { withTempDb } from "./helpers.ts";
@@ -303,6 +306,55 @@ describe("completeJobWithReply", () => {
       else process.env.DISCORD_BOT_TOKEN = savedBot;
       resetEnvForTest();
     }
+  });
+
+  test("Unknown Message (10008) on ephemeral ack falls back to channel.send, not 502", async () => {
+    const { job } = enqueueJob({
+      discordMessageId: "ephemeral-ack-snowflake",
+      discordChannelId: SPONSORS,
+      discordThreadId: null,
+      authorId: "u1",
+      namespace: EBOARD,
+      content: "generic slash job",
+    });
+    claimJob(job.id, "w1");
+    let replies = 0;
+    const sent: string[] = [];
+    const stub = {
+      channels: {
+        fetch: async () => ({
+          isTextBased: () => true,
+          messages: {
+            fetch: async () => {
+              throw Object.assign(new Error("Unknown Message"), { code: 10008 });
+            },
+          },
+          send: async (opts: { content: string }) => {
+            sent.push(opts.content);
+            return { id: "chan-fallback" };
+          },
+        }),
+      },
+    };
+    const result = await completeJobWithReply(job.id, "w1", { reply: "Roster seed stored 25 binding(s)." }, { client: stub });
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe(200);
+    expect(result.posted).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(replies).toBe(0);
+    expect(sent).toEqual(["Roster seed stored 25 binding(s)."]);
+    expect(getJob(job.id)?.status).toBe("completed");
+    expect(getJob(job.id)?.result_discord_message_id).toBe("chan-fallback");
+  });
+});
+
+describe("ephemeral slash announce", () => {
+  test("synthetic slash-ephemeral ids and roster.seed content announce in channel", () => {
+    expect(ephemeralSlashAckMessageId("123")).toBe("slash-ephemeral:123");
+    expect(shouldAnnounceInChannel({ discord_message_id: "slash-ephemeral:123" })).toBe(true);
+    expect(shouldAnnounceInChannel({ discord_message_id: "999", content: "hello" })).toBe(false);
+    expect(isUnknownDiscordMessageError(Object.assign(new Error("Unknown Message"), { code: 10008 }))).toBe(true);
+    expect(isUnknownDiscordMessageError(new Error("missing permissions"))).toBe(false);
   });
 });
 
