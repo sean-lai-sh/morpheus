@@ -8,7 +8,7 @@ const USER_MENTION_RE = /<@!?(\d+)>/g;
 const ROLE_MENTION_RE = /<@&(\d+)>/g;
 
 const ADD_RE =
-  /(?:^|\b)(?:please\s+)?(?:add|create)\s+(?:a\s+|an\s+)?(?:todo|task)\b|^todo\s*:|^remind me to\b/i;
+  /^(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?(?:add|create)\s+(?:a\s+|an\s+)?(?:todo|task)\b|^todo\s*:|^remind me to\b/i;
 const LIST_RE =
   /^(?:what(?:'s|s| is)\s+on\s+my\s+(?:todo\s+)?list\??|my\s+todos?|list\s+(?:my\s+)?(?:todos?|tasks?)|(?:show|get)\s+(?:my\s+)?(?:todos?|tasks?))\b/i;
 const DONE_MARK_RE = /^mark\s+(.+?)\s+done\b/i;
@@ -85,7 +85,7 @@ function splitDue(
 
 function titleFromAdd(text: string): string {
   return text
-    .replace(/^(?:please\s+)?(?:add|create)\s+(?:a\s+|an\s+)?(?:todo|task)\s*/i, "")
+    .replace(/^(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?(?:add|create)\s+(?:a\s+|an\s+)?(?:todo|task)\s*/i, "")
     .replace(/^todo\s*:\s*/i, "")
     .replace(/^remind me to\s*/i, "")
     .replace(/^to\s+/i, "")

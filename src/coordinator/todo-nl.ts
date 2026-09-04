@@ -110,6 +110,7 @@ export function createAndActivateTodo(input: {
 export function listVisibleTodos(userId: string): VisibleTodo[] {
   const byTask = new Map<string, VisibleTodo>();
   for (const entry of listTasksForPerson({ userId })) {
+    if (entry.task.status !== "open") continue;
     byTask.set(entry.task.id, { task: entry.task, assignment: entry.assignment, relation: "assigned" });
   }
   for (const entry of listTasksCreatedBy({ userId })) {
@@ -137,7 +138,9 @@ export function completeVisibleTodo(
   userId: string,
   titleFragment?: string,
 ): { ok: true; task: TaskRow } | { ok: false; reason: "none" | "ambiguous" | "not-assigned"; detail: string } {
-  const assigned = listTasksForPerson({ userId }).filter((entry) => entry.assignment.status === "open");
+  const assigned = listTasksForPerson({ userId }).filter(
+    (entry) => entry.assignment.status === "open" && entry.task.status === "open",
+  );
   const needle = titleFragment?.trim().toLowerCase();
   const matches = needle
     ? assigned.filter((entry) => entry.task.title.toLowerCase().includes(needle))

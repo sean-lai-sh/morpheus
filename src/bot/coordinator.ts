@@ -188,7 +188,6 @@ function reminderPolicySelect(customId: string, selected?: string) {
           ["daily_until_done", "Daily until done"],
           ["one_day_before", "One day before due"],
           ["one_hour_before", "One hour before due"],
-          ["one_day_and_five_hours", "1 day and 5 hours before"],
           ["none", "No reminders"],
         ]
           .filter(([value]) => customId !== "task-preferences" || value !== "default")

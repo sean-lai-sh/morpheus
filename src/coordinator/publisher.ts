@@ -149,6 +149,11 @@ export async function defaultReminderDmSender(
   });
 }
 
+function reminderDestinationAllowed(channelId: string, parentChannelId?: string | null): boolean {
+  if (getChannel(channelId)) return true;
+  return Boolean(parentChannelId && getChannel(parentChannelId));
+}
+
 export async function defaultReminderChannelSender(
   input: {
     channelId: string;
@@ -159,12 +164,15 @@ export async function defaultReminderChannelSender(
     slot: DualReminderSlot;
   },
 ): Promise<void> {
-  if (!getChannel(input.channelId)) throw new Error("channel-not-allowlisted");
   const client = peekClient();
   if (!client?.isReady()) throw new Error("discord-client-unavailable");
   const channel = await client.channels.fetch(input.channelId);
   if (!channel || !("send" in channel) || typeof channel.send !== "function") {
     throw new Error("channel-not-text");
+  }
+  const parentId = "parentId" in channel ? (channel.parentId as string | null) : null;
+  if (!reminderDestinationAllowed(input.channelId, parentId)) {
+    throw new Error("channel-not-allowlisted");
   }
   const when = input.slot === "one_day" ? "1-day" : "5-hour";
   await channel.send({
@@ -220,7 +228,8 @@ async function dispatchTaskReminder(
       })
     : null;
   const slot: DualReminderSlot = isDualReminderSlot(event.payload.slot) ? event.payload.slot : "one_day";
-  const wantChannel = policy === "one_day_and_five_hours" && Boolean(loaded.task.channelId);
+  const wantChannel =
+    loaded.assignment.reminderPolicyOverride === "one_day_and_five_hours" && Boolean(loaded.task.channelId);
   const body = `${loaded.task.description ? `${loaded.task.description}\n` : ""}${due ? `Due: ${due}` : ""}\nYou can update your personal reminder setting below.`.trim();
 
   let dmOk = false;

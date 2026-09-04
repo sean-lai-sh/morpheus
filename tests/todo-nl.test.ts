@@ -13,7 +13,9 @@ import { publishOutboxEvent } from "../src/coordinator/publisher.ts";
 import {
   activateTask,
   addTaskAssignments,
+  cancelTask,
   createTaskDraft,
+  getTask,
   getTaskAssignments,
   updateTask,
 } from "../src/storage/coordinator-tasks.ts";
@@ -93,6 +95,23 @@ describe("todo intent", () => {
     });
   });
 
+  test("mid-sentence 'create a task' is unclear, not an add", () => {
+    expect(
+      parseTodoIntent(`<@${BOT}> how do I create a task in Asana by friday 2pm`, { botUserId: BOT, now: NOW })
+        .kind,
+    ).toBe("unclear");
+  });
+
+  test("can you add a todo at the start still adds and strips the lead-in", () => {
+    const intent = parseTodoIntent(`<@${BOT}> can you add a todo ship shirts by friday 2pm`, {
+      botUserId: BOT,
+      now: NOW,
+    });
+    expect(intent.kind).toBe("add");
+    if (intent.kind !== "add") return;
+    expect(intent.title).toBe("ship shirts");
+  });
+
   test("role snowflake is ignored by the parser body", () => {
     const intent = parseTodoIntent(
       `<@${BOT}> add a todo ping sponsors <@&${EBOARD_ROLE_ID}> by tomorrow 3:30pm`,
@@ -153,6 +172,22 @@ describe("todo apply + visibility", () => {
     const done = completeVisibleTodo("333", "snacks");
     expect(done.ok).toBe(true);
     if (done.ok) expect(done.task.title).toBe("Buy snacks");
+  });
+
+  test("cancelled tasks stay cancelled and are not completable via NL", () => {
+    const dueAt = NOW + 6 * 24 * 60 * 60_000;
+    const created = createAndActivateTodo({
+      createdByUserId: "777",
+      title: "Scrubbed retreat",
+      dueAt,
+      channelId: SPONSORS,
+      assignees: [{ userId: "777", displayName: "Mo" }],
+      now: NOW,
+    });
+    cancelTask({ taskId: created.task.id, creatorUserId: "777" });
+    expect(listVisibleTodos("777").some((row) => row.task.id === created.task.id)).toBe(false);
+    expect(completeVisibleTodo("777", "retreat").ok).toBe(false);
+    expect(getTask(created.task.id)?.status).toBe("cancelled");
   });
 });
 
@@ -274,6 +309,28 @@ describe("mention hook vs enqueue", () => {
     expect(handled.handled).toBe(true);
     expect(replies[0]).toContain("ship shirts");
     expect(getJobByDiscordMessageId("todo-add-1")).toBeNull();
+  });
+
+  test("a thread mention stores the thread id as the reminder destination", async () => {
+    const threadId = "1999888777666";
+    await tryHandleTodoMention(
+      candidate({
+        discordMessageId: "todo-thread-1",
+        discordChannelId: threadId,
+        discordThreadId: threadId,
+        parentChannelId: SPONSORS,
+        authorId: "888",
+        content: `<@${BOT}> add a todo thread dest by friday 2pm`,
+      }),
+      {
+        botUserId: BOT,
+        triggerRoleIds: new Set([ROLE]),
+        now: NOW,
+        reply: async () => undefined,
+      },
+    );
+    const created = listVisibleTodos("888").find((row) => row.task.title === "thread dest");
+    expect(created?.task.channelId).toBe(threadId);
   });
 
   test("missing due is handled locally and does not enqueue", async () => {

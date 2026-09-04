@@ -384,7 +384,10 @@ export function completeTaskAssignment(input: {
         .get(row.task_id)?.n ?? 0;
     if (remaining === 0) {
       getDb()
-        .query(`UPDATE tasks SET status = 'completed', revision = revision + 1, updated_at = ? WHERE id = ?`)
+        .query(
+          `UPDATE tasks SET status = 'completed', revision = revision + 1, updated_at = ?
+           WHERE id = ? AND status = 'open'`,
+        )
         .run(now, row.task_id);
     }
     return mapAssignment(row);

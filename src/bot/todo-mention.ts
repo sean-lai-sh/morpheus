@@ -71,7 +71,7 @@ export async function tryHandleTodoMention(
       mentionedRoleIds: mentions.roleIds,
       guild: opts.guild,
     });
-    const channelId = candidate.parentChannelId ?? candidate.discordChannelId;
+    const channelId = candidate.discordChannelId;
     const created = createAndActivateTodo({
       createdByUserId: candidate.authorId,
       title: intent.title,
