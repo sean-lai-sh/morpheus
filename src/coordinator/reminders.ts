@@ -2,13 +2,16 @@ export const TASK_REMINDER_POLICIES = [
   "daily_until_done",
   "one_day_before",
   "one_hour_before",
+  "one_day_and_five_hours",
   "none",
 ] as const;
 
 export type TaskReminderPolicy = (typeof TASK_REMINDER_POLICIES)[number];
+export type DualReminderSlot = "one_day" | "five_hours";
 
 const DAY_MS = 24 * 60 * 60_000;
 const HOUR_MS = 60 * 60_000;
+const FIVE_HOURS_MS = 5 * 60 * 60_000;
 
 export function isTaskReminderPolicy(value: unknown): value is TaskReminderPolicy {
   return typeof value === "string" && (TASK_REMINDER_POLICIES as readonly string[]).includes(value);
@@ -33,7 +36,9 @@ export function nextTaskReminderAt(input: {
 }): Date | undefined {
   if (!input.dueAt || input.policy === "none") return undefined;
   const now = input.now ?? new Date();
-  if (input.policy === "one_day_before") return atOrNow(new Date(input.dueAt.getTime() - DAY_MS), now);
+  if (input.policy === "one_day_before" || input.policy === "one_day_and_five_hours") {
+    return atOrNow(new Date(input.dueAt.getTime() - DAY_MS), now);
+  }
   if (input.policy === "one_hour_before") return atOrNow(new Date(input.dueAt.getTime() - HOUR_MS), now);
 
   const first = new Date(input.dueAt.getTime() - DAY_MS);
@@ -55,6 +60,21 @@ export function formatReminderPolicy(policy: TaskReminderPolicy): string {
     daily_until_done: "daily until done",
     one_day_before: "one day before due",
     one_hour_before: "one hour before due",
+    one_day_and_five_hours: "1 day and 5 hours before due",
     none: "no reminders",
   }[policy];
+}
+
+export function dualReminderSlots(
+  dueAt: Date,
+  now: Date = new Date(),
+): Array<{ slot: DualReminderSlot; at: Date }> {
+  return [
+    { slot: "one_day", at: atOrNow(new Date(dueAt.getTime() - DAY_MS), now) },
+    { slot: "five_hours", at: atOrNow(new Date(dueAt.getTime() - FIVE_HOURS_MS), now) },
+  ];
+}
+
+export function isDualReminderSlot(value: unknown): value is DualReminderSlot {
+  return value === "one_day" || value === "five_hours";
 }

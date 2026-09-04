@@ -549,6 +549,78 @@ export function buildJobTools(deps: JobToolDeps): Record<string, SDKCustomTool> 
         }
       },
     },
+    morpheus_task_list: {
+      description:
+        "List the Discord author's open todos (assigned to them or created by them). " +
+        "Use this for 'what's on my list' / todo questions. Do not invent items.",
+      inputSchema: { type: "object", properties: {} },
+      async execute() {
+        try {
+          const res = await getRaw(`/v1/tasks?job_id=${encodeURIComponent(deps.jobId)}`);
+          if (!res.ok) return errorResult(`morpheus api ${res.status}`);
+          return finish(res.text);
+        } catch {
+          logger.error({ job_id: deps.jobId, tool: "morpheus_task_list" }, "task list failed");
+          return errorResult("morpheus api unreachable");
+        }
+      },
+    },
+    morpheus_task_create: {
+      description:
+        "Create a todo for the Discord author. due_at (unix ms) is required — do not invent a deadline. " +
+        "assignee_ids may only be users already mentioned in the trigger, or the author.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          due_at: { type: "number", description: "Unix milliseconds. Required. Do not invent." },
+          assignee_ids: { type: "array", items: { type: "string" } },
+        },
+        required: ["title", "due_at"],
+      },
+      async execute(args) {
+        const title = str(args.title);
+        const dueAt = typeof args.due_at === "number" ? args.due_at : undefined;
+        if (!title) return errorResult("title is required");
+        if (dueAt == null || !Number.isFinite(dueAt)) return errorResult("due_at is required; do not invent a deadline");
+        const assigneeIds = Array.isArray(args.assignee_ids)
+          ? args.assignee_ids.filter((id): id is string => typeof id === "string")
+          : undefined;
+        try {
+          const res = await post("/v1/tasks", {
+            job_id: deps.jobId,
+            title,
+            due_at: dueAt,
+            ...(assigneeIds ? { assignee_ids: assigneeIds } : {}),
+          });
+          if (!res.ok) return errorResult(`morpheus api ${res.status}: ${res.text}`);
+          return finish(res.text);
+        } catch {
+          logger.error({ job_id: deps.jobId, tool: "morpheus_task_create" }, "task create failed");
+          return errorResult("morpheus api unreachable");
+        }
+      },
+    },
+    morpheus_task_complete: {
+      description: "Mark one of the Discord author's assigned todos done. Use an id from morpheus_task_list.",
+      inputSchema: {
+        type: "object",
+        properties: { task_id: { type: "string" } },
+        required: ["task_id"],
+      },
+      async execute(args) {
+        const taskId = str(args.task_id);
+        if (!taskId) return errorResult("task_id is required");
+        try {
+          const res = await post(`/v1/tasks/${encodeURIComponent(taskId)}/complete`, { job_id: deps.jobId });
+          if (!res.ok) return errorResult(`morpheus api ${res.status}: ${res.text}`);
+          return finish(res.text);
+        } catch {
+          logger.error({ job_id: deps.jobId, tool: "morpheus_task_complete" }, "task complete failed");
+          return errorResult("morpheus api unreachable");
+        }
+      },
+    },
     morpheus_job_complete: {
       description:
         "Deliver the final answer for this Discord job. The official bot on the Mini posts it " +

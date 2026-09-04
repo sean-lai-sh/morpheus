@@ -149,18 +149,20 @@ export function authorPassesRoleGate(authorRoleIds: string[], triggerRoles: Set<
   return authorRoleIds.some((id) => triggerRoles.has(id));
 }
 
-export async function tryEnqueueJob(
+/**
+ * Shared fail-closed gates for @mention jobs and NL todos. Caps are job-only
+ * and are not included: a todo should still land when the Grok/SDK lane is full.
+ */
+export function skipReasonForCandidate(
   candidate: JobCandidate,
   opts: TryEnqueueOpts = {},
-): Promise<TryEnqueueResult> {
+): EnqueueSkipReason | null {
   const loaded = opts.env ?? loadEnv();
   const enabled = opts.enabled ?? loaded.JOB_QUEUE_ENABLED;
-  const maxOutstanding = opts.maxOutstanding ?? loaded.JOB_MAX_OUTSTANDING_PER_AUTHOR;
-  const maxPerHour = opts.maxPerHour ?? loaded.JOB_MAX_PER_AUTHOR_PER_HOUR;
   const triggerRoles = opts.triggerRoleIds ?? jobTriggerRoleIds(loaded);
 
-  if (!enabled) return { job: null, skipped: "disabled" };
-  if (candidate.authorIsBot) return { job: null, skipped: "bot-author" };
+  if (!enabled) return "disabled";
+  if (candidate.authorIsBot) return "bot-author";
 
   const isTrigger =
     candidate.source === "slash" ||
@@ -168,12 +170,11 @@ export async function tryEnqueueJob(
     candidate.source === "coordinator" ||
     candidate.mentionedBot ||
     candidate.replyToBot;
-  if (!isTrigger) return { job: null, skipped: "not-trigger" };
+  if (!isTrigger) return "not-trigger";
 
   const resolveChannel = opts.resolveChannel ?? getChannel;
   const channelId = configChannelId(candidate);
-  const channel = resolveChannel(channelId);
-  if (!channel) return { job: null, skipped: "channel-not-allowlisted" };
+  if (!resolveChannel(channelId)) return "channel-not-allowlisted";
 
   const namespace = namespaceForRow(
     {
@@ -182,7 +183,7 @@ export async function tryEnqueueJob(
     },
     resolveChannel,
   );
-  if (!namespace) return { job: null, skipped: "unknown-namespace" };
+  if (!namespace) return "unknown-namespace";
 
   if (!authorPassesRoleGate(candidate.authorRoleIds, triggerRoles)) {
     const nodeEnv = opts.nodeEnv ?? loaded.NODE_ENV;
@@ -190,8 +191,31 @@ export async function tryEnqueueJob(
       { author_id: candidate.authorId, node_env: nodeEnv, trigger_roles: triggerRoles.size },
       "job enqueue role gate failed (fail closed)",
     );
-    return { job: null, skipped: "role-gate" };
+    return "role-gate";
   }
+  return null;
+}
+
+export async function tryEnqueueJob(
+  candidate: JobCandidate,
+  opts: TryEnqueueOpts = {},
+): Promise<TryEnqueueResult> {
+  const skipped = skipReasonForCandidate(candidate, opts);
+  if (skipped) return { job: null, skipped };
+
+  const loaded = opts.env ?? loadEnv();
+  const maxOutstanding = opts.maxOutstanding ?? loaded.JOB_MAX_OUTSTANDING_PER_AUTHOR;
+  const maxPerHour = opts.maxPerHour ?? loaded.JOB_MAX_PER_AUTHOR_PER_HOUR;
+  const resolveChannel = opts.resolveChannel ?? getChannel;
+  const channelId = configChannelId(candidate);
+  const namespace = namespaceForRow(
+    {
+      channel_id: candidate.discordChannelId,
+      parent_channel_id: candidate.parentChannelId,
+    },
+    resolveChannel,
+  );
+  if (!namespace) return { job: null, skipped: "unknown-namespace" };
 
   const now = opts.now ?? Date.now();
   const lane = laneForSource(candidate.source);

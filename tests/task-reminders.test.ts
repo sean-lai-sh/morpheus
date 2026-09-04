@@ -34,6 +34,9 @@ describe("task reminder policy", () => {
     );
     expect(isRecurringTaskReminder("daily_until_done")).toBe(true);
     expect(isRecurringTaskReminder("one_day_before")).toBe(false);
+    expect(nextTaskReminderAt({ policy: "one_day_and_five_hours", dueAt, now })?.toISOString()).toBe(
+      "2026-09-09T17:00:00.000Z",
+    );
   });
 
   test("turns an already missed reminder into a catch-up notification", () => {
