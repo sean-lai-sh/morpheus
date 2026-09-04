@@ -1,0 +1,4 @@
+{
+  "name": "Morpheus",
+  "install": "set -euo pipefail\nexport BUN_INSTALL=\"${BUN_INSTALL:-$HOME/.bun}\"\nexport PATH=\"$BUN_INSTALL/bin:$PATH\"\nif ! command -v bun >/dev/null 2>&1; then\n  curl -fsSL https://bun.sh/install | bash -s \"bun-v1.4.0\"\n  export PATH=\"$BUN_INSTALL/bin:$PATH\"\nfi\nbun install --frozen-lockfile\nbun run typecheck\nbun test\n"
+}
