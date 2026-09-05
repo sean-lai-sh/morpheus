@@ -758,7 +758,7 @@ describe("custom tools", () => {
     return h.runtime.sends[0]!;
   }
 
-  test("agent gets exactly the six morpheus tools", async () => {
+  test("agent gets the morpheus fs, task, and complete tools", async () => {
     const h = makeHarness();
     const run = await startJob(h);
     expect(Object.keys(run.customTools ?? {}).sort()).toEqual([
@@ -768,6 +768,9 @@ describe("custom tools", () => {
       "morpheus_fs_search",
       "morpheus_fs_tree",
       "morpheus_job_complete",
+      "morpheus_task_complete",
+      "morpheus_task_create",
+      "morpheus_task_list",
     ]);
     run.finish({ status: "finished", result: "x" });
     await h.waitSettled(1);
@@ -1353,6 +1356,8 @@ describe("prompt construction (untrusted content)", () => {
     expect(prompt).toContain("rarest keywords");
     expect(prompt).toContain("morpheus_fs_links");
     expect(prompt).toContain("Never conclude the");
+    expect(prompt).toContain("morpheus_task_create");
+    expect(prompt).toContain("never invent");
   });
 
   test("the prompt steers recent conversation to morpheus_fs_file, not oldest-50 fs_read", () => {

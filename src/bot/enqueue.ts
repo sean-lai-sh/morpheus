@@ -149,18 +149,23 @@ export function authorPassesRoleGate(authorRoleIds: string[], triggerRoles: Set<
   return authorRoleIds.some((id) => triggerRoles.has(id));
 }
 
-export async function tryEnqueueJob(
-  candidate: JobCandidate,
-  opts: TryEnqueueOpts = {},
-): Promise<TryEnqueueResult> {
+type CandidateGate =
+  | { ok: false; skipped: EnqueueSkipReason }
+  | { ok: true; loaded: Env; namespace: string; channelId: string; resolveChannel: ChannelResolver };
+
+/**
+ * Shared fail-closed gates for @mention jobs and NL todos. Caps are job-only
+ * and are not included: a todo should still land when the Grok/SDK lane is full.
+ * Returns what it resolved on the way through so callers do not re-derive the
+ * env, the channel resolver, or the namespace a second time.
+ */
+function gateCandidate(candidate: JobCandidate, opts: TryEnqueueOpts): CandidateGate {
   const loaded = opts.env ?? loadEnv();
   const enabled = opts.enabled ?? loaded.JOB_QUEUE_ENABLED;
-  const maxOutstanding = opts.maxOutstanding ?? loaded.JOB_MAX_OUTSTANDING_PER_AUTHOR;
-  const maxPerHour = opts.maxPerHour ?? loaded.JOB_MAX_PER_AUTHOR_PER_HOUR;
   const triggerRoles = opts.triggerRoleIds ?? jobTriggerRoleIds(loaded);
 
-  if (!enabled) return { job: null, skipped: "disabled" };
-  if (candidate.authorIsBot) return { job: null, skipped: "bot-author" };
+  if (!enabled) return { ok: false, skipped: "disabled" };
+  if (candidate.authorIsBot) return { ok: false, skipped: "bot-author" };
 
   const isTrigger =
     candidate.source === "slash" ||
@@ -168,12 +173,11 @@ export async function tryEnqueueJob(
     candidate.source === "coordinator" ||
     candidate.mentionedBot ||
     candidate.replyToBot;
-  if (!isTrigger) return { job: null, skipped: "not-trigger" };
+  if (!isTrigger) return { ok: false, skipped: "not-trigger" };
 
   const resolveChannel = opts.resolveChannel ?? getChannel;
   const channelId = configChannelId(candidate);
-  const channel = resolveChannel(channelId);
-  if (!channel) return { job: null, skipped: "channel-not-allowlisted" };
+  if (!resolveChannel(channelId)) return { ok: false, skipped: "channel-not-allowlisted" };
 
   const namespace = namespaceForRow(
     {
@@ -182,7 +186,7 @@ export async function tryEnqueueJob(
     },
     resolveChannel,
   );
-  if (!namespace) return { job: null, skipped: "unknown-namespace" };
+  if (!namespace) return { ok: false, skipped: "unknown-namespace" };
 
   if (!authorPassesRoleGate(candidate.authorRoleIds, triggerRoles)) {
     const nodeEnv = opts.nodeEnv ?? loaded.NODE_ENV;
@@ -190,8 +194,29 @@ export async function tryEnqueueJob(
       { author_id: candidate.authorId, node_env: nodeEnv, trigger_roles: triggerRoles.size },
       "job enqueue role gate failed (fail closed)",
     );
-    return { job: null, skipped: "role-gate" };
+    return { ok: false, skipped: "role-gate" };
   }
+  return { ok: true, loaded, namespace, channelId, resolveChannel };
+}
+
+export function skipReasonForCandidate(
+  candidate: JobCandidate,
+  opts: TryEnqueueOpts = {},
+): EnqueueSkipReason | null {
+  const gate = gateCandidate(candidate, opts);
+  return gate.ok ? null : gate.skipped;
+}
+
+export async function tryEnqueueJob(
+  candidate: JobCandidate,
+  opts: TryEnqueueOpts = {},
+): Promise<TryEnqueueResult> {
+  const gate = gateCandidate(candidate, opts);
+  if (!gate.ok) return { job: null, skipped: gate.skipped };
+  const { loaded, namespace, channelId, resolveChannel } = gate;
+
+  const maxOutstanding = opts.maxOutstanding ?? loaded.JOB_MAX_OUTSTANDING_PER_AUTHOR;
+  const maxPerHour = opts.maxPerHour ?? loaded.JOB_MAX_PER_AUTHOR_PER_HOUR;
 
   const now = opts.now ?? Date.now();
   const lane = laneForSource(candidate.source);

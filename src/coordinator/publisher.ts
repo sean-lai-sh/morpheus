@@ -4,6 +4,7 @@ import { peekClient } from "../bot/client.ts";
 import { getMeeting, getMeetingParticipants } from "../storage/coordinator-meetings.ts";
 import {
   canSendTaskReminder,
+  enqueueNextDualReminder,
   enqueueNextRecurringReminder,
   loadTaskReminder,
   recordTaskReminderDelivery,
@@ -16,9 +17,12 @@ import {
   recordOutboxDispatchFailure,
   type OutboxEvent,
 } from "../storage/outbox.ts";
+import { getChannel } from "../config.ts";
 import {
   effectiveTaskReminderPolicy,
+  isDualReminderSlot,
   nextTaskReminderAt,
+  type DualReminderSlot,
 } from "./reminders.ts";
 import {
   buildCalendarJobPack,
@@ -50,6 +54,17 @@ export interface ReminderDmSender {
     title: string;
     body: string;
     assignmentId: string;
+  }): Promise<void>;
+}
+
+export interface ReminderChannelSender {
+  send(input: {
+    channelId: string;
+    userId: string;
+    title: string;
+    body: string;
+    assignmentId: string;
+    slot: DualReminderSlot;
   }): Promise<void>;
 }
 
@@ -98,6 +113,30 @@ function logCorrelate(event: OutboxEvent, extra: Record<string, unknown> = {}): 
   };
 }
 
+function reminderActionRow(assignmentId: string, includeSettings: boolean) {
+  return {
+    type: 1,
+    components: [
+      {
+        type: 2,
+        style: 3,
+        custom_id: `task-complete:${assignmentId}`,
+        label: "Mark done",
+      },
+      ...(includeSettings
+        ? [
+            {
+              type: 2,
+              style: 2,
+              custom_id: `task-reminder:${assignmentId}`,
+              label: "Reminder settings",
+            },
+          ]
+        : []),
+    ],
+  };
+}
+
 export async function defaultReminderDmSender(
   input: { userId: string; title: string; body: string; assignmentId: string },
 ): Promise<void> {
@@ -106,25 +145,40 @@ export async function defaultReminderDmSender(
   const user = await client.users.fetch(input.userId);
   await user.send({
     content: `**${input.title}**\n${input.body}`,
-    components: [
-      {
-        type: 1,
-        components: [
-          {
-            type: 2,
-            style: 3,
-            custom_id: `task-complete:${input.assignmentId}`,
-            label: "Mark done",
-          },
-          {
-            type: 2,
-            style: 2,
-            custom_id: `task-reminder:${input.assignmentId}`,
-            label: "Reminder settings",
-          },
-        ],
-      },
-    ],
+    components: [reminderActionRow(input.assignmentId, true)],
+  });
+}
+
+function reminderDestinationAllowed(channelId: string, parentChannelId?: string | null): boolean {
+  if (getChannel(channelId)) return true;
+  return Boolean(parentChannelId && getChannel(parentChannelId));
+}
+
+export async function defaultReminderChannelSender(
+  input: {
+    channelId: string;
+    userId: string;
+    title: string;
+    body: string;
+    assignmentId: string;
+    slot: DualReminderSlot;
+  },
+): Promise<void> {
+  const client = peekClient();
+  if (!client?.isReady()) throw new Error("discord-client-unavailable");
+  const channel = await client.channels.fetch(input.channelId);
+  if (!channel || !("send" in channel) || typeof channel.send !== "function") {
+    throw new Error("channel-not-text");
+  }
+  const parentId = "parentId" in channel ? (channel.parentId as string | null) : null;
+  if (!reminderDestinationAllowed(input.channelId, parentId)) {
+    throw new Error("channel-not-allowlisted");
+  }
+  const when = input.slot === "one_day" ? "1-day" : "5-hour";
+  await channel.send({
+    content: `<@${input.userId}> **${input.title}** — this is your ${when} reminder.${input.body ? `\n${input.body}` : ""}`,
+    allowedMentions: { parse: [], users: [input.userId], roles: [], repliedUser: false },
+    components: [reminderActionRow(input.assignmentId, false)],
   });
 }
 
@@ -132,6 +186,7 @@ async function dispatchTaskReminder(
   event: OutboxEvent,
   now: number,
   sendDm: ReminderDmSender["send"],
+  sendChannel: ReminderChannelSender["send"] = defaultReminderChannelSender,
 ): Promise<OutboxDispatchStatus> {
   const assignmentId = String(event.payload.assignmentId ?? event.aggregateId);
   const reminderVersion = Number(event.payload.reminderVersion ?? event.expectedVersion);
@@ -172,8 +227,17 @@ async function dispatchTaskReminder(
         timeStyle: "short",
       })
     : null;
-  const body = `${loaded.task.description ? `${loaded.task.description}\n` : ""}${due ? `Due: ${due}` : ""}\nYou can update your personal reminder setting below.`.trim();
+  const slot: DualReminderSlot = isDualReminderSlot(event.payload.slot) ? event.payload.slot : "one_day";
+  const wantChannel = loaded.assignment.channelReminder && Boolean(loaded.task.channelId);
+  // The channel post carries no "Reminder settings" button (that control is
+  // personal), so it must not tell the reader to use one.
+  const detail = `${loaded.task.description ? `${loaded.task.description}\n` : ""}${due ? `Due: ${due}` : ""}`.trim();
+  const body = `${detail}\nYou can update your personal reminder setting below.`.trim();
+  const channelBody = detail;
 
+  let dmOk = false;
+  let channelOk = !wantChannel;
+  let lastError = "";
   try {
     await withDeadline(
       sendDm({
@@ -184,6 +248,51 @@ async function dispatchTaskReminder(
       }),
       HANDOFF_TIMEOUT_MS,
     );
+    dmOk = true;
+  } catch (error) {
+    lastError = errorMessage(error);
+    logger.warn(logCorrelate(event, { err: lastError }), "outbox.publish.reminder_dm_failed");
+  }
+
+  if (wantChannel && loaded.task.channelId) {
+    try {
+      await withDeadline(
+        sendChannel({
+          channelId: loaded.task.channelId,
+          userId: loaded.assignment.userId,
+          title: loaded.task.title,
+          body: channelBody,
+          assignmentId,
+          slot,
+        }),
+        HANDOFF_TIMEOUT_MS,
+      );
+      channelOk = true;
+    } catch (error) {
+      lastError = errorMessage(error);
+      logger.warn(logCorrelate(event, { err: lastError, channelId: loaded.task.channelId }), "outbox.publish.reminder_channel_failed");
+    }
+  }
+
+  const delivered = dmOk || (wantChannel && channelOk);
+  if (!delivered) {
+    recordTaskReminderDelivery({
+      assignmentId,
+      reminderRevision: reminderVersion,
+      scheduledFor: scheduledFor.getTime(),
+      status: "failed",
+      error: lastError.slice(0, 500),
+      now,
+    });
+    const failure = recordOutboxDispatchFailure(event.id, lastError, now);
+    logger.error(
+      logCorrelate(event, { err: lastError, attempts: failure.attempts }),
+      failure.deadLettered ? "outbox.publish.dead_lettered" : "outbox.publish.deferred",
+    );
+    return "deferred";
+  }
+
+  try {
     recordTaskReminderDelivery({
       assignmentId,
       reminderRevision: reminderVersion,
@@ -192,29 +301,31 @@ async function dispatchTaskReminder(
       now,
     });
     markOutboxDispatched(event.id, now);
-    logger.info(logCorrelate(event, { scheduledFor: scheduledFor.toISOString() }), "outbox.publish.accepted");
-    const next = enqueueNextRecurringReminder({
-      assignmentId,
-      scheduledFor: scheduledFor.getTime(),
-      now,
-    });
-    if (next) {
-      logger.info(
-        { assignmentId, outboxId: next.id, reminderVersion: next.expectedVersion },
-        "task.reminder.next_queued",
-      );
+    logger.info(logCorrelate(event, { scheduledFor: scheduledFor.toISOString(), dmOk, channelOk }), "outbox.publish.accepted");
+    if (policy === "one_day_and_five_hours") {
+      const nextDual = enqueueNextDualReminder({ assignmentId, sentSlot: slot, now });
+      if (nextDual) {
+        logger.info(
+          { assignmentId, outboxId: nextDual.id, reminderVersion: nextDual.expectedVersion },
+          "task.reminder.five_hour_queued",
+        );
+      }
+    } else {
+      const next = enqueueNextRecurringReminder({
+        assignmentId,
+        scheduledFor: scheduledFor.getTime(),
+        now,
+      });
+      if (next) {
+        logger.info(
+          { assignmentId, outboxId: next.id, reminderVersion: next.expectedVersion },
+          "task.reminder.next_queued",
+        );
+      }
     }
     return "accepted";
   } catch (error) {
     const message = errorMessage(error);
-    recordTaskReminderDelivery({
-      assignmentId,
-      reminderRevision: reminderVersion,
-      scheduledFor: scheduledFor.getTime(),
-      status: "failed",
-      error: message.slice(0, 500),
-      now,
-    });
     const failure = recordOutboxDispatchFailure(event.id, message, now);
     logger.error(
       logCorrelate(event, { err: message, attempts: failure.attempts }),
@@ -516,6 +627,7 @@ export async function publishOutboxEvent(
   opts: {
     now?: number;
     sendDm?: ReminderDmSender["send"];
+    sendChannel?: ReminderChannelSender["send"];
     enqueueCalendar?: CalendarJobEnqueue;
     dispatchCalendar?: CalendarJobDispatch;
     /** Test seam for the Mini-side Calendar insert; see `dispatchCalendarJob`. */
@@ -526,7 +638,12 @@ export async function publishOutboxEvent(
   logger.info(logCorrelate(event), "outbox.publish.started");
   try {
     if (event.type === "task.assignment_reminder_requested") {
-      const status = await dispatchTaskReminder(event, now, opts.sendDm ?? defaultReminderDmSender);
+      const status = await dispatchTaskReminder(
+        event,
+        now,
+        opts.sendDm ?? defaultReminderDmSender,
+        opts.sendChannel ?? defaultReminderChannelSender,
+      );
       return { outboxId: event.id, status };
     }
     if (

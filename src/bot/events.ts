@@ -4,6 +4,7 @@ import { ingestDelete, ingestMessage } from "./ingest.ts";
 import { handleReactionChange } from "./reactions.ts";
 import { candidateFromMessage, tryEnqueueJob } from "./enqueue.ts";
 import { authorCanViewChannel } from "./job-scope.ts";
+import { replyToTodoMessage, tryHandleTodoMention } from "./todo-mention.ts";
 import { handleJobCommandInteraction, registerJobCommandsOnReady } from "./commands.ts";
 import { handleCoordinatorInteraction } from "./coordinator.ts";
 
@@ -72,9 +73,25 @@ export function registerLiveHandlers(client: Client): void {
       try {
         const botId = client.user?.id;
         if (!botId) return;
-        await tryEnqueueJob(candidateFromMessage(full, botId), {
+        const candidate = candidateFromMessage(full, botId);
+        const todo = await tryHandleTodoMention(candidate, {
+          botUserId: botId,
+          guild: full.guild,
+          speakerDisplayName: full.member?.displayName ?? full.author?.globalName ?? full.author?.username,
+          mentionedUsers: [...(full.mentions?.users?.values?.() ?? [])]
+            .filter((user) => user.id !== botId)
+            .map((user) => ({
+              id: user.id,
+              displayName: user.globalName ?? user.username,
+            })),
           canViewChannel: (id) => authorCanViewChannel(full, id),
+          reply: (text) => replyToTodoMessage(full, text),
         });
+        if (!todo.handled) {
+          await tryEnqueueJob(candidate, {
+            canViewChannel: (id) => authorCanViewChannel(full, id),
+          });
+        }
       } catch (err) {
         logger.error({ err, id: m.id }, "MessageCreate job enqueue error");
       }

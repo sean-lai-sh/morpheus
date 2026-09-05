@@ -4,6 +4,7 @@ import { ingestFreshness } from "../context/store.ts";
 import { handleV1 } from "./fs.ts";
 import { resolveListenHost } from "./listen-host.ts";
 import { handleJobsRequest } from "./jobs.ts";
+import { handleTasksRequest } from "./tasks.ts";
 
 let server: ReturnType<typeof Bun.serve> | undefined;
 
@@ -24,6 +25,9 @@ export async function handleRequest(req: Request): Promise<Response> {
     }
     if (url.pathname === "/v1/jobs" || url.pathname.startsWith("/v1/jobs/")) {
       return handleJobsRequest(req, url);
+    }
+    if (url.pathname === "/v1/tasks" || url.pathname.startsWith("/v1/tasks/")) {
+      return handleTasksRequest(req, url);
     }
     if (url.pathname.startsWith("/v1/")) {
       return handleV1(req);

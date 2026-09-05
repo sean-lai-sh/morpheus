@@ -213,9 +213,10 @@ function migrateCoordinator(db: Database): void {
       status TEXT NOT NULL CHECK (status IN ('open', 'completed')),
       reminder_policy_override TEXT CHECK (
         reminder_policy_override IS NULL
-        OR reminder_policy_override IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'none')
+        OR reminder_policy_override IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'one_day_and_five_hours', 'none')
       ),
       reminder_revision INTEGER NOT NULL DEFAULT 1,
+      channel_reminder INTEGER NOT NULL DEFAULT 0,
       completed_at INTEGER,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -227,7 +228,7 @@ function migrateCoordinator(db: Database): void {
     CREATE TABLE IF NOT EXISTS person_task_reminder_preferences (
       user_id TEXT PRIMARY KEY,
       default_policy TEXT NOT NULL DEFAULT 'daily_until_done' CHECK (
-        default_policy IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'none')
+        default_policy IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'one_day_and_five_hours', 'none')
       ),
       updated_at INTEGER NOT NULL
     );
@@ -321,6 +322,108 @@ function migrateCoordinator(db: Database): void {
   try { db.exec(`ALTER TABLE meeting_drafts ADD COLUMN location TEXT`); } catch { /* already exists */ }
   try { db.exec(`ALTER TABLE meeting_drafts ADD COLUMN audience_json TEXT`); } catch { /* already exists */ }
   upsertManualRosterBindings(db);
+  migrateTaskReminderPolicyCheck(db);
+  migrateChannelReminderColumn(db);
+}
+
+/**
+ * Existing Mini DBs were created with a CHECK that omits `one_day_and_five_hours`.
+ * CREATE TABLE IF NOT EXISTS will not rewrite them; rebuild those two tables.
+ */
+function migrateTaskReminderPolicyCheck(db: Database): void {
+  const needsRebuild = (name: string): boolean => {
+    const row = db
+      .query<{ sql: string | null }, [string]>(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`)
+      .get(name);
+    return Boolean(row?.sql && !row.sql.includes("one_day_and_five_hours"));
+  };
+  const rebuildAssignments = needsRebuild("task_assignments");
+  const rebuildPreferences = needsRebuild("person_task_reminder_preferences");
+  if (!rebuildAssignments && !rebuildPreferences) return;
+
+  // DROP + RENAME is not recoverable halfway. `PRAGMA foreign_keys` is a no-op
+  // inside a transaction, so it goes outside; the destructive part goes inside,
+  // and column lists are explicit so this never depends on physical order.
+  const foreignKeysOn = Boolean(
+    db.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()?.foreign_keys,
+  );
+  db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.transaction(() => {
+      if (rebuildAssignments) {
+        db.exec(`
+          CREATE TABLE task_assignments_new (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            user_id TEXT NOT NULL,
+            display_name TEXT,
+            status TEXT NOT NULL CHECK (status IN ('open', 'completed')),
+            reminder_policy_override TEXT CHECK (
+              reminder_policy_override IS NULL
+              OR reminder_policy_override IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'one_day_and_five_hours', 'none')
+            ),
+            reminder_revision INTEGER NOT NULL DEFAULT 1,
+            channel_reminder INTEGER NOT NULL DEFAULT 0,
+            completed_at INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE (task_id, user_id)
+          );
+          INSERT INTO task_assignments_new (
+            id, task_id, user_id, display_name, status, reminder_policy_override,
+            reminder_revision, channel_reminder, completed_at, created_at, updated_at
+          )
+          SELECT id, task_id, user_id, display_name, status, reminder_policy_override,
+                 reminder_revision,
+                 CASE WHEN reminder_policy_override = 'one_day_and_five_hours' THEN 1 ELSE 0 END,
+                 completed_at, created_at, updated_at
+          FROM task_assignments;
+          DROP TABLE task_assignments;
+          ALTER TABLE task_assignments_new RENAME TO task_assignments;
+          CREATE INDEX IF NOT EXISTS idx_task_assignments_user
+            ON task_assignments(user_id, status);
+        `);
+      }
+      if (rebuildPreferences) {
+        db.exec(`
+          CREATE TABLE person_task_reminder_preferences_new (
+            user_id TEXT PRIMARY KEY,
+            default_policy TEXT NOT NULL DEFAULT 'daily_until_done' CHECK (
+              default_policy IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'one_day_and_five_hours', 'none')
+            ),
+            updated_at INTEGER NOT NULL
+          );
+          INSERT INTO person_task_reminder_preferences_new (user_id, default_policy, updated_at)
+          SELECT user_id, default_policy, updated_at FROM person_task_reminder_preferences;
+          DROP TABLE person_task_reminder_preferences;
+          ALTER TABLE person_task_reminder_preferences_new RENAME TO person_task_reminder_preferences;
+        `);
+      }
+    })();
+  } finally {
+    db.exec(`PRAGMA foreign_keys = ${foreignKeysOn ? "ON" : "OFF"}`);
+  }
+}
+
+/**
+ * Channel delivery is a pin, not a reminder policy. Existing Mini DBs that
+ * already accepted `one_day_and_five_hours` need the column, then a one-shot
+ * backfill for NL todos created before the flag existed.
+ */
+function migrateChannelReminderColumn(db: Database): void {
+  let added = false;
+  try {
+    db.exec(`ALTER TABLE task_assignments ADD COLUMN channel_reminder INTEGER NOT NULL DEFAULT 0`);
+    added = true;
+  } catch {
+    /* already exists */
+  }
+  if (added) {
+    db.exec(
+      `UPDATE task_assignments SET channel_reminder = 1
+       WHERE reminder_policy_override = 'one_day_and_five_hours'`,
+    );
+  }
 }
 
 /**

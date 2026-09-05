@@ -1,7 +1,10 @@
 import {
+  dualReminderSlots,
   effectiveTaskReminderPolicy,
   isRecurringTaskReminder,
+  nextDualReminderSlot,
   nextTaskReminderAt,
+  type DualReminderSlot,
   type TaskReminderPolicy,
 } from "../coordinator/reminders.ts";
 import { getDb } from "./db.ts";
@@ -33,6 +36,7 @@ export interface TaskAssignmentRow {
   status: AssignmentStatus;
   reminderPolicyOverride: TaskReminderPolicy | null;
   reminderRevision: number;
+  channelReminder: boolean;
   completedAt: number | null;
   createdAt: number;
   updatedAt: number;
@@ -74,6 +78,7 @@ interface AssignmentDbRow {
   status: string;
   reminder_policy_override: string | null;
   reminder_revision: number;
+  channel_reminder: number | null;
   completed_at: number | null;
   created_at: number;
   updated_at: number;
@@ -104,6 +109,7 @@ function mapAssignment(row: AssignmentDbRow): TaskAssignmentRow {
     status: row.status as AssignmentStatus,
     reminderPolicyOverride: row.reminder_policy_override as TaskReminderPolicy | null,
     reminderRevision: row.reminder_revision,
+    channelReminder: Boolean(row.channel_reminder),
     completedAt: row.completed_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -195,16 +201,28 @@ function requireEditableTask(taskId: string, creatorUserId: string): TaskDbRow {
 function emitAssignmentReminder(
   assignment: TaskAssignmentRow,
   task: Pick<TaskRow, "dueAt" | "status">,
+  now: number = Date.now(),
 ): OutboxEvent | null {
   if (task.status !== "open" || task.dueAt == null) return null;
+  const policy = effectiveTaskReminderPolicy(
+    assignment.reminderPolicyOverride ?? undefined,
+    getPersonReminderPreference(assignment.userId),
+  );
+  const payload: OutboxEvent["payload"] = {
+    assignmentId: assignment.id,
+    reminderVersion: assignment.reminderRevision,
+  };
+  if (policy === "one_day_and_five_hours") {
+    const next = nextDualReminderSlot(new Date(task.dueAt), new Date(now));
+    if (!next) return null;
+    payload.slot = next.slot;
+    payload.scheduledFor = next.at.getTime();
+  }
   return insertOutboxEvent({
     type: "task.assignment_reminder_requested",
     aggregateId: assignment.id,
     expectedVersion: assignment.reminderRevision,
-    payload: {
-      assignmentId: assignment.id,
-      reminderVersion: assignment.reminderRevision,
-    },
+    payload,
   });
 }
 
@@ -225,6 +243,8 @@ export function addTaskAssignments(input: {
   taskId: string;
   creatorUserId: string;
   assignees: AssigneeInput[];
+  reminderPolicyOverride?: TaskReminderPolicy | null;
+  channelReminder?: boolean;
   now?: number;
 }): { assignments: TaskAssignmentRow[]; outboxEvents: OutboxEvent[] } {
   if (input.assignees.length === 0) return { assignments: [], outboxEvents: [] };
@@ -239,10 +259,20 @@ export function addTaskAssignments(input: {
         getDb()
           .query(
             `INSERT INTO task_assignments (
-               id, task_id, user_id, display_name, status, reminder_revision, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, 'open', 1, ?, ?)`,
+               id, task_id, user_id, display_name, status, reminder_policy_override,
+               reminder_revision, channel_reminder, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, 'open', ?, 1, ?, ?, ?)`,
           )
-          .run(id, task.id, assignee.userId, assignee.displayName ?? null, now, now);
+          .run(
+            id,
+            task.id,
+            assignee.userId,
+            assignee.displayName ?? null,
+            input.reminderPolicyOverride ?? null,
+            input.channelReminder ? 1 : 0,
+            now,
+            now,
+          );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (/UNIQUE constraint failed/i.test(msg)) continue;
@@ -254,7 +284,7 @@ export function addTaskAssignments(input: {
     const outboxEvents: OutboxEvent[] = [];
     if (task.status === "open" && task.dueAt != null) {
       for (const assignment of inserted) {
-        const event = emitAssignmentReminder(assignment, task);
+        const event = emitAssignmentReminder(assignment, task, now);
         if (event) outboxEvents.push(event);
       }
     }
@@ -292,7 +322,7 @@ export function updateTask(input: {
     if (task.status === "open") {
       for (const current of getTaskAssignments(task.id).filter((a) => a.status === "open")) {
         const bumped = bumpAssignmentRevision(current.id, now);
-        const event = emitAssignmentReminder(bumped, task);
+        const event = emitAssignmentReminder(bumped, task, now);
         if (event) outboxEvents.push(event);
       }
     }
@@ -328,7 +358,7 @@ export function activateTask(input: {
     const outboxEvents: OutboxEvent[] = [];
     if (task.dueAt != null) {
       for (const assignment of assignments) {
-        const event = emitAssignmentReminder(assignment, task);
+        const event = emitAssignmentReminder(assignment, task, now);
         if (event) outboxEvents.push(event);
       }
     }
@@ -360,7 +390,10 @@ export function completeTaskAssignment(input: {
         .get(row.task_id)?.n ?? 0;
     if (remaining === 0) {
       getDb()
-        .query(`UPDATE tasks SET status = 'completed', revision = revision + 1, updated_at = ? WHERE id = ?`)
+        .query(
+          `UPDATE tasks SET status = 'completed', revision = revision + 1, updated_at = ?
+           WHERE id = ? AND status = 'open'`,
+        )
         .run(now, row.task_id);
     }
     return mapAssignment(row);
@@ -386,6 +419,9 @@ export function setPersonTaskReminderPreference(input: {
   defaultPolicy: TaskReminderPolicy;
   now?: number;
 }): OutboxEvent[] {
+  if (input.defaultPolicy === "one_day_and_five_hours") {
+    throw new Error("That reminder setting is not available here.");
+  }
   const now = input.now ?? Date.now();
   return getDb().transaction(() => {
     getDb()
@@ -412,7 +448,7 @@ export function setPersonTaskReminderPreference(input: {
       const event = emitAssignmentReminder(bumped, {
         dueAt: row.task_due_at,
         status: row.task_status as TaskStatus,
-      });
+      }, now);
       if (event) outboxEvents.push(event);
     }
     return outboxEvents;
@@ -425,12 +461,16 @@ export function setTaskAssignmentReminderOverride(input: {
   policy?: TaskReminderPolicy;
   now?: number;
 }): { assignment: TaskAssignmentRow; outboxEvents: OutboxEvent[] } {
+  if (input.policy === "one_day_and_five_hours") {
+    throw new Error("That reminder setting is not available here.");
+  }
   const now = input.now ?? Date.now();
   return getDb().transaction(() => {
     const row = getDb()
       .query<AssignmentDbRow, [string | null, number, string, string]>(
         `UPDATE task_assignments
-         SET reminder_policy_override = ?, reminder_revision = reminder_revision + 1, updated_at = ?
+         SET reminder_policy_override = ?, channel_reminder = 0,
+             reminder_revision = reminder_revision + 1, updated_at = ?
          WHERE id = ? AND user_id = ? AND status = 'open'
          RETURNING *`,
       )
@@ -440,7 +480,7 @@ export function setTaskAssignmentReminderOverride(input: {
     const task = getTask(assignment.taskId);
     const outboxEvents: OutboxEvent[] = [];
     if (task?.status === "open" && task.dueAt != null) {
-      const event = emitAssignmentReminder(assignment, task);
+      const event = emitAssignmentReminder(assignment, task, now);
       if (event) outboxEvents.push(event);
     }
     return { assignment, outboxEvents };
@@ -638,6 +678,41 @@ export function enqueueNextRecurringReminder(input: {
         assignmentId: bumped.id,
         reminderVersion: bumped.reminderRevision,
         scheduledFor: next.getTime(),
+      },
+    });
+  })();
+}
+
+/** After the T-1d channel+DM lands, queue the T-5h slot with a bumped revision. */
+export function enqueueNextDualReminder(input: {
+  assignmentId: string;
+  sentSlot: DualReminderSlot;
+  now?: number;
+}): OutboxEvent | null {
+  if (input.sentSlot !== "one_day") return null;
+  const now = input.now ?? Date.now();
+  return getDb().transaction(() => {
+    const loaded = loadTaskReminder(input.assignmentId);
+    if (!loaded || loaded.task.status !== "open" || loaded.assignment.status !== "open") return null;
+    const policy = effectiveTaskReminderPolicy(
+      loaded.assignment.reminderPolicyOverride ?? undefined,
+      loaded.defaultPolicy,
+    );
+    if (policy !== "one_day_and_five_hours" || loaded.task.dueAt == null) return null;
+    const fiveHours = dualReminderSlots(new Date(loaded.task.dueAt), new Date(now)).find(
+      (slot) => slot.slot === "five_hours",
+    );
+    if (!fiveHours) return null;
+    const bumped = bumpAssignmentRevision(loaded.assignment.id, now);
+    return insertOutboxEvent({
+      type: "task.assignment_reminder_requested",
+      aggregateId: bumped.id,
+      expectedVersion: bumped.reminderRevision,
+      payload: {
+        assignmentId: bumped.id,
+        reminderVersion: bumped.reminderRevision,
+        slot: fiveHours.slot,
+        scheduledFor: fiveHours.at.getTime(),
       },
     });
   })();

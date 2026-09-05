@@ -230,6 +230,8 @@ export function buildJobPrompt(payload: SdkJobPayload, redactValues: string[] = 
     "  page older with `before`). Use morpheus_fs_read only for a specific message path or an",
     "  explicit old window. Never conclude the",
     "  index is empty from a single AND-heavy miss.",
+    "If the question is a todo/task request (add, list, done), use morpheus_task_list /",
+    "morpheus_task_create / morpheus_task_complete. Create requires a real due_at — never invent one.",
     "When you have the answer, call morpheus_job_complete exactly once with the final reply",
     "(plain Discord-friendly text, under 4000 characters). Do not post to Discord yourself;",
     "the official bot delivers the reply. Never include credentials or internal URLs in the reply.",

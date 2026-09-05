@@ -49,7 +49,7 @@ import { assertCoordinatorCreate, assertMeetInvoke } from "../coordinator/gates.
 import { publishOutboxEvents, type OutboxDispatchOutcome } from "../coordinator/publisher.ts";
 import {
   formatReminderPolicy,
-  isTaskReminderPolicy,
+  isUserSelectableTaskReminderPolicy,
   type TaskReminderPolicy,
 } from "../coordinator/reminders.ts";
 import { logger } from "../logger.ts";
@@ -951,7 +951,7 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     const chosen = interaction.values[0];
     if (!chosen) throw new Error("Choose a reminder setting.");
     const policy = chosen === "default" ? undefined : chosen;
-    if (policy && !isTaskReminderPolicy(policy)) throw new Error("Choose a reminder setting.");
+    if (policy && !isUserSelectableTaskReminderPolicy(policy)) throw new Error("Choose a reminder setting.");
     const result = setTaskAssignmentReminderOverride({
       assignmentId: value,
       userId: interaction.user.id,
@@ -963,7 +963,7 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
   }
   if (kind === "task-preferences" && interaction.isStringSelectMenu()) {
     const selected = interaction.values[0];
-    if (!selected || !isTaskReminderPolicy(selected)) throw new Error("Choose a default reminder setting.");
+    if (!selected || !isUserSelectableTaskReminderPolicy(selected)) throw new Error("Choose a default reminder setting.");
     const events = setPersonTaskReminderPreference({ userId: interaction.user.id, defaultPolicy: selected });
     await publish(events);
     await replyEphemeral(interaction, {
