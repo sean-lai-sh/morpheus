@@ -2,6 +2,7 @@ import {
   dualReminderSlots,
   effectiveTaskReminderPolicy,
   isRecurringTaskReminder,
+  nextDualReminderSlot,
   nextTaskReminderAt,
   type DualReminderSlot,
   type TaskReminderPolicy,
@@ -209,10 +210,10 @@ function emitAssignmentReminder(
     reminderVersion: assignment.reminderRevision,
   };
   if (policy === "one_day_and_five_hours") {
-    const first = dualReminderSlots(new Date(task.dueAt), new Date(now))[0];
-    if (!first) return null;
-    payload.slot = first.slot;
-    payload.scheduledFor = first.at.getTime();
+    const next = nextDualReminderSlot(new Date(task.dueAt), new Date(now));
+    if (!next) return null;
+    payload.slot = next.slot;
+    payload.scheduledFor = next.at.getTime();
   }
   return insertOutboxEvent({
     type: "task.assignment_reminder_requested",

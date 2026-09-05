@@ -335,51 +335,68 @@ function migrateTaskReminderPolicyCheck(db: Database): void {
       .get(name);
     return Boolean(row?.sql && !row.sql.includes("one_day_and_five_hours"));
   };
-  if (!needsRebuild("task_assignments") && !needsRebuild("person_task_reminder_preferences")) return;
+  const rebuildAssignments = needsRebuild("task_assignments");
+  const rebuildPreferences = needsRebuild("person_task_reminder_preferences");
+  if (!rebuildAssignments && !rebuildPreferences) return;
 
+  // DROP + RENAME is not recoverable halfway. `PRAGMA foreign_keys` is a no-op
+  // inside a transaction, so it goes outside; the destructive part goes inside,
+  // and column lists are explicit so this never depends on physical order.
+  const foreignKeysOn = Boolean(
+    db.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()?.foreign_keys,
+  );
   db.exec("PRAGMA foreign_keys = OFF");
   try {
-    if (needsRebuild("task_assignments")) {
-      db.exec(`
-        CREATE TABLE task_assignments_new (
-          id TEXT PRIMARY KEY,
-          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-          user_id TEXT NOT NULL,
-          display_name TEXT,
-          status TEXT NOT NULL CHECK (status IN ('open', 'completed')),
-          reminder_policy_override TEXT CHECK (
-            reminder_policy_override IS NULL
-            OR reminder_policy_override IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'one_day_and_five_hours', 'none')
-          ),
-          reminder_revision INTEGER NOT NULL DEFAULT 1,
-          completed_at INTEGER,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL,
-          UNIQUE (task_id, user_id)
-        );
-        INSERT INTO task_assignments_new SELECT * FROM task_assignments;
-        DROP TABLE task_assignments;
-        ALTER TABLE task_assignments_new RENAME TO task_assignments;
-        CREATE INDEX IF NOT EXISTS idx_task_assignments_user
-          ON task_assignments(user_id, status);
-      `);
-    }
-    if (needsRebuild("person_task_reminder_preferences")) {
-      db.exec(`
-        CREATE TABLE person_task_reminder_preferences_new (
-          user_id TEXT PRIMARY KEY,
-          default_policy TEXT NOT NULL DEFAULT 'daily_until_done' CHECK (
-            default_policy IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'one_day_and_five_hours', 'none')
-          ),
-          updated_at INTEGER NOT NULL
-        );
-        INSERT INTO person_task_reminder_preferences_new SELECT * FROM person_task_reminder_preferences;
-        DROP TABLE person_task_reminder_preferences;
-        ALTER TABLE person_task_reminder_preferences_new RENAME TO person_task_reminder_preferences;
-      `);
-    }
+    db.transaction(() => {
+      if (rebuildAssignments) {
+        db.exec(`
+          CREATE TABLE task_assignments_new (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            user_id TEXT NOT NULL,
+            display_name TEXT,
+            status TEXT NOT NULL CHECK (status IN ('open', 'completed')),
+            reminder_policy_override TEXT CHECK (
+              reminder_policy_override IS NULL
+              OR reminder_policy_override IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'one_day_and_five_hours', 'none')
+            ),
+            reminder_revision INTEGER NOT NULL DEFAULT 1,
+            completed_at INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE (task_id, user_id)
+          );
+          INSERT INTO task_assignments_new (
+            id, task_id, user_id, display_name, status, reminder_policy_override,
+            reminder_revision, completed_at, created_at, updated_at
+          )
+          SELECT id, task_id, user_id, display_name, status, reminder_policy_override,
+                 reminder_revision, completed_at, created_at, updated_at
+          FROM task_assignments;
+          DROP TABLE task_assignments;
+          ALTER TABLE task_assignments_new RENAME TO task_assignments;
+          CREATE INDEX IF NOT EXISTS idx_task_assignments_user
+            ON task_assignments(user_id, status);
+        `);
+      }
+      if (rebuildPreferences) {
+        db.exec(`
+          CREATE TABLE person_task_reminder_preferences_new (
+            user_id TEXT PRIMARY KEY,
+            default_policy TEXT NOT NULL DEFAULT 'daily_until_done' CHECK (
+              default_policy IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'one_day_and_five_hours', 'none')
+            ),
+            updated_at INTEGER NOT NULL
+          );
+          INSERT INTO person_task_reminder_preferences_new (user_id, default_policy, updated_at)
+          SELECT user_id, default_policy, updated_at FROM person_task_reminder_preferences;
+          DROP TABLE person_task_reminder_preferences;
+          ALTER TABLE person_task_reminder_preferences_new RENAME TO person_task_reminder_preferences;
+        `);
+      }
+    })();
   } finally {
-    db.exec("PRAGMA foreign_keys = ON");
+    db.exec(`PRAGMA foreign_keys = ${foreignKeysOn ? "ON" : "OFF"}`);
   }
 }
 

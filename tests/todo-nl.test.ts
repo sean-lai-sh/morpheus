@@ -5,7 +5,9 @@ import {
   completeVisibleTodo,
   createAndActivateTodo,
   listVisibleTodos,
+  MAX_NL_TODO_ASSIGNEES,
   NL_TODO_REMINDER_POLICY,
+  TodoUserError,
 } from "../src/coordinator/todo-nl.ts";
 import { tryHandleTodoMention } from "../src/bot/todo-mention.ts";
 import { tryEnqueueJob, type JobCandidate } from "../src/bot/enqueue.ts";
@@ -95,6 +97,26 @@ describe("todo intent", () => {
     });
   });
 
+  test("an agent request that opens with complete/finish is not a done intent", () => {
+    for (const text of [
+      `<@${BOT}> complete the migration checklist for me`,
+      `<@${BOT}> finish the draft agenda`,
+      `<@${BOT}> completed the thing already`,
+    ]) {
+      expect(parseTodoIntent(text, { botUserId: BOT, now: NOW }).kind).toBe("unclear");
+    }
+    expect(parseTodoIntent(`<@${BOT}> complete task snacks`, { botUserId: BOT, now: NOW })).toEqual({
+      kind: "done",
+      titleFragment: "snacks",
+    });
+  });
+
+  test("a question with no due date falls through instead of demanding one", () => {
+    expect(
+      parseTodoIntent(`<@${BOT}> can you create a task list for the wiki?`, { botUserId: BOT, now: NOW }).kind,
+    ).toBe("unclear");
+  });
+
   test("mid-sentence 'create a task' is unclear, not an add", () => {
     expect(
       parseTodoIntent(`<@${BOT}> how do I create a task in Asana by friday 2pm`, { botUserId: BOT, now: NOW })
@@ -174,6 +196,39 @@ describe("todo apply + visibility", () => {
     if (done.ok) expect(done.task.title).toBe("Buy snacks");
   });
 
+  test("a bare done never picks a todo for you, even at one match", () => {
+    const dueAt = NOW + 3 * 24 * 60 * 60_000;
+    const created = createAndActivateTodo({
+      createdByUserId: "888",
+      title: "Only open item",
+      dueAt,
+      channelId: SPONSORS,
+      assignees: [{ userId: "888", displayName: "Ari" }],
+      now: NOW,
+    });
+    const result = completeVisibleTodo("888");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("ambiguous");
+    expect(getTask(created.task.id)?.status).toBe("open");
+  });
+
+  test("refuses an assignee list past the cap instead of mass-pinging", () => {
+    const assignees = Array.from({ length: MAX_NL_TODO_ASSIGNEES + 1 }, (_, i) => ({
+      userId: `bulk-${i}`,
+      displayName: `Bulk ${i}`,
+    }));
+    expect(() =>
+      createAndActivateTodo({
+        createdByUserId: "999",
+        title: "Everyone read this",
+        dueAt: NOW + 2 * 24 * 60 * 60_000,
+        channelId: SPONSORS,
+        assignees,
+        now: NOW,
+      }),
+    ).toThrow(TodoUserError);
+  });
+
   test("cancelled tasks stay cancelled and are not completable via NL", () => {
     const dueAt = NOW + 6 * 24 * 60 * 60_000;
     const created = createAndActivateTodo({
@@ -245,6 +300,22 @@ describe("dual reminders + channel post", () => {
     });
     expect(later.status).toBe("accepted");
     expect(channels.some((row) => row.slot === "five_hours")).toBe(true);
+  });
+
+  test("a due date inside the window skips the elapsed 1-day slot", () => {
+    const now = Date.parse("2026-09-10T11:00:00Z");
+    const created = createAndActivateTodo({
+      createdByUserId: "1010",
+      title: "Due in six hours",
+      dueAt: Date.parse("2026-09-10T17:00:00Z"),
+      channelId: SPONSORS,
+      assignees: [{ userId: "1010", displayName: "Sam" }],
+      now,
+    });
+    const first = created.outboxEvents[0]!;
+    // Not a ping labelled "1-day reminder" fired the moment the todo is made.
+    expect(first.payload.slot).toBe("five_hours");
+    expect(first.payload.scheduledFor).toBe(Date.parse("2026-09-10T12:00:00Z"));
   });
 
   test("channel failure still accepts when the DM lands", async () => {
@@ -430,10 +501,21 @@ describe("HTTP /v1/tasks", () => {
     expect(missing.status).toBe(400);
 
     const dueAt = NOW + 8 * 24 * 60 * 60_000;
+    // An assignee who was never mentioned is refused outright rather than
+    // quietly swapped for the author: a silent swap makes the worker believe
+    // it assigned someone it did not.
+    const spoofedAssignee = await handleHttpRequest(
+      req("POST", "/v1/tasks", {
+        jobId: job.id,
+        body: { title: "From HTTP", due_at: dueAt, assignee_ids: ["evil"] },
+      }),
+    );
+    expect(spoofedAssignee.status).toBe(403);
+
     const created = await handleHttpRequest(
       req("POST", "/v1/tasks", {
         jobId: job.id,
-        body: { title: "From HTTP", due_at: dueAt, user_id: "evil", assignee_ids: ["evil"] },
+        body: { title: "From HTTP", due_at: dueAt, user_id: "evil" },
       }),
     );
     expect(created.status).toBe(200);

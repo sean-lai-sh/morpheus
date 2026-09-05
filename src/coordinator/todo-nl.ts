@@ -21,6 +21,17 @@ import type { OutboxEvent } from "../storage/outbox.ts";
 
 export const NL_TODO_REMINDER_POLICY = "one_day_and_five_hours" as const;
 
+/**
+ * A role mention expands to every member of that role, and each assignee costs
+ * a public channel ping plus a DM on two slots. The NL path is reachable from
+ * an ordinary message with no per-author cap, so bound the blast radius here:
+ * @Eboard-sized groups sail through, a stray @Members does not.
+ */
+export const MAX_NL_TODO_ASSIGNEES = 25;
+
+/** Thrown for messages that are safe to echo back to Discord verbatim. */
+export class TodoUserError extends Error {}
+
 export interface VisibleTodo {
   task: TaskRow;
   assignment: TaskAssignmentRow | null;
@@ -70,8 +81,15 @@ export function createAndActivateTodo(input: {
   timeZone?: string;
   now?: number;
 }): { task: TaskRow; assignments: TaskAssignmentRow[]; outboxEvents: OutboxEvent[] } {
-  if (!Number.isFinite(input.dueAt)) throw new Error(MISSING_DUE_REPLY);
-  if (input.assignees.length === 0) throw new Error("Add at least one assignee before creating this task.");
+  if (!Number.isFinite(input.dueAt)) throw new TodoUserError(MISSING_DUE_REPLY);
+  if (input.assignees.length === 0) {
+    throw new TodoUserError("Add at least one assignee before creating this task.");
+  }
+  if (input.assignees.length > MAX_NL_TODO_ASSIGNEES) {
+    throw new TodoUserError(
+      `That would assign ${input.assignees.length} people. Mention up to ${MAX_NL_TODO_ASSIGNEES}, or use \`/task\` for a larger group.`,
+    );
+  }
   const draft = createTaskDraft({
     createdByUserId: input.createdByUserId,
     title: input.title,
@@ -137,7 +155,7 @@ export function formatVisibleTodoList(userId: string): string {
 export function completeVisibleTodo(
   userId: string,
   titleFragment?: string,
-): { ok: true; task: TaskRow } | { ok: false; reason: "none" | "ambiguous" | "not-assigned"; detail: string } {
+): { ok: true; task: TaskRow } | { ok: false; reason: "none" | "ambiguous"; detail: string } {
   const assigned = listTasksForPerson({ userId }).filter(
     (entry) => entry.assignment.status === "open" && entry.task.status === "open",
   );
@@ -148,20 +166,22 @@ export function completeVisibleTodo(
   if (matches.length === 0) {
     return {
       ok: false,
-      reason: assigned.length === 0 ? "none" : "none",
+      reason: "none",
       detail: needle
         ? `I couldn't find an open todo of yours matching “${titleFragment}”.`
         : "You have no open todos to mark done.",
     };
   }
-  if (matches.length > 1) {
+  // A bare "done" never picks for you -- closing the wrong todo is silent and
+  // hard to notice -- so a targetless request always asks, even at one match.
+  if (matches.length > 1 || !needle) {
     const lines = matches
       .map((entry) => `• ${entry.task.title} — due ${formatTodoDue(entry.task.dueAt, entry.task.timeZone)}`)
       .join("\n");
     return {
       ok: false,
       reason: "ambiguous",
-      detail: `Which one? Be more specific:\n${lines}`,
+      detail: `Which one? Reply \`mark <title> done\`:\n${lines}`,
     };
   }
   const entry = matches[0]!;

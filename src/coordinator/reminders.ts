@@ -75,6 +75,30 @@ export function dualReminderSlots(
   ];
 }
 
+/**
+ * The slot to fire NEXT, skipping any that already elapsed. Without this a todo
+ * created inside the window (`add a todo ... by friday 2pm`, said Friday
+ * morning) immediately posts a channel ping labelled "1-day reminder", because
+ * `dualReminderSlots` clamps a past slot to now. Under five hours out, the
+ * five-hour slot fires now under its own honest label; past due, nothing.
+ */
+export function nextDualReminderSlot(
+  dueAt: Date,
+  now: Date = new Date(),
+): { slot: DualReminderSlot; at: Date } | null {
+  // Raw offsets, not `dualReminderSlots` -- that one clamps a past slot to now,
+  // which is exactly the elapsed case this has to skip. `>=` so firing exactly
+  // at T-1d still uses the one-day slot.
+  const raw: Array<{ slot: DualReminderSlot; at: Date }> = [
+    { slot: "one_day", at: new Date(dueAt.getTime() - DAY_MS) },
+    { slot: "five_hours", at: new Date(dueAt.getTime() - FIVE_HOURS_MS) },
+  ];
+  const upcoming = raw.find((entry) => entry.at.getTime() >= now.getTime());
+  if (upcoming) return upcoming;
+  if (dueAt.getTime() <= now.getTime()) return null;
+  return { slot: "five_hours", at: new Date(now.getTime()) };
+}
+
 export function isDualReminderSlot(value: unknown): value is DualReminderSlot {
   return value === "one_day" || value === "five_hours";
 }

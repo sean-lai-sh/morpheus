@@ -176,7 +176,7 @@ export async function defaultReminderChannelSender(
   }
   const when = input.slot === "one_day" ? "1-day" : "5-hour";
   await channel.send({
-    content: `<@${input.userId}> **${input.title}** — this is your ${when} reminder.\n${input.body}`,
+    content: `<@${input.userId}> **${input.title}** — this is your ${when} reminder.${input.body ? `\n${input.body}` : ""}`,
     allowedMentions: { parse: [], users: [input.userId], roles: [], repliedUser: false },
     components: [reminderActionRow(input.assignmentId, false)],
   });
@@ -230,7 +230,11 @@ async function dispatchTaskReminder(
   const slot: DualReminderSlot = isDualReminderSlot(event.payload.slot) ? event.payload.slot : "one_day";
   const wantChannel =
     loaded.assignment.reminderPolicyOverride === "one_day_and_five_hours" && Boolean(loaded.task.channelId);
-  const body = `${loaded.task.description ? `${loaded.task.description}\n` : ""}${due ? `Due: ${due}` : ""}\nYou can update your personal reminder setting below.`.trim();
+  // The channel post carries no "Reminder settings" button (that control is
+  // personal), so it must not tell the reader to use one.
+  const detail = `${loaded.task.description ? `${loaded.task.description}\n` : ""}${due ? `Due: ${due}` : ""}`.trim();
+  const body = `${detail}\nYou can update your personal reminder setting below.`.trim();
+  const channelBody = detail;
 
   let dmOk = false;
   let channelOk = !wantChannel;
@@ -258,7 +262,7 @@ async function dispatchTaskReminder(
           channelId: loaded.task.channelId,
           userId: loaded.assignment.userId,
           title: loaded.task.title,
-          body,
+          body: channelBody,
           assignmentId,
           slot,
         }),

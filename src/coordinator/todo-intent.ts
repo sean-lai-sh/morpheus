@@ -11,8 +11,21 @@ const ADD_RE =
   /^(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?(?:add|create)\s+(?:a\s+|an\s+)?(?:todo|task)\b|^todo\s*:|^remind me to\b/i;
 const LIST_RE =
   /^(?:what(?:'s|s| is)\s+on\s+my\s+(?:todo\s+)?list\??|my\s+todos?|list\s+(?:my\s+)?(?:todos?|tasks?)|(?:show|get)\s+(?:my\s+)?(?:todos?|tasks?))\b/i;
-const DONE_MARK_RE = /^mark\s+(.+?)\s+done\b/i;
-const DONE_RE = /^(?:(?:please\s+)?(?:mark(?:\s+(?:that|this|it))?\s+)?)?(?:done|complete)(?:\s+(.+))?$/i;
+/**
+ * Completion is deliberately narrow and anchored. An @mention that merely
+ * starts with "complete ..." is far more often work for the agent ("complete
+ * the migration checklist") than a todo close-out, and a false positive here is
+ * terminal: `tryHandleTodoMention` never falls through once an intent matches.
+ * Every form below either names the todo or is a bare acknowledgement, and a
+ * bare one never picks a task on its own -- `completeVisibleTodo` asks which.
+ */
+const DONE_FORMS: readonly RegExp[] = [
+  /^mark\s+(.+?)\s+(?:as\s+)?(?:done|completed?)\b/i,
+  /^(?:i(?:'m|m|\s+am)\s+)?(?:done|finished)\s+with\s+(.+)$/i,
+  /^(?:please\s+)?(?:complete|finish|close)\s+(?:my\s+)?(?:todo|task)\b[:\s]*(.*)$/i,
+];
+const DONE_BARE_RE =
+  /^(?:please\s+)?(?:mark\s+(?:that|this|it)\s+(?:as\s+)?)?(?:done|completed?)[.!]?$/i;
 const BY_DUE_RE = /\b(?:by|due(?:\s+(?:on|at))?)\s+(.+)$/i;
 
 export type TodoIntent =
@@ -103,19 +116,20 @@ export function parseTodoIntent(
 
   if (LIST_RE.test(stripped)) return { kind: "list" };
 
-  const markDone = DONE_MARK_RE.exec(stripped);
-  if (markDone) {
-    const fragment = markDone[1]?.trim();
+  for (const form of DONE_FORMS) {
+    const match = form.exec(stripped);
+    if (!match) continue;
+    const fragment = match[1]?.trim();
     return { kind: "done", titleFragment: fragment || undefined };
   }
-  if (DONE_RE.test(stripped) && !ADD_RE.test(stripped)) {
-    const match = DONE_RE.exec(stripped);
-    const fragment = match?.[1]?.trim();
-    return { kind: "done", titleFragment: fragment || undefined };
-  }
+  if (DONE_BARE_RE.test(stripped)) return { kind: "done" };
 
   if (ADD_RE.test(stripped)) {
     const { rest, dueAt, dueText, dueError } = splitDue(stripped, timeZone, now);
+    // A question with no due date ("can you create a task list for the wiki?")
+    // is an ask for the agent, not a todo. Demanding `friday 2pm` there would
+    // swallow the message, so hand it back to the job queue instead.
+    if (!dueAt && stripped.endsWith("?")) return { kind: "unclear" };
     const title = titleFromAdd(rest);
     if (!title) return { kind: "missing_due", title: "", dueError: dueError ?? MISSING_DUE_REPLY };
     if (!dueAt) return { kind: "missing_due", title, dueError: dueError ?? MISSING_DUE_REPLY };

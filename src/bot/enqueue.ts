@@ -149,20 +149,23 @@ export function authorPassesRoleGate(authorRoleIds: string[], triggerRoles: Set<
   return authorRoleIds.some((id) => triggerRoles.has(id));
 }
 
+type CandidateGate =
+  | { ok: false; skipped: EnqueueSkipReason }
+  | { ok: true; loaded: Env; namespace: string; channelId: string; resolveChannel: ChannelResolver };
+
 /**
  * Shared fail-closed gates for @mention jobs and NL todos. Caps are job-only
  * and are not included: a todo should still land when the Grok/SDK lane is full.
+ * Returns what it resolved on the way through so callers do not re-derive the
+ * env, the channel resolver, or the namespace a second time.
  */
-export function skipReasonForCandidate(
-  candidate: JobCandidate,
-  opts: TryEnqueueOpts = {},
-): EnqueueSkipReason | null {
+function gateCandidate(candidate: JobCandidate, opts: TryEnqueueOpts): CandidateGate {
   const loaded = opts.env ?? loadEnv();
   const enabled = opts.enabled ?? loaded.JOB_QUEUE_ENABLED;
   const triggerRoles = opts.triggerRoleIds ?? jobTriggerRoleIds(loaded);
 
-  if (!enabled) return "disabled";
-  if (candidate.authorIsBot) return "bot-author";
+  if (!enabled) return { ok: false, skipped: "disabled" };
+  if (candidate.authorIsBot) return { ok: false, skipped: "bot-author" };
 
   const isTrigger =
     candidate.source === "slash" ||
@@ -170,11 +173,11 @@ export function skipReasonForCandidate(
     candidate.source === "coordinator" ||
     candidate.mentionedBot ||
     candidate.replyToBot;
-  if (!isTrigger) return "not-trigger";
+  if (!isTrigger) return { ok: false, skipped: "not-trigger" };
 
   const resolveChannel = opts.resolveChannel ?? getChannel;
   const channelId = configChannelId(candidate);
-  if (!resolveChannel(channelId)) return "channel-not-allowlisted";
+  if (!resolveChannel(channelId)) return { ok: false, skipped: "channel-not-allowlisted" };
 
   const namespace = namespaceForRow(
     {
@@ -183,7 +186,7 @@ export function skipReasonForCandidate(
     },
     resolveChannel,
   );
-  if (!namespace) return "unknown-namespace";
+  if (!namespace) return { ok: false, skipped: "unknown-namespace" };
 
   if (!authorPassesRoleGate(candidate.authorRoleIds, triggerRoles)) {
     const nodeEnv = opts.nodeEnv ?? loaded.NODE_ENV;
@@ -191,31 +194,29 @@ export function skipReasonForCandidate(
       { author_id: candidate.authorId, node_env: nodeEnv, trigger_roles: triggerRoles.size },
       "job enqueue role gate failed (fail closed)",
     );
-    return "role-gate";
+    return { ok: false, skipped: "role-gate" };
   }
-  return null;
+  return { ok: true, loaded, namespace, channelId, resolveChannel };
+}
+
+export function skipReasonForCandidate(
+  candidate: JobCandidate,
+  opts: TryEnqueueOpts = {},
+): EnqueueSkipReason | null {
+  const gate = gateCandidate(candidate, opts);
+  return gate.ok ? null : gate.skipped;
 }
 
 export async function tryEnqueueJob(
   candidate: JobCandidate,
   opts: TryEnqueueOpts = {},
 ): Promise<TryEnqueueResult> {
-  const skipped = skipReasonForCandidate(candidate, opts);
-  if (skipped) return { job: null, skipped };
+  const gate = gateCandidate(candidate, opts);
+  if (!gate.ok) return { job: null, skipped: gate.skipped };
+  const { loaded, namespace, channelId, resolveChannel } = gate;
 
-  const loaded = opts.env ?? loadEnv();
   const maxOutstanding = opts.maxOutstanding ?? loaded.JOB_MAX_OUTSTANDING_PER_AUTHOR;
   const maxPerHour = opts.maxPerHour ?? loaded.JOB_MAX_PER_AUTHOR_PER_HOUR;
-  const resolveChannel = opts.resolveChannel ?? getChannel;
-  const channelId = configChannelId(candidate);
-  const namespace = namespaceForRow(
-    {
-      channel_id: candidate.discordChannelId,
-      parent_channel_id: candidate.parentChannelId,
-    },
-    resolveChannel,
-  );
-  if (!namespace) return { job: null, skipped: "unknown-namespace" };
 
   const now = opts.now ?? Date.now();
   const lane = laneForSource(candidate.source);

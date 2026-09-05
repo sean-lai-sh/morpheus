@@ -11,6 +11,7 @@ import {
   formatTodoDue,
   formatVisibleTodoList,
   resolveNlAssignees,
+  TodoUserError,
 } from "../coordinator/todo-nl.ts";
 import { logger } from "../logger.ts";
 import { JOB_ALLOWED_MENTIONS } from "./reply.ts";
@@ -87,9 +88,11 @@ export async function tryHandleTodoMention(
     );
     return { handled: true };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    // Only messages written for a human go back to Discord; a SQLite or
+    // discord.js error string would otherwise land in a public channel.
     logger.error({ err, author_id: candidate.authorId }, "todo mention apply failed");
-    await reply(message || "I couldn't update that todo.");
+    const message = err instanceof TodoUserError ? err.message : "";
+    await reply(message || "I couldn't update that todo. It has been logged.");
     return { handled: true };
   }
 }

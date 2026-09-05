@@ -1,4 +1,5 @@
 import { authorizeV1 } from "./auth.ts";
+import { peekClient } from "../bot/client.ts";
 import { extractTodoMentions } from "../coordinator/todo-intent.ts";
 import { createAndActivateTodo, listVisibleTodos } from "../coordinator/todo-nl.ts";
 import { publishOutboxEvents } from "../coordinator/publisher.ts";
@@ -47,7 +48,8 @@ function actorFromClaimedJob(
 }
 
 function allowedAssigneeIds(job: JobRow, requested: string[]): string[] {
-  const mentions = extractTodoMentions(job.content, "");
+  // Pass the real bot id so the bot's own snowflake is not a legal assignee.
+  const mentions = extractTodoMentions(job.content, peekClient()?.user?.id ?? "");
   const allowed = new Set<string>([job.author_id, ...mentions.userIds]);
   const unique = [...new Set(requested.filter((id) => /^\d+$/.test(id) || id === job.author_id))];
   return unique.filter((id) => allowed.has(id));
@@ -100,7 +102,12 @@ export async function handleTasksRequest(req: Request, url: URL): Promise<Respon
     const requested = Array.isArray(body.assignee_ids)
       ? body.assignee_ids.filter((id): id is string => typeof id === "string")
       : [];
+    // Silently falling back to the author would hide a worker asking for
+    // someone who was never mentioned; say no instead.
     const filtered = requested.length > 0 ? allowedAssigneeIds(actor.job, requested) : [];
+    if (requested.length > 0 && filtered.length === 0) {
+      return json(403, { error: "assignee_ids must be the author or a user mentioned in the trigger" });
+    }
     const assigneeIds = filtered.length > 0 ? filtered : [authorId];
     const created = createAndActivateTodo({
       createdByUserId: authorId,
