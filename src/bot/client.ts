@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Partials } from "discord.js";
+import { Client, Events, GatewayIntentBits, Partials } from "discord.js";
 import { discordBotToken, loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 
@@ -25,7 +25,7 @@ export function getClient(): Client {
 
   client.on("error", (err) => logger.error({ err }, "discord client error"));
   client.on("warn", (msg) => logger.warn({ msg }, "discord client warn"));
-  client.once("ready", (c) =>
+  client.once(Events.ClientReady, (c) =>
     logger.info({ user: c.user.tag, id: c.user.id }, "discord client ready"),
   );
 

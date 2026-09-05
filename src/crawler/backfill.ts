@@ -7,28 +7,9 @@ import {
   markBackfillComplete,
   setOldestSeen,
 } from "../storage/crawl-state.ts";
+import { forEachArchivedThread } from "./threads.ts";
 
 const PAGE_SIZE = 100;
-
-/** Paginate public or private archived threads (discord.js defaults type to public). */
-async function forEachArchivedThread(
-  ch: TextChannel,
-  type: "public" | "private",
-  fetchAll: boolean,
-  fn: (thread: AnyThreadChannel) => Promise<void>,
-): Promise<void> {
-  let hasMore = true;
-  let before: string | undefined;
-  while (hasMore) {
-    const archived = await ch.threads.fetchArchived({ type, fetchAll, limit: 100, before });
-    for (const [, t] of archived.threads) {
-      await fn(t);
-    }
-    hasMore = archived.hasMore;
-    const ids = [...archived.threads.keys()];
-    before = ids[ids.length - 1];
-  }
-}
 
 async function fetchTextChannel(client: Client, channelId: string): Promise<TextChannel | null> {
   try {
@@ -188,6 +169,29 @@ async function backfillThread(
       return { ingested, pages };
     }
   }
+}
+
+/** Parse `--channel=<id>` from CLI args (issue #4). Empty value is ignored. */
+export function parseBackfillChannelFlag(args: string[]): string | undefined {
+  const eq = args.find((a) => a.startsWith("--channel="));
+  if (!eq) return undefined;
+  const id = eq.slice("--channel=".length).trim();
+  return id.length > 0 ? id : undefined;
+}
+
+/**
+ * Restrict backfill to one allowlisted channel. Unknown ids throw so a typo
+ * cannot silently crawl nothing (or everything).
+ */
+export function channelFilterForBackfill(
+  channelId: string | undefined,
+  channels: Channel[],
+): ((c: Channel) => boolean) | undefined {
+  if (!channelId) return undefined;
+  if (!channels.some((c) => c.id === channelId)) {
+    throw new Error(`unknown --channel ${channelId}`);
+  }
+  return (c) => c.id === channelId;
 }
 
 /**
