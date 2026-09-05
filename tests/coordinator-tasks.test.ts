@@ -150,6 +150,26 @@ describe("task reminder dispatch", () => {
     expect(result.assignment.reminderPolicyOverride).toBe("none");
     const loaded = loadTaskReminder(result.assignment.id);
     expect(loaded?.assignment.reminderPolicyOverride).toBe("none");
+    expect(loaded?.assignment.channelReminder).toBe(false);
+  });
+
+  test("slash settings refuse the NL-only dual policy", () => {
+    const dueAt = Date.now() + 2 * 24 * 60 * 60_000;
+    const { outboxEvents } = openDatedTask({ dueAt, assignee: "assignee-nl-only" });
+    expect(() =>
+      setTaskAssignmentReminderOverride({
+        assignmentId: outboxEvents[0]!.aggregateId,
+        userId: "assignee-nl-only",
+        policy: "one_day_and_five_hours",
+      }),
+    ).toThrow("not available");
+    expect(() =>
+      setPersonTaskReminderPreference({
+        userId: "assignee-nl-only",
+        defaultPolicy: "one_day_and_five_hours",
+      }),
+    ).toThrow("not available");
+    expect(getAssignment(outboxEvents[0]!.aggregateId)?.reminderPolicyOverride).toBeNull();
   });
 });
 

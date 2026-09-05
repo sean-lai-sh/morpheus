@@ -19,6 +19,7 @@ import {
   createTaskDraft,
   getTask,
   getTaskAssignments,
+  setTaskAssignmentReminderOverride,
   updateTask,
 } from "../src/storage/coordinator-tasks.ts";
 import { listPendingOutbox } from "../src/storage/outbox.ts";
@@ -161,6 +162,7 @@ describe("todo apply + visibility", () => {
     expect(created.assignments).toHaveLength(1);
     expect(created.assignments[0]?.userId).toBe("111");
     expect(created.assignments[0]?.reminderPolicyOverride).toBe(NL_TODO_REMINDER_POLICY);
+    expect(created.assignments[0]?.channelReminder).toBe(true);
     expect(created.outboxEvents).toHaveLength(1);
     expect(created.outboxEvents[0]?.payload.slot).toBe("one_day");
     expect(listVisibleTodos("111").map((row) => row.task.title)).toContain("File receipts");
@@ -359,6 +361,50 @@ describe("dual reminders + channel post", () => {
     expect(outcome.status).toBe("accepted");
     expect(channels).toEqual([]);
     expect(getTaskAssignments(task.id)[0]?.reminderPolicyOverride).toBeNull();
+    expect(getTaskAssignments(task.id)[0]?.channelReminder).toBe(false);
+  });
+
+  test("dual policy without the channel pin stays DM-only", async () => {
+    const dueAt = Date.now() + 60 * 60_000;
+    const channels: string[] = [];
+    const task = createTaskDraft({ createdByUserId: "667", title: "Policy only", channelId: SPONSORS });
+    addTaskAssignments({
+      taskId: task.id,
+      creatorUserId: "667",
+      assignees: [{ userId: "667", displayName: "Pat" }],
+      reminderPolicyOverride: "one_day_and_five_hours",
+    });
+    updateTask({ taskId: task.id, creatorUserId: "667", dueAt });
+    const { outboxEvents } = activateTask({ taskId: task.id, creatorUserId: "667" });
+    const outcome = await publishOutboxEvent(outboxEvents[0]!, {
+      now: Date.now() + 2 * 60 * 60_000,
+      sendDm: async () => undefined,
+      sendChannel: async () => {
+        channels.push("nope");
+      },
+    });
+    expect(outcome.status).toBe("accepted");
+    expect(channels).toEqual([]);
+    expect(getTaskAssignments(task.id)[0]?.channelReminder).toBe(false);
+  });
+
+  test("changing a personal reminder override clears the channel pin", async () => {
+    const dueAt = Date.now() + 2 * 24 * 60 * 60_000;
+    const created = createAndActivateTodo({
+      createdByUserId: "668",
+      title: "Unpin me",
+      dueAt,
+      channelId: SPONSORS,
+      assignees: [{ userId: "668", displayName: "Lee" }],
+    });
+    expect(created.assignments[0]?.channelReminder).toBe(true);
+    const result = setTaskAssignmentReminderOverride({
+      assignmentId: created.assignments[0]!.id,
+      userId: "668",
+      policy: "one_day_before",
+    });
+    expect(result.assignment.channelReminder).toBe(false);
+    expect(result.assignment.reminderPolicyOverride).toBe("one_day_before");
   });
 });
 

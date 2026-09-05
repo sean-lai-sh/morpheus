@@ -105,6 +105,7 @@ export function createAndActivateTodo(input: {
       displayName: assignee.displayName,
     })),
     reminderPolicyOverride: NL_TODO_REMINDER_POLICY,
+    channelReminder: true,
     now: input.now,
   });
   updateTask({

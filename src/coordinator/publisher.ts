@@ -228,8 +228,7 @@ async function dispatchTaskReminder(
       })
     : null;
   const slot: DualReminderSlot = isDualReminderSlot(event.payload.slot) ? event.payload.slot : "one_day";
-  const wantChannel =
-    loaded.assignment.reminderPolicyOverride === "one_day_and_five_hours" && Boolean(loaded.task.channelId);
+  const wantChannel = loaded.assignment.channelReminder && Boolean(loaded.task.channelId);
   // The channel post carries no "Reminder settings" button (that control is
   // personal), so it must not tell the reader to use one.
   const detail = `${loaded.task.description ? `${loaded.task.description}\n` : ""}${due ? `Due: ${due}` : ""}`.trim();

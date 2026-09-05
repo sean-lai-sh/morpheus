@@ -2,12 +2,20 @@ import { describe, expect, test } from "bun:test";
 import {
   effectiveTaskReminderPolicy,
   isRecurringTaskReminder,
+  isTaskReminderPolicy,
+  isUserSelectableTaskReminderPolicy,
   nextTaskReminderAt,
 } from "../src/coordinator/reminders.ts";
 
 describe("task reminder policy", () => {
   const dueAt = new Date("2026-09-10T17:00:00Z");
   const now = new Date("2026-09-01T12:00:00Z");
+
+  test("the dual policy is not a slash-selectable reminder setting", () => {
+    expect(isTaskReminderPolicy("one_day_and_five_hours")).toBe(true);
+    expect(isUserSelectableTaskReminderPolicy("one_day_and_five_hours")).toBe(false);
+    expect(isUserSelectableTaskReminderPolicy("one_day_before")).toBe(true);
+  });
 
   test("uses the assignee override before the personal default", () => {
     expect(effectiveTaskReminderPolicy("one_hour_before", "daily_until_done")).toBe("one_hour_before");

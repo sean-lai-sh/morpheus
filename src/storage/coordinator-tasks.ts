@@ -36,6 +36,7 @@ export interface TaskAssignmentRow {
   status: AssignmentStatus;
   reminderPolicyOverride: TaskReminderPolicy | null;
   reminderRevision: number;
+  channelReminder: boolean;
   completedAt: number | null;
   createdAt: number;
   updatedAt: number;
@@ -77,6 +78,7 @@ interface AssignmentDbRow {
   status: string;
   reminder_policy_override: string | null;
   reminder_revision: number;
+  channel_reminder: number | null;
   completed_at: number | null;
   created_at: number;
   updated_at: number;
@@ -107,6 +109,7 @@ function mapAssignment(row: AssignmentDbRow): TaskAssignmentRow {
     status: row.status as AssignmentStatus,
     reminderPolicyOverride: row.reminder_policy_override as TaskReminderPolicy | null,
     reminderRevision: row.reminder_revision,
+    channelReminder: Boolean(row.channel_reminder),
     completedAt: row.completed_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -241,6 +244,7 @@ export function addTaskAssignments(input: {
   creatorUserId: string;
   assignees: AssigneeInput[];
   reminderPolicyOverride?: TaskReminderPolicy | null;
+  channelReminder?: boolean;
   now?: number;
 }): { assignments: TaskAssignmentRow[]; outboxEvents: OutboxEvent[] } {
   if (input.assignees.length === 0) return { assignments: [], outboxEvents: [] };
@@ -256,8 +260,8 @@ export function addTaskAssignments(input: {
           .query(
             `INSERT INTO task_assignments (
                id, task_id, user_id, display_name, status, reminder_policy_override,
-               reminder_revision, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, 'open', ?, 1, ?, ?)`,
+               reminder_revision, channel_reminder, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, 'open', ?, 1, ?, ?, ?)`,
           )
           .run(
             id,
@@ -265,6 +269,7 @@ export function addTaskAssignments(input: {
             assignee.userId,
             assignee.displayName ?? null,
             input.reminderPolicyOverride ?? null,
+            input.channelReminder ? 1 : 0,
             now,
             now,
           );
@@ -414,6 +419,9 @@ export function setPersonTaskReminderPreference(input: {
   defaultPolicy: TaskReminderPolicy;
   now?: number;
 }): OutboxEvent[] {
+  if (input.defaultPolicy === "one_day_and_five_hours") {
+    throw new Error("That reminder setting is not available here.");
+  }
   const now = input.now ?? Date.now();
   return getDb().transaction(() => {
     getDb()
@@ -453,12 +461,16 @@ export function setTaskAssignmentReminderOverride(input: {
   policy?: TaskReminderPolicy;
   now?: number;
 }): { assignment: TaskAssignmentRow; outboxEvents: OutboxEvent[] } {
+  if (input.policy === "one_day_and_five_hours") {
+    throw new Error("That reminder setting is not available here.");
+  }
   const now = input.now ?? Date.now();
   return getDb().transaction(() => {
     const row = getDb()
       .query<AssignmentDbRow, [string | null, number, string, string]>(
         `UPDATE task_assignments
-         SET reminder_policy_override = ?, reminder_revision = reminder_revision + 1, updated_at = ?
+         SET reminder_policy_override = ?, channel_reminder = 0,
+             reminder_revision = reminder_revision + 1, updated_at = ?
          WHERE id = ? AND user_id = ? AND status = 'open'
          RETURNING *`,
       )

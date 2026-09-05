@@ -17,6 +17,11 @@ export function isTaskReminderPolicy(value: unknown): value is TaskReminderPolic
   return typeof value === "string" && (TASK_REMINDER_POLICIES as readonly string[]).includes(value);
 }
 
+/** Slash `/task` settings. The dual policy is NL-only and is not a user choice. */
+export function isUserSelectableTaskReminderPolicy(value: unknown): value is TaskReminderPolicy {
+  return isTaskReminderPolicy(value) && value !== "one_day_and_five_hours";
+}
+
 export function effectiveTaskReminderPolicy(
   override: TaskReminderPolicy | undefined,
   preference: TaskReminderPolicy | undefined,

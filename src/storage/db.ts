@@ -216,6 +216,7 @@ function migrateCoordinator(db: Database): void {
         OR reminder_policy_override IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'one_day_and_five_hours', 'none')
       ),
       reminder_revision INTEGER NOT NULL DEFAULT 1,
+      channel_reminder INTEGER NOT NULL DEFAULT 0,
       completed_at INTEGER,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -322,6 +323,7 @@ function migrateCoordinator(db: Database): void {
   try { db.exec(`ALTER TABLE meeting_drafts ADD COLUMN audience_json TEXT`); } catch { /* already exists */ }
   upsertManualRosterBindings(db);
   migrateTaskReminderPolicyCheck(db);
+  migrateChannelReminderColumn(db);
 }
 
 /**
@@ -361,6 +363,7 @@ function migrateTaskReminderPolicyCheck(db: Database): void {
               OR reminder_policy_override IN ('daily_until_done', 'one_day_before', 'one_hour_before', 'one_day_and_five_hours', 'none')
             ),
             reminder_revision INTEGER NOT NULL DEFAULT 1,
+            channel_reminder INTEGER NOT NULL DEFAULT 0,
             completed_at INTEGER,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
@@ -368,10 +371,12 @@ function migrateTaskReminderPolicyCheck(db: Database): void {
           );
           INSERT INTO task_assignments_new (
             id, task_id, user_id, display_name, status, reminder_policy_override,
-            reminder_revision, completed_at, created_at, updated_at
+            reminder_revision, channel_reminder, completed_at, created_at, updated_at
           )
           SELECT id, task_id, user_id, display_name, status, reminder_policy_override,
-                 reminder_revision, completed_at, created_at, updated_at
+                 reminder_revision,
+                 CASE WHEN reminder_policy_override = 'one_day_and_five_hours' THEN 1 ELSE 0 END,
+                 completed_at, created_at, updated_at
           FROM task_assignments;
           DROP TABLE task_assignments;
           ALTER TABLE task_assignments_new RENAME TO task_assignments;
@@ -397,6 +402,27 @@ function migrateTaskReminderPolicyCheck(db: Database): void {
     })();
   } finally {
     db.exec(`PRAGMA foreign_keys = ${foreignKeysOn ? "ON" : "OFF"}`);
+  }
+}
+
+/**
+ * Channel delivery is a pin, not a reminder policy. Existing Mini DBs that
+ * already accepted `one_day_and_five_hours` need the column, then a one-shot
+ * backfill for NL todos created before the flag existed.
+ */
+function migrateChannelReminderColumn(db: Database): void {
+  let added = false;
+  try {
+    db.exec(`ALTER TABLE task_assignments ADD COLUMN channel_reminder INTEGER NOT NULL DEFAULT 0`);
+    added = true;
+  } catch {
+    /* already exists */
+  }
+  if (added) {
+    db.exec(
+      `UPDATE task_assignments SET channel_reminder = 1
+       WHERE reminder_policy_override = 'one_day_and_five_hours'`,
+    );
   }
 }
 
