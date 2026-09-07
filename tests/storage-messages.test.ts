@@ -7,10 +7,14 @@ import {
   markDeleted,
   nonDeletedMessageIds,
   nonDeletedThreadMessageIds,
+  parseReactions,
+  reactionCounts,
   recentMessages,
   setClassification,
+  setReactions,
   upsertMessage,
 } from "../src/storage/messages.ts";
+import { getDb } from "../src/storage/db.ts";
 
 const t = withTempDb();
 beforeAll(() => {});
@@ -154,5 +158,57 @@ describe("storage/messages", () => {
     expect(ids).not.toContain("thread-1-gone");
     expect(ids).not.toContain("thread-2-live");
     expect(ids).not.toContain("parent-live");
+  });
+
+  test("setReactions stores emoji → {count, users}", () => {
+    upsertMessage({
+      id: "m-react",
+      channelId: "c1",
+      authorId: "u1",
+      authorName: "alice",
+      content: "reactable",
+      createdAt: 13_000,
+    });
+    setReactions("m-react", {
+      "👍": { count: 3, users: ["u2", "u1", "u1", "u3"] },
+      "✅": { count: 1, users: ["u2"] },
+    });
+    const parsed = parseReactions(getMessage("m-react")!.reactions);
+    expect(parsed).toEqual({
+      "👍": { count: 3, users: ["u1", "u2", "u3"] },
+      "✅": { count: 1, users: ["u2"] },
+    });
+    expect(reactionCounts(parsed)).toEqual({ "👍": 3, "✅": 1 });
+  });
+
+  test("setReactions is a no-op for unknown message ids", () => {
+    setReactions("missing", { "👍": { count: 1, users: ["u1"] } });
+    expect(getMessage("missing")).toBeNull();
+  });
+
+  test("parseReactions reads legacy emoji→count rows", () => {
+    upsertMessage({
+      id: "m-legacy",
+      channelId: "c1",
+      authorId: "u1",
+      authorName: "alice",
+      content: "old reactions",
+      createdAt: 14_000,
+    });
+    getDb()
+      .query(`UPDATE messages SET reactions = ? WHERE id = ?`)
+      .run(JSON.stringify({ "👍": 3, "✅": 1 }), "m-legacy");
+    expect(parseReactions(getMessage("m-legacy")!.reactions)).toEqual({
+      "👍": { count: 3, users: [] },
+      "✅": { count: 1, users: [] },
+    });
+  });
+
+  test("parseReactions skips invalid JSON and entries", () => {
+    expect(parseReactions(null)).toEqual({});
+    expect(parseReactions("not-json")).toEqual({});
+    expect(parseReactions(JSON.stringify({ "👍": { count: 1, users: ["u1"] }, bad: "x" }))).toEqual({
+      "👍": { count: 1, users: ["u1"] },
+    });
   });
 });

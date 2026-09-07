@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import type { LinkRow } from "./links.ts";
 import { linksForMessage } from "./links.ts";
 import type { MessageRow } from "./messages.ts";
-import { messagesForChannelAsc } from "./messages.ts";
+import { messagesForChannelAsc, parseReactions } from "./messages.ts";
 import { markDirty } from "./sync-state.ts";
 
 /**
@@ -117,11 +117,10 @@ function linksLine(links: LinkRow[]): string | null {
 }
 
 function reactionsLine(reactions: string | null): string | null {
-  if (!reactions) return null;
-  const map = JSON.parse(reactions) as Record<string, number>;
+  const map = parseReactions(reactions);
   const parts = Object.entries(map)
-    .filter(([, n]) => n > 0)
-    .map(([e, n]) => `${e}×${n}`);
+    .filter(([, entry]) => entry.count > 0)
+    .map(([e, entry]) => `${e}×${entry.count}`);
   return parts.length ? `**Reactions**: ${parts.join(" ")}` : null;
 }
 

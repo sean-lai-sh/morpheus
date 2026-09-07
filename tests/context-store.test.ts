@@ -356,7 +356,7 @@ describe("seq poll (not created_at)", () => {
   test("setReactions bumps seq so poll sees it", () => {
     const id = E_MSG;
     const before = getMessage(id)!.seq;
-    setReactions(id, { "👍": 2 });
+    setReactions(id, { "👍": { count: 2, users: ["u1", "u2"] } });
     const after = getMessage(id)!;
     expect(after.seq).toBeGreaterThan(before);
     const page = contextStore.poll(eboard, `${before}:${id}`, 50);
