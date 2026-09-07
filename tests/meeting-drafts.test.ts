@@ -308,6 +308,29 @@ describe("meeting drafts", () => {
     }
   });
 
+  test("a present-but-malformed unmapped list fails the whole audience", () => {
+    // Absent is fine (drafts predate the key). Present and broken is not: it is
+    // the record of who was refused, so dropping it lets Confirm read as a
+    // clean guest list.
+    const created = draft();
+    getDb()
+      .query("UPDATE meeting_drafts SET audience_json = ? WHERE id = ?")
+      .run(
+        '{"audienceKind":"picked","participants":[{"userId":"u-1","displayName":"Sam"}],"unmapped":[{"userId":"u-2"}]}',
+        created.id,
+      );
+    expect(getMeetingDraft(created.id, OWNER, NOW)?.audience).toBeNull();
+
+    const older = draft();
+    getDb()
+      .query("UPDATE meeting_drafts SET audience_json = ? WHERE id = ?")
+      .run('{"audienceKind":"picked","participants":[{"userId":"u-1","displayName":"Sam"}]}', older.id);
+    expect(getMeetingDraft(older.id, OWNER, NOW)?.audience).toEqual({
+      audienceKind: "picked",
+      participants: [{ userId: "u-1", displayName: "Sam" }],
+    });
+  });
+
   test("a half-valid participant list is rejected whole, not partially kept", () => {
     const created = draft();
     getDb()

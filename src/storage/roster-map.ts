@@ -63,6 +63,22 @@ export function listAllRosterBindings(): RosterBindingRow[] {
     .map(mapRow);
 }
 
+/**
+ * How many bindings `/meet seed` actually produced.
+ *
+ * Deliberately not `COUNT(*)`: every migrate upserts `MANUAL_ROSTER_BINDINGS`,
+ * so the table is never empty and a raw count can never answer "has a seed ever
+ * run". `partitionRosterUsers` cannot tell "this person has no binding" apart
+ * from "the map was never built"; callers that refuse a pick use this to say
+ * which one it is, because only the second is fixable by the organizer.
+ *
+ * Same expression `applyRosterSeedResult` uses for its shrink guard.
+ */
+export function countSeededRosterBindings(): number {
+  const manualIds = new Set(MANUAL_ROSTER_BINDINGS.map((mapping) => mapping.discord_id));
+  return listAllRosterBindings().filter((row) => !manualIds.has(row.discordId)).length;
+}
+
 /** The rows a seed may persist: valid snowflake, valid address, not on the exclusion list. */
 function acceptableMappings(mappings: RosterMapping[]): RosterMapping[] {
   return mappings.filter((mapping) => {

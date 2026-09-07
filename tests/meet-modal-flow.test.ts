@@ -103,6 +103,30 @@ describe("confirmSummary is the last stop before real invitations", () => {
     expect(out).toContain("plus 1 more");
   });
 
+  test("names the people who will not get an invite", () => {
+    const out = confirmSummary({
+      ...base,
+      audience: {
+        audienceKind: "picked",
+        participants: [{ userId: "1" }],
+        unmapped: [{ displayName: "helenn" }, { displayName: "shaszis" }],
+      },
+    });
+    // The composer refused them earlier, but this is the screen Confirm sits
+    // on: "Inviting 1 person" alone reads as "everyone I picked got invited".
+    expect(out).toContain("Not invited");
+    expect(out).toContain("helenn, shaszis");
+  });
+
+  test("says nothing about exclusions when every pick was mapped", () => {
+    expect(
+      confirmSummary({
+        ...base,
+        audience: { audienceKind: "picked", participants: [{ userId: "1" }] },
+      }),
+    ).not.toContain("Not invited");
+  });
+
   test("shows a location only when one was given", () => {
     expect(
       confirmSummary({ ...base, location: "Bobst 5th floor", audience: null }),
@@ -204,6 +228,24 @@ describe("role and person selectors compose into one invitee list", () => {
     };
     const option = withRole.components[0]!.options.find((o) => o.value === EBOARD_ROLE_ID)!;
     expect(option.default).toBe(true);
+  });
+
+  function userSelect(state?: { userIds?: string[] }): {
+    default_values?: Array<{ id: string; type: string }>;
+  } {
+    return (audienceRows("d", state)[1]!.toJSON() as { components: unknown[] })
+      .components[0] as { default_values?: Array<{ id: string; type: string }> };
+  }
+
+  test("the people pills always match the stored audience, empty included", () => {
+    // Omitting `default_values` does not clear a user select -- Discord keeps
+    // the client's pills. A refused pick then sat next to "No one selected yet".
+    expect(userSelect().default_values).toEqual([]);
+    expect(userSelect({ userIds: [] }).default_values).toEqual([]);
+    expect(userSelect({ userIds: ["11", "22"] }).default_values!.map((v) => v.id)).toEqual([
+      "11",
+      "22",
+    ]);
   });
 });
 

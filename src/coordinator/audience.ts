@@ -103,6 +103,23 @@ export function formatUnmappedInviteRefusal(unmapped: readonly { displayName: st
 export const MEET_REVIEW_EMPTY =
   "Pick a role or at least one person already on the roster map first.";
 
+export const MEET_ROSTER_UNSEEDED =
+  "The roster map is empty, so I have no email for anyone yet -- this is not about who you picked. Run `/meet seed` to build the F26 Discord to email map, then pick people again. `@Eboard` needs the same map, so it cannot stand in meanwhile.";
+
+/**
+ * Why a pick was refused, in the terms the organizer can act on.
+ *
+ * An unseeded map makes every single pick unmapped, so naming the people would
+ * blame them for an operator's missing seed. `rosterSize` separates the two.
+ */
+export function unmappedPickRefusal(
+  unmapped: readonly { displayName: string }[],
+  rosterSize?: number,
+): string {
+  if (rosterSize === 0) return MEET_ROSTER_UNSEEDED;
+  return formatUnmappedInviteRefusal(unmapped);
+}
+
 /**
  * User-select values are the source of truth. `users` is only a name lookup —
  * Discord sometimes delivers ids in `values` with an empty resolved collection.
@@ -147,15 +164,27 @@ export function meetAudienceReady(audience: {
   return Boolean(audience && (audience.audienceKind === "f26_roster" || audience.participants.length > 0));
 }
 
-/** Null when Review can proceed; otherwise the message to show on the same composer. */
-export function meetReviewBlocker(audience: {
-  audienceKind: "picked" | "f26_roster";
-  participants: readonly unknown[];
-  unmapped?: readonly { displayName: string }[];
-} | null): string | null {
+/**
+ * Null when Review can proceed; otherwise the message to show on the same composer.
+ *
+ * `rosterSize` is optional only so the shape stays testable without a DB; pass
+ * it from production so an unseeded map is reported as such.
+ */
+export function meetReviewBlocker(
+  audience: {
+    audienceKind: "picked" | "f26_roster";
+    participants: readonly unknown[];
+    unmapped?: readonly { displayName: string }[];
+  } | null,
+  rosterSize?: number,
+): string | null {
+  // `@Eboard` is a read of the same map, not a way around it: with no bindings
+  // it books a real event whose guest list is empty while the organizer is told
+  // the invite is on its way.
+  if (audience?.audienceKind === "f26_roster" && rosterSize === 0) return MEET_ROSTER_UNSEEDED;
   if (meetAudienceReady(audience)) return null;
   if (audience?.unmapped && audience.unmapped.length > 0) {
-    return formatUnmappedInviteRefusal(audience.unmapped);
+    return unmappedPickRefusal(audience.unmapped, rosterSize);
   }
   return MEET_REVIEW_EMPTY;
 }

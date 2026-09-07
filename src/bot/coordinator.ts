@@ -26,9 +26,9 @@ import {
   dateInTimeZone,
   expandAudience,
   extractMentionableAudience,
-  formatUnmappedInviteRefusal,
   meetReviewBlocker,
   pickedUsersFromSelect,
+  unmappedPickRefusal,
 } from "../coordinator/audience.ts";
 import {
   buildRosterSeedPack,
@@ -36,6 +36,7 @@ import {
   serializeRosterSeedPack,
 } from "../coordinator/seed-job.ts";
 import { EBOARD_ROLE_ID, ROSTER_ROLE_OPTIONS } from "../coordinator/roster-map.ts";
+import { countSeededRosterBindings } from "../storage/roster-map.ts";
 import { parseDurationInput, parseWhenInput } from "../coordinator/when-input.ts";
 import { draftPreview, meetingWhenLine } from "../coordinator/meeting-format.ts";
 import {
@@ -685,7 +686,10 @@ export function audienceRows(
     .setPlaceholder("Add individual people")
     .setMinValues(0)
     .setMaxValues(25);
-  if (state.userIds?.length) userSelect.setDefaultUsers([...state.userIds]);
+  // Always sent, empty included. Omitting `default_values` does not clear a user
+  // select -- Discord leaves the client's pills as they were, so a refused pick
+  // stayed visible next to "No one selected yet."
+  userSelect.setDefaultUsers([...(state.userIds ?? [])]);
 
   return [
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(roleSelect),
@@ -757,7 +761,11 @@ export function confirmSummary(draft: {
   location: string | null;
   notes: string | null;
   timeZone: string;
-  audience: { audienceKind: "picked" | "f26_roster"; participants: Array<{ userId: string }> } | null;
+  audience: {
+    audienceKind: "picked" | "f26_roster";
+    participants: Array<{ userId: string }>;
+    unmapped?: Array<{ displayName: string }>;
+  } | null;
 }): string {
   const count = draft.audience?.participants.length ?? 0;
   const who =
@@ -770,6 +778,13 @@ export function confirmSummary(draft: {
   ];
   if (draft.location) lines.push(`📍 ${draft.location}`);
   lines.push("", `Inviting ${who}. A Google Meet link is created automatically.`);
+  // The composer already refused these names, but this is the screen the
+  // organizer confirms from: dropping them silently here reads as "everyone I
+  // picked got invited".
+  const excluded = (draft.audience?.unmapped ?? []).map((row) => row.displayName).filter(Boolean);
+  if (excluded.length > 0) {
+    lines.push(`Not invited (no roster binding): ${excluded.join(", ")}.`);
+  }
   lines.push("-# Confirming sends real calendar invitations.");
   return lines.join("\n");
 }
@@ -1097,7 +1112,8 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     });
     if (!saved) throw new Error("This meeting draft expired. Run /meet create again.");
 
-    const warning = unmapped.length > 0 ? `\n\n${formatUnmappedInviteRefusal(unmapped)}` : "";
+    const warning =
+      unmapped.length > 0 ? `\n\n${unmappedPickRefusal(unmapped, countSeededRosterBindings())}` : "";
     await replyEphemeral(interaction, {
       content: `${draftHeader(saved)}\n\n${audienceLine({ audienceKind, participants })}${warning}`,
       components: audienceRows(value, {
@@ -1110,7 +1126,7 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
   if (kind === "meet-review" && value) {
     const draft = getMeetingDraft(value, interaction.user.id);
     if (!draft) throw new Error("This meeting draft expired. Run /meet create again.");
-    const blocker = meetReviewBlocker(draft.audience);
+    const blocker = meetReviewBlocker(draft.audience, countSeededRosterBindings());
     if (blocker) {
       // Update the composer in place. Throwing created a second ephemeral
       // ("Pick a role…") under pills Discord still showed as selected.
@@ -1139,6 +1155,24 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     return;
   }
   if (kind === "meet-confirm" && value) {
+    // Read first, claim second. Confirm can be clicked from a stale card whose
+    // audience has since been emptied; claiming before that check destroys the
+    // draft on a mistake the organizer could still fix. The claim is still the
+    // only consuming statement, so two fast clicks still cannot both book.
+    const pending = getMeetingDraft(value, interaction.user.id);
+    if (!pending) throw new Error("This meeting draft expired. Run /meet create again.");
+    const notReady = meetReviewBlocker(pending.audience, countSeededRosterBindings());
+    if (notReady) {
+      await replyEphemeral(interaction, {
+        content: `${draftHeader(pending)}\n\n${notReady}`,
+        components: audienceRows(value, {
+          roleIds: pending.audience?.audienceKind === "f26_roster" ? [EBOARD_ROLE_ID] : [],
+          userIds: (pending.audience?.participants ?? []).map((p) => p.userId),
+        }),
+      });
+      return;
+    }
+
     // Single-shot: two fast clicks cannot both book. The second gets null.
     const draft = claimMeetingDraft(value, interaction.user.id);
     if (!draft) throw new Error("This meeting draft expired. Run /meet create again.");
