@@ -187,6 +187,32 @@ describe("meeting drafts", () => {
     expect(claimed?.location).toBe("Bobst 5th floor");
   });
 
+  test("unmapped-only audience still reads back so Review can name them", () => {
+    const created = draft();
+    const audience = {
+      audienceKind: "picked" as const,
+      participants: [],
+      unmapped: [
+        { userId: "u-2", displayName: "helenn" },
+        { userId: "u-3", displayName: "Surya" },
+        { userId: "u-4", displayName: "shaszis" },
+      ],
+    };
+    expect(setMeetingDraftAudience(created.id, OWNER, audience, NOW)?.audience).toEqual(audience);
+    expect(claimMeetingDraft(created.id, OWNER, NOW)?.audience).toEqual(audience);
+  });
+
+  test("setMeetingDraftAudience remembers unmapped names for Review", () => {
+    const created = draft();
+    const audience = {
+      audienceKind: "picked" as const,
+      participants: [{ userId: "u-1", displayName: "Sean" }],
+      unmapped: [{ userId: "u-2", displayName: "helenn" }],
+    };
+    expect(setMeetingDraftAudience(created.id, OWNER, audience, NOW)?.audience).toEqual(audience);
+    expect(getMeetingDraft(created.id, OWNER, NOW)?.audience).toEqual(audience);
+  });
+
   test("setMeetingDraftAudience carries the f26_roster kind with no participants", () => {
     const created = draft();
     const audience = { audienceKind: "f26_roster" as const, participants: [] };

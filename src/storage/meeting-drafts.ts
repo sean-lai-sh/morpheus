@@ -28,6 +28,11 @@ export interface MeetingDraftParticipant {
 export interface MeetingDraftAudience {
   audienceKind: MeetingDraftAudienceKind;
   participants: MeetingDraftParticipant[];
+  /**
+   * Last user-select names that had no roster binding. Not invited; kept so
+   * Review can repeat the refusal instead of claiming nobody was picked.
+   */
+  unmapped?: MeetingDraftParticipant[];
 }
 
 export interface MeetingDraftRow {
@@ -68,6 +73,18 @@ interface MeetingDraftDbRow {
  * interaction handler. A half-valid object yields null too -- a partially
  * understood audience is worse than none, because the caller would book it.
  */
+function parseParticipantList(raw: unknown): MeetingDraftParticipant[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: MeetingDraftParticipant[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const { userId, displayName } = entry as Record<string, unknown>;
+    if (typeof userId !== "string" || typeof displayName !== "string") return null;
+    out.push({ userId, displayName });
+  }
+  return out;
+}
+
 function parseAudience(raw: string | null): MeetingDraftAudience | null {
   if (raw === null) return null;
   try {
@@ -76,15 +93,10 @@ function parseAudience(raw: string | null): MeetingDraftAudience | null {
     const obj = parsed as Record<string, unknown>;
     const kind = obj.audienceKind;
     if (kind !== "picked" && kind !== "f26_roster") return null;
-    if (!Array.isArray(obj.participants)) return null;
-    const participants: MeetingDraftParticipant[] = [];
-    for (const entry of obj.participants) {
-      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
-      const { userId, displayName } = entry as Record<string, unknown>;
-      if (typeof userId !== "string" || typeof displayName !== "string") return null;
-      participants.push({ userId, displayName });
-    }
-    return { audienceKind: kind, participants };
+    const participants = parseParticipantList(obj.participants);
+    if (!participants) return null;
+    const unmapped = parseParticipantList(obj.unmapped);
+    return { audienceKind: kind, participants, ...(unmapped && unmapped.length > 0 ? { unmapped } : {}) };
   } catch {
     return null;
   }
@@ -201,7 +213,14 @@ export function setMeetingDraftAudience(
   const participants = audience.participants
     .slice(0, MAX_PARTICIPANTS)
     .map((p) => ({ userId: p.userId, displayName: p.displayName }));
-  const payload = JSON.stringify({ audienceKind: audience.audienceKind, participants });
+  const unmapped = (audience.unmapped ?? [])
+    .slice(0, MAX_PARTICIPANTS)
+    .map((p) => ({ userId: p.userId, displayName: p.displayName }));
+  const payload = JSON.stringify({
+    audienceKind: audience.audienceKind,
+    participants,
+    ...(unmapped.length > 0 ? { unmapped } : {}),
+  });
   const row = getDb()
     .query<MeetingDraftDbRow, [string, number, string, string, number]>(
       `UPDATE meeting_drafts

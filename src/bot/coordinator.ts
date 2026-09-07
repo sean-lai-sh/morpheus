@@ -22,10 +22,13 @@ import {
 
 type MessageRow = ActionRowBuilder<MessageActionRowComponentBuilder>;
 import {
+  composeMeetUserAudience,
   dateInTimeZone,
   expandAudience,
   extractMentionableAudience,
   formatUnmappedInviteRefusal,
+  meetReviewBlocker,
+  pickedUsersFromSelect,
 } from "../coordinator/audience.ts";
 import {
   buildRosterSeedPack,
@@ -33,7 +36,6 @@ import {
   serializeRosterSeedPack,
 } from "../coordinator/seed-job.ts";
 import { EBOARD_ROLE_ID, ROSTER_ROLE_OPTIONS } from "../coordinator/roster-map.ts";
-import { partitionRosterUsers } from "../storage/roster-map.ts";
 import { parseDurationInput, parseWhenInput } from "../coordinator/when-input.ts";
 import { draftPreview, meetingWhenLine } from "../coordinator/meeting-format.ts";
 import {
@@ -1064,39 +1066,40 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
     // adding a role never clears the individuals and vice versa.
     let audienceKind = draft.audience?.audienceKind ?? "picked";
     let participants = [...(draft.audience?.participants ?? [])];
+    let unmapped = [...(draft.audience?.unmapped ?? [])];
 
     if (kind === "meet-roles") {
       const chosen = interaction.isStringSelectMenu() ? [...interaction.values] : [];
       audienceKind = chosen.length > 0 ? "f26_roster" : "picked";
     } else {
-      const picked = interaction.isUserSelectMenu()
-        ? [...interaction.users.values()].map((user) => ({
-            id: user.id,
-            displayName: user.globalName ?? user.username ?? user.id,
-          }))
-        : [];
-      const { bound, unmapped } = partitionRosterUsers(picked);
-      if (unmapped.length > 0) {
-        // Named immediately rather than after booking: the picker is guild-wide
-        // so that outside collaborators are reachable, which means "no binding
-        // yet" is a normal answer, not an error state.
-        await replyEphemeral(interaction, {
-          content: `${draftHeader(draft)}\n\n${formatUnmappedInviteRefusal(unmapped)}`,
-          components: audienceRows(value, {
-            roleIds: audienceKind === "f26_roster" ? [EBOARD_ROLE_ID] : [],
-            userIds: participants.map((p) => p.userId),
-          }),
-        });
-        return;
-      }
-      participants = bound;
+      const composed = composeMeetUserAudience({
+        audienceKind,
+        picked: interaction.isUserSelectMenu()
+          ? pickedUsersFromSelect({
+              values: [...interaction.values],
+              users: Object.fromEntries(
+                [...interaction.users.entries()].map(([id, user]) => [
+                  id,
+                  { username: user.username, global_name: user.globalName },
+                ]),
+              ),
+            })
+          : [],
+      });
+      participants = composed.participants;
+      unmapped = composed.unmapped;
     }
 
-    const saved = setMeetingDraftAudience(value, interaction.user.id, { audienceKind, participants });
+    const saved = setMeetingDraftAudience(value, interaction.user.id, {
+      audienceKind,
+      participants,
+      unmapped,
+    });
     if (!saved) throw new Error("This meeting draft expired. Run /meet create again.");
 
+    const warning = unmapped.length > 0 ? `\n\n${formatUnmappedInviteRefusal(unmapped)}` : "";
     await replyEphemeral(interaction, {
-      content: `${draftHeader(saved)}\n\n${audienceLine({ audienceKind, participants })}`,
+      content: `${draftHeader(saved)}\n\n${audienceLine({ audienceKind, participants })}${warning}`,
       components: audienceRows(value, {
         roleIds: audienceKind === "f26_roster" ? [EBOARD_ROLE_ID] : [],
         userIds: participants.map((p) => p.userId),
@@ -1107,9 +1110,18 @@ async function handleComponent(interaction: MessageComponentInteraction): Promis
   if (kind === "meet-review" && value) {
     const draft = getMeetingDraft(value, interaction.user.id);
     if (!draft) throw new Error("This meeting draft expired. Run /meet create again.");
-    const audience = draft.audience;
-    if (!audience || (audience.audienceKind !== "f26_roster" && audience.participants.length === 0)) {
-      throw new Error("Pick a role or at least one person first.");
+    const blocker = meetReviewBlocker(draft.audience);
+    if (blocker) {
+      // Update the composer in place. Throwing created a second ephemeral
+      // ("Pick a role…") under pills Discord still showed as selected.
+      await replyEphemeral(interaction, {
+        content: `${draftHeader(draft)}\n\n${blocker}\n\n${audienceLine(draft.audience ?? { audienceKind: "picked", participants: [] })}`,
+        components: audienceRows(value, {
+          roleIds: draft.audience?.audienceKind === "f26_roster" ? [EBOARD_ROLE_ID] : [],
+          userIds: (draft.audience?.participants ?? []).map((p) => p.userId),
+        }),
+      });
+      return;
     }
     await replyEphemeral(interaction, {
       content: confirmSummary(draft),
