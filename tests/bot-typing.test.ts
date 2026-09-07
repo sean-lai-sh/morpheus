@@ -278,7 +278,7 @@ describe("typing vs job complete/fail", () => {
       scheduler: clock.scheduler,
     });
     expect(isJobTypingActive(job.id)).toBe(true);
-    const failed = failJobAsWorker(job.id, "w1", "boom");
+    const failed = await failJobAsWorker(job.id, "w1", "boom");
     expect(failed.ok).toBe(true);
     expect(isJobTypingActive(job.id)).toBe(false);
   });

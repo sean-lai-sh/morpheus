@@ -66,6 +66,15 @@ export interface SdkDispatcherOptions {
   maxGlobalQueued?: number;
   /** Overload bound: distinct dispatch keys (≈ concurrent agents) this process will hold. */
   maxKeys?: number;
+  /**
+   * Total runs allowed for one claimed job, first attempt included. Only
+   * transient failures consume the extra attempts; see `isTransientFailure`.
+   */
+  maxRunAttempts?: number;
+  /** Backoff before retry N (index 0 = before the 2nd attempt). Last value repeats. */
+  retryBackoffMs?: number[];
+  /** Test hook: replaces the real timer between retries. */
+  sleep?: (ms: number) => Promise<void>;
   /** Test hook: resolves after a job's run fully settles (complete/fail posted). */
   onJobSettled?: (info: { key: string; jobId: string; outcome: JobOutcome }) => void;
 }
@@ -93,6 +102,18 @@ const MAX_FALLBACK_REPLY = 4_000;
 const DEFAULT_MAX_QUEUE_PER_KEY = 10;
 const DEFAULT_MAX_GLOBAL_QUEUED = 32;
 const DEFAULT_MAX_KEYS = 8;
+const DEFAULT_MAX_RUN_ATTEMPTS = 3;
+const DEFAULT_RETRY_BACKOFF_MS = [1_000, 3_000];
+/** Fallback when a claim response carries no `lease_ms` (matches JOB_CLAIM_LEASE_MS). */
+const DEFAULT_CLAIM_LEASE_MS = 600_000;
+/**
+ * Headroom left at the end of the lease. The Mini sweeps expired claims on a
+ * 30s interval, so finishing "just before" the cutoff is not safe — stay a full
+ * sweep plus change clear of it.
+ */
+const LEASE_SAFETY_MARGIN_MS = 45_000;
+
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 interface ClaimedJobRow {
   namespace: string;
@@ -100,6 +121,8 @@ interface ClaimedJobRow {
   channelIds: string[];
   discordChannelId: string | null;
   claimedAt: number;
+  /** Lease the Mini granted this claim, when it said. Null = assume the default. */
+  leaseMs: number | null;
 }
 
 /**
@@ -114,6 +137,8 @@ export function parseClaimedJob(bodyText: string): ClaimedJobRow | null {
   } catch {
     return null;
   }
+  const leaseRaw = (parsed as { lease_ms?: unknown })?.lease_ms;
+  const leaseMs = typeof leaseRaw === "number" && Number.isFinite(leaseRaw) && leaseRaw > 0 ? leaseRaw : null;
   const job = (parsed as { job?: unknown })?.job;
   if (!job || typeof job !== "object" || Array.isArray(job)) return null;
   const j = job as Record<string, unknown>;
@@ -132,6 +157,7 @@ export function parseClaimedJob(bodyText: string): ClaimedJobRow | null {
         ? j.discord_channel_id
         : null,
     claimedAt,
+    leaseMs,
   };
 }
 
@@ -170,6 +196,45 @@ function sanitizeErrorText(raw: string, redactValues: string[], token: string): 
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Upstream failure text that is worth another attempt. Default is PERMANENT:
+ * only a recognised pattern retries, so an unrecognised error settles exactly
+ * as it did before this classifier existed.
+ *
+ * `authentication` is in the transient set on purpose. On 2026-09-07 a job died
+ * on "Authentication error If you are logged in, try logging out and back in."
+ * while the same key and model worked before it and after it — Cursor returned
+ * that for one request, it was not a bad credential. A genuinely revoked key
+ * still ends in a terminal /fail, just after `maxRunAttempts` tries instead of
+ * one.
+ *
+ * Matched against sanitized text (secrets scrubbed, whitespace collapsed, 500
+ * chars), never against a raw stack.
+ */
+const TRANSIENT_FAILURE_PATTERNS: readonly RegExp[] = [
+  /\bauthentication\b/i,
+  /\bunauthenticated\b/i,
+  /\bunauthorized\b/i,
+  /\b(?:401|429|500|502|503|504)\b/,
+  /\brate.?limit/i,
+  /\boverloaded\b/i,
+  /\bcapacity\b/i,
+  /\btimed[ -]?out\b/i,
+  /\btimeout\b/i,
+  /\btemporarily\b/i,
+  /\bunavailable\b/i,
+  /\binternal server error\b/i,
+  /\bbad gateway\b/i,
+  /\bsocket hang up\b/i,
+  /\bfetch failed\b/i,
+  /\bnetwork\b/i,
+  /\bECONNRESET\b|\bECONNREFUSED\b|\bETIMEDOUT\b|\bEAI_AGAIN\b|\bEPIPE\b/i,
+];
+
+export function isTransientFailure(failure: string): boolean {
+  return TRANSIENT_FAILURE_PATTERNS.some((re) => re.test(failure));
 }
 
 /**
@@ -240,7 +305,13 @@ export function buildJobPrompt(payload: SdkJobPayload, redactValues: string[] = 
 
 type ClaimedRunResult =
   | { outcome: "completed-by-tool" | "completed-fallback" }
-  | { failure: string };
+  /**
+   * `retryable` is decided where the failure is raised, not sniffed from the
+   * text afterwards: our own strings (e.g. a /complete delivery failure) can
+   * contain an HTTP status that would otherwise read as a transient upstream
+   * error.
+   */
+  | { failure: string; retryable: boolean };
 
 export class SdkDispatcher {
   private readonly keys = new Map<string, KeyState>();
@@ -398,23 +469,102 @@ export class SdkDispatcher {
       return "skipped-invalid-claim";
     }
 
-    const settled = await this.runClaimed(key, state, payload, token, row).catch(
-      (err): ClaimedRunResult => ({
-        failure: sanitizeErrorText(errText(err), redactValues, token),
-      }),
-    );
+    // Retries live INSIDE the claim we already hold, and that placement is the
+    // whole point: dispatch is a one-shot wakeup POST, so nothing ever re-POSTs
+    // a row that goes back to `queued` — a job handed to the queue is not
+    // retried, it waits out JOB_QUEUE_MAX_AGE_MS and is cancelled, silently.
+    //
+    // But the claim is not ours indefinitely. `requeueExpiredClaims` hands the
+    // row back to `queued` and clears `claimed_at` once the lease elapses, and
+    // from that moment BOTH our /complete and our /fail are rejected as stale —
+    // the exact silent death this change exists to remove. So every retry is
+    // budgeted against the lease, and we stop retrying while there is still
+    // enough of it left to settle the job.
+    //
+    // Elapsed time is measured on our own clock from the moment the claim
+    // landed, never by comparing `row.claimedAt` (the Mini's clock) to ours: the
+    // two only agree when both run on the same box. Ignoring the network time
+    // before the Mini stamped the row errs toward finishing early, which is the
+    // safe direction.
+    const claimHeldSince = Date.now();
+    const maxAttempts = Math.max(1, this.opts.maxRunAttempts ?? DEFAULT_MAX_RUN_ATTEMPTS);
+    const backoff = this.opts.retryBackoffMs ?? DEFAULT_RETRY_BACKOFF_MS;
+    const sleep = this.opts.sleep ?? defaultSleep;
+    const leaseDeadline = claimHeldSince + (row.leaseMs ?? DEFAULT_CLAIM_LEASE_MS) - LEASE_SAFETY_MARGIN_MS;
+
+    let attemptStartedAt = Date.now();
+    let settled = await this.attemptRun(key, state, payload, token, row, redactValues);
+    let attempts = 1;
+    let lastAttemptMs = Date.now() - attemptStartedAt;
+    while ("failure" in settled && settled.retryable && attempts < maxAttempts) {
+      // The best estimate of what the next attempt costs is what the last one
+      // cost. A retry that cannot plausibly finish inside the lease is worse
+      // than no retry: it burns the claim and settles nothing.
+      const delayMs = backoff[attempts - 1] ?? backoff[backoff.length - 1] ?? 0;
+      if (Date.now() + delayMs + lastAttemptMs > leaseDeadline) {
+        logger.warn(
+          { job_id: job.id, key, attempts, last_attempt_ms: lastAttemptMs, error: settled.failure },
+          "transient SDK failure, but too little claim lease left to retry; failing now while /fail still lands",
+        );
+        break;
+      }
+      logger.warn(
+        { job_id: job.id, key, attempt: attempts, max_attempts: maxAttempts, error: settled.failure },
+        "SDK run failed with a transient error; resetting agent and retrying",
+      );
+      // A retry always starts from a fresh agent: the handle may be the thing
+      // that broke, and a resumed conversation would replay the failed turn.
+      this.resetAgent(state);
+      await sleep(delayMs);
+      attemptStartedAt = Date.now();
+      settled = await this.attemptRun(key, state, payload, token, row, redactValues);
+      attempts += 1;
+      lastAttemptMs = Date.now() - attemptStartedAt;
+    }
 
     if ("failure" in settled) {
       // Centralized failure path: one best-effort /fail, and the per-key agent
       // is dropped so a broken handle cannot poison later jobs on this key.
-      logger.error({ job_id: job.id, key, error: settled.failure }, "SDK job failed; failing job and resetting agent");
-      state.agent = null;
-      state.agentId = null;
+      logger.error(
+        { job_id: job.id, key, attempts, error: settled.failure, retryable: settled.retryable },
+        "SDK job failed; failing job and resetting agent",
+      );
+      this.resetAgent(state);
       await this.failJob(job.id, token, row.claimedAt, settled.failure);
       return "failed";
     }
-    logger.info({ job_id: job.id, key, outcome: settled.outcome }, "SDK job completed");
+    logger.info({ job_id: job.id, key, attempts, outcome: settled.outcome }, "SDK job completed");
     return settled.outcome;
+  }
+
+  /** One run attempt. A throw becomes a classified failure for the retry loop. */
+  private attemptRun(
+    key: string,
+    state: KeyState,
+    payload: SdkJobPayload,
+    token: string,
+    row: ClaimedJobRow,
+    redactValues: string[],
+  ): Promise<ClaimedRunResult> {
+    return this.runClaimed(key, state, payload, token, row).catch((err): ClaimedRunResult => {
+      const failure = sanitizeErrorText(errText(err), redactValues, token);
+      return { failure, retryable: isTransientFailure(failure) };
+    });
+  }
+
+  /**
+   * Drop the per-key agent. Closing before dropping matters now that a single
+   * job can burn several agents: without it each retry would leak a handle.
+   */
+  private resetAgent(state: KeyState): void {
+    const agent = state.agent;
+    state.agent = null;
+    state.agentId = null;
+    try {
+      agent?.close?.();
+    } catch (err) {
+      logger.warn({ err }, "closing a failed SDK agent threw; handle dropped anyway");
+    }
   }
 
   /** Everything between a proven claim and settlement. Throws/failure → caller settles. */
@@ -475,16 +625,18 @@ export class SdkDispatcher {
         token,
       );
       if (fallback.ok) return { outcome: "completed-fallback" };
-      return { failure: `reply delivery failed (complete ${fallback.status})` };
+      // Never retryable: the model already answered. Re-running would spend a
+      // second inference to regenerate a reply we are holding, and the status
+      // in this string would otherwise read as a transient upstream error.
+      return { failure: `reply delivery failed (complete ${fallback.status})`, retryable: false };
     }
 
-    return {
-      failure: sanitizeErrorText(
-        result.error?.message ?? `run ${result.status} without a reply`,
-        redactValues,
-        token,
-      ),
-    };
+    const failure = sanitizeErrorText(
+      result.error?.message ?? `run ${result.status} without a reply`,
+      redactValues,
+      token,
+    );
+    return { failure, retryable: isTransientFailure(failure) };
   }
 
   /** Best-effort /fail with sanitized error text. Never throws — settlement must not crash the pump. */

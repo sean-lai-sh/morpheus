@@ -111,13 +111,19 @@ export async function handleJobsRequest(req: Request, url: URL): Promise<Respons
   if (action === "claim") {
     const claimed = claimJob(jobId, claimedBy);
     if (!claimed) return json(409, { error: "not queued" });
-    return json(200, { job: claimed });
+    // How long this claim is good for, so a worker can budget its own work
+    // against the lease instead of hardcoding the Mini's JOB_CLAIM_LEASE_MS and
+    // drifting from it. Additive: workers that ignore it are unaffected.
+    return json(200, { job: claimed, lease_ms: env.JOB_CLAIM_LEASE_MS });
   }
 
   if (action === "fail") {
     const error = typeof body.error === "string" ? body.error : "";
     if (!error.trim()) return json(400, { error: "error is required" });
-    const result = failJobAsWorker(jobId, claimedBy, error, undefined, expectedClaimedAt);
+    const result = await failJobAsWorker(jobId, claimedBy, error, undefined, expectedClaimedAt, {
+      client: discordClientOrUndefined(),
+      postReplies: env.DISCORD_POST_REPLIES,
+    });
     return json(result.status, result.ok ? { job: result.job } : { error: result.error });
   }
 
