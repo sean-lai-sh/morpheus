@@ -9,7 +9,8 @@ import {
   rerenderChannel,
 } from "../src/storage/markdown.ts";
 import type { ChannelKey } from "../src/storage/markdown.ts";
-import { upsertMessage, getMessage } from "../src/storage/messages.ts";
+import { upsertMessage, getMessage, setReactions } from "../src/storage/messages.ts";
+import { getDb } from "../src/storage/db.ts";
 import { extractLinks, persistLinks, linksForMessage } from "../src/storage/links.ts";
 
 const cwd = withTempCwd();
@@ -78,6 +79,54 @@ describe("markdown/renderBlock", () => {
     const block = renderBlock({ msg: getMessage("r2")!, links: linksForMessage("r2"), variant: "create" });
     expect(block).toContain("**Links**:");
     expect(block).toContain("docs.google.com/document/d/AAAAAAAAAAAAAAAAAAAA");
+  });
+
+  test("reactions line uses counts from {count, users} JSON", () => {
+    upsertMessage({
+      id: "r-users",
+      channelId: "react-chan",
+      authorId: "u1",
+      authorName: "alice",
+      content: "please react",
+      createdAt: Date.parse("2026-04-28T14:32:00Z"),
+    });
+    setReactions("r-users", { "👍": { count: 2, users: ["u1", "u2"] }, "✅": { count: 1, users: ["u3"] } });
+    const block = renderBlock({ msg: getMessage("r-users")!, links: [], variant: "edit" });
+    expect(block).toContain("**Reactions**: 👍×2 ✅×1");
+    expect(block).not.toContain("u1");
+  });
+
+  test("reactions line prints custom emoji name, not the snowflake key", () => {
+    upsertMessage({
+      id: "r-custom",
+      channelId: "react-chan",
+      authorId: "u1",
+      authorName: "alice",
+      content: "custom react",
+      createdAt: Date.parse("2026-04-28T14:32:00Z"),
+    });
+    setReactions("r-custom", {
+      "111111111111111111": { count: 3, users: ["u1"], id: "111111111111111111", name: "ship" },
+    });
+    const block = renderBlock({ msg: getMessage("r-custom")!, links: [], variant: "edit" });
+    expect(block).toContain("**Reactions**: ship×3");
+    expect(block).not.toContain("111111111111111111");
+  });
+
+  test("reactions line still reads legacy emoji→count JSON", () => {
+    upsertMessage({
+      id: "r-legacy",
+      channelId: "react-chan",
+      authorId: "u1",
+      authorName: "alice",
+      content: "old react row",
+      createdAt: Date.parse("2026-04-28T14:32:00Z"),
+    });
+    getDb()
+      .query(`UPDATE messages SET reactions = ? WHERE id = ?`)
+      .run(JSON.stringify({ "🔥": 4 }), "r-legacy");
+    const block = renderBlock({ msg: getMessage("r-legacy")!, links: [], variant: "create" });
+    expect(block).toContain("**Reactions**: 🔥×4");
   });
 });
 

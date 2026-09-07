@@ -16,7 +16,13 @@ export interface MessageRow {
   classification: Classification | null;
   classification_confidence: number | null;
   classified_at: number | null;
-  /** JSON map of emoji name → reaction count, e.g. {"👍":3,"✅":1} */
+  /**
+   * JSON map of emoji key → `{count, users, id?, name?}`.
+   * Unicode is keyed by the character: `{"👍":{"count":3,"users":["id1"]}}`.
+   * Custom emoji is keyed by snowflake id (names collide):
+   * `{"123":{"count":1,"users":["id1"],"id":"123","name":"ship"}}`.
+   * Pre-migration rows may still be count-only: `{"👍":3}`. Use `parseReactions`.
+   */
   reactions: string | null;
   /** The Discord thread channel id this message belongs to. Equals the starter message id. */
   thread_id: string | null;
@@ -218,13 +224,86 @@ export function lastMessageAt(): number | null {
   );
 }
 
-export function setReactions(id: string, reactions: Record<string, number>): void {
+/** Who currently has an emoji on a message. `count` is Discord's total (may exceed fetched users). */
+export interface ReactionEntry {
+  count: number;
+  users: string[];
+  /** Custom emoji snowflake. Absent for unicode (the map key is the character). */
+  id?: string;
+  /** Display name for custom emoji. Markdown uses this instead of the snowflake key. */
+  name?: string;
+}
+
+/** Emoji key → reactors. Unicode key is the character; custom key is the snowflake id. */
+export type ReactionMap = Record<string, ReactionEntry>;
+
+/** Label for markdown / logs: custom name if we have it, otherwise the map key. */
+export function reactionEmojiLabel(key: string, entry: Pick<ReactionEntry, "name">): string {
+  return entry.name ?? key;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Read `messages.reactions` in either the current `{count,users}` shape or the
+ * legacy emoji→count map. Invalid JSON / entries become `{}` / are skipped.
+ */
+export function parseReactions(raw: string | null | undefined): ReactionMap {
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (!isPlainObject(parsed)) return {};
+
+  const out: ReactionMap = {};
+  for (const [emoji, value] of Object.entries(parsed)) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      out[emoji] = { count: value, users: [] };
+      continue;
+    }
+    if (!isPlainObject(value) || typeof value.count !== "number" || !Number.isFinite(value.count)) {
+      continue;
+    }
+    const users = Array.isArray(value.users) ? value.users.map(String) : [];
+    const id = typeof value.id === "string" && value.id ? value.id : undefined;
+    const name = typeof value.name === "string" && value.name ? value.name : undefined;
+    out[emoji] = { count: value.count, users, ...(id ? { id } : {}), ...(name ? { name } : {}) };
+  }
+  return out;
+}
+
+/** Count map for consumers that only need totals (markdown, seq-poll fixtures). */
+export function reactionCounts(map: ReactionMap): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [emoji, entry] of Object.entries(map)) {
+    if (entry.count > 0) out[emoji] = entry.count;
+  }
+  return out;
+}
+
+export function setReactions(id: string, reactions: ReactionMap): void {
   const db = getDb();
   const existing = db.query<{ id: string }, [string]>(`SELECT id FROM messages WHERE id = ?`).get(id);
   if (!existing) return;
   const seq = nextSeq();
+  const normalized: ReactionMap = {};
+  for (const [emoji, entry] of Object.entries(reactions)) {
+    const users = [...new Set(entry.users)].sort();
+    if (entry.count <= 0 && users.length === 0) continue;
+    normalized[emoji] = {
+      count: entry.count,
+      users,
+      ...(entry.id ? { id: entry.id } : {}),
+      ...(entry.name ? { name: entry.name } : {}),
+    };
+  }
   db.query(`UPDATE messages SET reactions = ?, seq = ? WHERE id = ?`).run(
-    JSON.stringify(reactions),
+    JSON.stringify(normalized),
     seq,
     id,
   );

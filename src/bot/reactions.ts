@@ -1,10 +1,103 @@
-import type { MessageReaction, PartialMessageReaction, User, PartialUser } from "discord.js";
+import {
+  ReactionType,
+  type MessageReaction,
+  type PartialMessageReaction,
+  type User,
+  type PartialUser,
+} from "discord.js";
 import { getChannel, isChannelAllowed, loadEnv } from "../config.ts";
 import { logger } from "../logger.ts";
 import { appendBlock } from "../storage/markdown.ts";
-import { effectiveChannelId, getMessage, setReactions } from "../storage/messages.ts";
+import {
+  effectiveChannelId,
+  getMessage,
+  reactionCounts,
+  setReactions,
+  type ReactionMap,
+} from "../storage/messages.ts";
 
+/**
+ * Stable map key: custom emoji snowflake, else the unicode character.
+ * Never `emoji.identifier` — that percent-encodes unicode (`👍` → `%F0%9F%91%8D`).
+ * Two custom emojis can share a `name`; `id` is what Discord actually distinguishes.
+ */
+export function reactionEmojiKey(emoji: { id?: string | null; name?: string | null }): string | null {
+  if (typeof emoji.id === "string" && emoji.id) return emoji.id;
+  if (typeof emoji.name === "string" && emoji.name) return emoji.name;
+  return null;
+}
+
+async function fetchReactorIdsForType(
+  reaction: Pick<MessageReaction, "users">,
+  type: ReactionType,
+): Promise<string[]> {
+  const ids: string[] = [];
+  let after: string | undefined;
+  for (;;) {
+    const batch = await reaction.users.fetch(after ? { limit: 100, after, type } : { limit: 100, type });
+    if (batch.size === 0) break;
+    let last: string | undefined;
+    for (const id of batch.keys()) {
+      ids.push(id);
+      last = id;
+    }
+    if (batch.size < 100 || !last) break;
+    after = last;
+  }
+  return ids;
+}
+
+/**
+ * Discord's reaction user list, paginated (API max 100 / page).
+ * Unions normal + burst (super) reactors — `count` includes both, and
+ * `users.fetch()` defaults to Normal only.
+ */
+export async function fetchReactorIds(
+  reaction: Pick<MessageReaction, "users">,
+): Promise<string[]> {
+  const normal = await fetchReactorIdsForType(reaction, ReactionType.Normal);
+  let burst: string[] = [];
+  try {
+    burst = await fetchReactorIdsForType(reaction, ReactionType.Burst);
+  } catch (err) {
+    logger.warn({ err }, "burst reaction user fetch failed; keeping normal reactors");
+  }
+  return [...new Set([...normal, ...burst])];
+}
+
+/** One in-flight reconcile chain per message so overlapping events cannot clobber. */
+const reconcileTail = new Map<string, Promise<void>>();
+
+/**
+ * Persist the current emoji → {count, users} map for an allowlisted message.
+ *
+ * Full reconcile (not incremental add/remove of `_user`): each event fetches
+ * every emoji's current reactor list from Discord. Concurrent add/remove and
+ * uncached reactors would race an incremental patch; `users.fetch()` is the
+ * source of truth for who currently has the reaction.
+ *
+ * Overlapping events for the same message are serialized. Each run still
+ * snapshots Discord at its start, so the later event's write is the fresher map.
+ */
 export async function handleReactionChange(
+  reaction: MessageReaction | PartialMessageReaction,
+  _user: User | PartialUser,
+): Promise<void> {
+  const messageId = reaction.message.id;
+  const prev = reconcileTail.get(messageId) ?? Promise.resolve();
+  const run = prev.then(
+    () => reconcileReaction(reaction, _user),
+    () => reconcileReaction(reaction, _user),
+  );
+  reconcileTail.set(messageId, run);
+  try {
+    await run;
+  } finally {
+    if (reconcileTail.get(messageId) === run) reconcileTail.delete(messageId);
+  }
+}
+
+async function reconcileReaction(
   reaction: MessageReaction | PartialMessageReaction,
   _user: User | PartialUser,
 ): Promise<void> {
@@ -17,17 +110,27 @@ export async function handleReactionChange(
   const lookupChannelId = stored ? effectiveChannelId(stored) : message.channelId;
   if (!isChannelAllowed(lookupChannelId)) return;
 
-  const map: Record<string, number> = {};
+  const map: ReactionMap = {};
   for (const [, r] of message.reactions.cache) {
-    const name = r.emoji.name;
-    if (name && r.count) map[name] = r.count;
+    const key = reactionEmojiKey(r.emoji);
+    if (!key) continue;
+    const users = await fetchReactorIds(r);
+    const count = r.count ?? users.length;
+    if (count <= 0 && users.length === 0) continue;
+    map[key] = {
+      count,
+      users,
+      ...(r.emoji.id ? { id: r.emoji.id, ...(r.emoji.name ? { name: r.emoji.name } : {}) } : {}),
+    };
   }
 
   setReactions(message.id, map);
 
-  if (!stored) return;
-  const channel = getChannel(effectiveChannelId(stored));
+  // Re-read so markdown sees the just-written reactions JSON, not the stale row.
+  const updated = getMessage(message.id);
+  if (!updated) return;
+  const channel = getChannel(effectiveChannelId(updated));
   if (!channel) return;
-  appendBlock(channel, loadEnv().DISCORD_GUILD_ID, stored, "edit");
-  logger.debug({ message_id: message.id, reactions: map }, "reactions updated");
+  appendBlock(channel, loadEnv().DISCORD_GUILD_ID, updated, "edit");
+  logger.debug({ message_id: message.id, reactions: reactionCounts(map) }, "reactions updated");
 }
