@@ -552,7 +552,25 @@ describe("claim: CAS, claimed row authority, claim generation", () => {
       channelIds: ["1001"],
       discordChannelId: "1001",
       claimedAt: 7,
+      leaseMs: null,
     });
+  });
+
+  test("parseClaimedJob reads lease_ms, and ignores a nonsense one", () => {
+    const withLease = (lease: unknown): number | null =>
+      parseClaimedJob(
+        JSON.stringify({
+          lease_ms: lease,
+          job: { namespace: "eboard", discord_channel_id: "1001", claimed_at: 7 },
+        }),
+      )!.leaseMs;
+
+    expect(withLease(600_000)).toBe(600_000);
+    // Anything not a positive finite number falls back to the built-in default.
+    expect(withLease(0)).toBeNull();
+    expect(withLease(-5)).toBeNull();
+    expect(withLease("600000")).toBeNull();
+    expect(withLease(undefined)).toBeNull();
   });
 });
 
@@ -1528,5 +1546,56 @@ describe("transient failures are retried inside the claim", () => {
     expect(h.settled[0]!.outcome).toBe("failed");
     const fail = h.requests.find((r) => r.url.endsWith("/v1/jobs/j1/fail"));
     expect(JSON.parse(fail!.body!).error).toContain("reply delivery failed");
+  });
+});
+
+describe("retries are budgeted against the claim lease", () => {
+  /** Claim route that grants a specific lease. */
+  const leaseRoute =
+    (leaseMs: number) =>
+    (url: string) =>
+      url.endsWith("/claim")
+        ? {
+            status: 200,
+            body: JSON.stringify({
+              lease_ms: leaseMs,
+              job: {
+                namespace: "eboard",
+                scope: "channel",
+                channel_ids: ["1001"],
+                discord_channel_id: "1001",
+                claimed_at: CLAIMED_AT,
+              },
+            }),
+          }
+        : undefined;
+
+  test("a lease with no room left settles now instead of retrying into a stale claim", async () => {
+    // Shorter than LEASE_SAFETY_MARGIN_MS, so no attempt can ever fit.
+    const h = makeHarness({ route: leaseRoute(1) });
+    h.enqueue(payloadFor("j1"));
+    await waitFor(() => h.runtime.sends.length === 1, "send");
+    h.runtime.sends[0]!.finish({ status: "error", error: { message: "503 service unavailable" } });
+    await h.waitSettled(1);
+
+    // Retrying here would burn the lease and leave BOTH /complete and /fail to
+    // be rejected as stale — the silent death this whole change removes.
+    expect(h.runtime.sends).toHaveLength(1);
+    expect(h.settled[0]!.outcome).toBe("failed");
+    expect(h.requests.filter((r) => r.url.endsWith("/v1/jobs/j1/fail"))).toHaveLength(1);
+  });
+
+  test("a generous lease still retries", async () => {
+    const h = makeHarness({ route: leaseRoute(600_000) });
+    h.enqueue(payloadFor("j1"));
+    await waitFor(() => h.runtime.sends.length === 1, "send");
+    h.runtime.sends[0]!.finish({ status: "error", error: { message: "503 service unavailable" } });
+
+    await waitFor(() => h.runtime.sends.length === 2, "retry");
+    h.runtime.sends[1]!.finish({ status: "finished", result: "recovered" });
+    await h.waitSettled(1);
+
+    expect(h.settled[0]!.outcome).toBe("completed-fallback");
+    expect(h.requests.some((r) => r.url.endsWith("/fail"))).toBe(false);
   });
 });

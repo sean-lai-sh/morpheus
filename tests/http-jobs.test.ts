@@ -13,6 +13,7 @@ import {
   withWorkspaceConfig,
 } from "./jobs-fixture.ts";
 import { handleHttpRequest } from "../src/http/health.ts";
+import { loadEnv } from "../src/config.ts";
 import {
   claimJob,
   enqueueJob,
@@ -273,6 +274,18 @@ describe("HTTP /v1/jobs claim/complete", () => {
     );
     expect(a.status).toBe(200);
     expect(b.status).toBe(409);
+  });
+
+  test("a successful claim reports the lease it granted", async () => {
+    const job = queue("h-lease", EBOARD, SPONSORS);
+    const res = await handleHttpRequest(
+      req("POST", `/v1/jobs/${job.id}/claim`, { body: { claimed_by: "grok-eboard" } }),
+    );
+    expect(res.status).toBe(200);
+    // Workers budget their own work against this instead of hardcoding
+    // JOB_CLAIM_LEASE_MS and drifting from whatever the Mini actually runs.
+    const body = (await res.json()) as { lease_ms?: unknown };
+    expect(body.lease_ms).toBe(loadEnv().JOB_CLAIM_LEASE_MS);
   });
 
   test("claimed_by that is not the token worker identity → 409", async () => {

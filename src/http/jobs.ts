@@ -111,7 +111,10 @@ export async function handleJobsRequest(req: Request, url: URL): Promise<Respons
   if (action === "claim") {
     const claimed = claimJob(jobId, claimedBy);
     if (!claimed) return json(409, { error: "not queued" });
-    return json(200, { job: claimed });
+    // How long this claim is good for, so a worker can budget its own work
+    // against the lease instead of hardcoding the Mini's JOB_CLAIM_LEASE_MS and
+    // drifting from it. Additive: workers that ignore it are unaffected.
+    return json(200, { job: claimed, lease_ms: env.JOB_CLAIM_LEASE_MS });
   }
 
   if (action === "fail") {
