@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import type { LinkRow } from "./links.ts";
 import { linksForMessage } from "./links.ts";
 import type { MessageRow } from "./messages.ts";
-import { messagesForChannelAsc, parseReactions } from "./messages.ts";
+import { messagesForChannelAsc, parseReactions, reactionEmojiLabel } from "./messages.ts";
 import { markDirty } from "./sync-state.ts";
 
 /**
@@ -120,7 +120,7 @@ function reactionsLine(reactions: string | null): string | null {
   const map = parseReactions(reactions);
   const parts = Object.entries(map)
     .filter(([, entry]) => entry.count > 0)
-    .map(([e, entry]) => `${e}×${entry.count}`);
+    .map(([e, entry]) => `${reactionEmojiLabel(e, entry)}×${entry.count}`);
   return parts.length ? `**Reactions**: ${parts.join(" ")}` : null;
 }
 

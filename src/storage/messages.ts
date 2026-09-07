@@ -17,8 +17,10 @@ export interface MessageRow {
   classification_confidence: number | null;
   classified_at: number | null;
   /**
-   * JSON map of emoji → `{count, users}`.
-   * Current writes: `{"👍":{"count":3,"users":["id1","id2","id3"]}}`.
+   * JSON map of emoji key → `{count, users, id?, name?}`.
+   * Unicode is keyed by the character: `{"👍":{"count":3,"users":["id1"]}}`.
+   * Custom emoji is keyed by snowflake id (names collide):
+   * `{"123":{"count":1,"users":["id1"],"id":"123","name":"ship"}}`.
    * Pre-migration rows may still be count-only: `{"👍":3}`. Use `parseReactions`.
    */
   reactions: string | null;
@@ -226,10 +228,19 @@ export function lastMessageAt(): number | null {
 export interface ReactionEntry {
   count: number;
   users: string[];
+  /** Custom emoji snowflake. Absent for unicode (the map key is the character). */
+  id?: string;
+  /** Display name for custom emoji. Markdown uses this instead of the snowflake key. */
+  name?: string;
 }
 
-/** Emoji name → reactors. */
+/** Emoji key → reactors. Unicode key is the character; custom key is the snowflake id. */
 export type ReactionMap = Record<string, ReactionEntry>;
+
+/** Label for markdown / logs: custom name if we have it, otherwise the map key. */
+export function reactionEmojiLabel(key: string, entry: Pick<ReactionEntry, "name">): string {
+  return entry.name ?? key;
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -259,7 +270,9 @@ export function parseReactions(raw: string | null | undefined): ReactionMap {
       continue;
     }
     const users = Array.isArray(value.users) ? value.users.map(String) : [];
-    out[emoji] = { count: value.count, users };
+    const id = typeof value.id === "string" && value.id ? value.id : undefined;
+    const name = typeof value.name === "string" && value.name ? value.name : undefined;
+    out[emoji] = { count: value.count, users, ...(id ? { id } : {}), ...(name ? { name } : {}) };
   }
   return out;
 }
@@ -282,7 +295,12 @@ export function setReactions(id: string, reactions: ReactionMap): void {
   for (const [emoji, entry] of Object.entries(reactions)) {
     const users = [...new Set(entry.users)].sort();
     if (entry.count <= 0 && users.length === 0) continue;
-    normalized[emoji] = { count: entry.count, users };
+    normalized[emoji] = {
+      count: entry.count,
+      users,
+      ...(entry.id ? { id: entry.id } : {}),
+      ...(entry.name ? { name: entry.name } : {}),
+    };
   }
   db.query(`UPDATE messages SET reactions = ?, seq = ? WHERE id = ?`).run(
     JSON.stringify(normalized),

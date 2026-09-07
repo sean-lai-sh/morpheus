@@ -96,6 +96,23 @@ describe("markdown/renderBlock", () => {
     expect(block).not.toContain("u1");
   });
 
+  test("reactions line prints custom emoji name, not the snowflake key", () => {
+    upsertMessage({
+      id: "r-custom",
+      channelId: "react-chan",
+      authorId: "u1",
+      authorName: "alice",
+      content: "custom react",
+      createdAt: Date.parse("2026-04-28T14:32:00Z"),
+    });
+    setReactions("r-custom", {
+      "111111111111111111": { count: 3, users: ["u1"], id: "111111111111111111", name: "ship" },
+    });
+    const block = renderBlock({ msg: getMessage("r-custom")!, links: [], variant: "edit" });
+    expect(block).toContain("**Reactions**: ship×3");
+    expect(block).not.toContain("111111111111111111");
+  });
+
   test("reactions line still reads legacy emoji→count JSON", () => {
     upsertMessage({
       id: "r-legacy",

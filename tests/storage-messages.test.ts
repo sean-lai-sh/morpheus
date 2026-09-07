@@ -211,4 +211,21 @@ describe("storage/messages", () => {
       "👍": { count: 1, users: ["u1"] },
     });
   });
+
+  test("setReactions persists custom emoji id + name under the snowflake key", () => {
+    upsertMessage({
+      id: "m-custom",
+      channelId: "c1",
+      authorId: "u1",
+      authorName: "alice",
+      content: "custom",
+      createdAt: 15_000,
+    });
+    setReactions("m-custom", {
+      "111111111111111111": { count: 2, users: ["u2", "u1"], id: "111111111111111111", name: "ship" },
+    });
+    expect(parseReactions(getMessage("m-custom")!.reactions)).toEqual({
+      "111111111111111111": { count: 2, users: ["u1", "u2"], id: "111111111111111111", name: "ship" },
+    });
+  });
 });
