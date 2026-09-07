@@ -95,9 +95,69 @@ export function meetingAudienceFromSelections(selections: AudienceSelection[]): 
   };
 }
 
-export function formatUnmappedInviteRefusal(unmapped: Array<{ displayName: string }>): string {
+export function formatUnmappedInviteRefusal(unmapped: readonly { displayName: string }[]): string {
   const names = unmapped.map((row) => row.displayName).filter(Boolean);
   return `I can only invite F26 / @Eboard plus people already on the roster map. I will not invent emails. Unmapped: ${names.join(", ") || "unknown user"}.`;
+}
+
+export const MEET_REVIEW_EMPTY =
+  "Pick a role or at least one person already on the roster map first.";
+
+/**
+ * User-select values are the source of truth. `users` is only a name lookup —
+ * Discord sometimes delivers ids in `values` with an empty resolved collection.
+ */
+export function pickedUsersFromSelect(data: {
+  values?: string[];
+  users?: Record<string, { username?: string | null; global_name?: string | null }>;
+}): Array<{ id: string; displayName: string }> {
+  return (data.values ?? []).map((id) => ({
+    id,
+    displayName: data.users?.[id]?.global_name ?? data.users?.[id]?.username ?? id,
+  }));
+}
+
+/**
+ * The people picker owns only the individual half of a `/meet` draft.
+ *
+ * Unmapped names are reported, not fatal: mapped people stay, and a role that
+ * was already chosen stays. The old all-or-nothing refuse left the draft empty
+ * while Discord still showed the pills, so Review said "pick someone first".
+ */
+export function composeMeetUserAudience(input: {
+  audienceKind: "picked" | "f26_roster";
+  picked: Array<{ id: string; displayName: string }>;
+}): {
+  audienceKind: "picked" | "f26_roster";
+  participants: Array<{ userId: string; displayName: string }>;
+  unmapped: Array<{ userId: string; displayName: string }>;
+} {
+  const { bound, unmapped } = partitionRosterUsers(input.picked);
+  return {
+    audienceKind: input.audienceKind,
+    participants: bound,
+    unmapped: unmapped.map((user) => ({ userId: user.id, displayName: user.displayName })),
+  };
+}
+
+export function meetAudienceReady(audience: {
+  audienceKind: "picked" | "f26_roster";
+  participants: readonly unknown[];
+} | null): boolean {
+  return Boolean(audience && (audience.audienceKind === "f26_roster" || audience.participants.length > 0));
+}
+
+/** Null when Review can proceed; otherwise the message to show on the same composer. */
+export function meetReviewBlocker(audience: {
+  audienceKind: "picked" | "f26_roster";
+  participants: readonly unknown[];
+  unmapped?: readonly { displayName: string }[];
+} | null): string | null {
+  if (meetAudienceReady(audience)) return null;
+  if (audience?.unmapped && audience.unmapped.length > 0) {
+    return formatUnmappedInviteRefusal(audience.unmapped);
+  }
+  return MEET_REVIEW_EMPTY;
 }
 
 /** F26 role dump and/or users who already have roster_bindings. Refuse unmapped @users. */

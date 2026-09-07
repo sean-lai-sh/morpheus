@@ -2,10 +2,14 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   audienceSelectionsFromMentions,
   collectMentionRoleIds,
+  composeMeetUserAudience,
   extractMentionableAudience,
   extractRoleSnowflakes,
   formatUnmappedInviteRefusal,
+  MEET_REVIEW_EMPTY,
   meetingAudienceFromSelections,
+  meetReviewBlocker,
+  pickedUsersFromSelect,
   resolveMeetingInvitees,
 } from "../src/coordinator/audience.ts";
 import { EBOARD_ROLE_ID } from "../src/coordinator/roster-map.ts";
@@ -202,6 +206,73 @@ describe("meeting audience", () => {
     expect(json).toContain(EBOARD_ROLE_ID);
     expect(json).toContain("hello@techatnyu.org");
     expect(json.replace(/hello@techatnyu\.org/gi, "")).not.toMatch(/@nyu\.edu|@gmail\.com/i);
+  });
+
+  test("pickedUsersFromSelect uses values even when resolved users are missing", () => {
+    expect(
+      pickedUsersFromSelect({
+        values: ["11", "22"],
+        users: { "11": { username: "sean", global_name: "Sean Lai" } },
+      }),
+    ).toEqual([
+      { id: "11", displayName: "Sean Lai" },
+      { id: "22", displayName: "22" },
+    ]);
+  });
+
+  test("composeMeetUserAudience keeps mapped people and names the unmapped", () => {
+    applyRosterSeedResult({
+      mappings: [
+        {
+          discord_id: "11",
+          email: "sean@nyu.edu",
+          name: "Sean",
+          disc: "sean",
+          confidence: "disc",
+        },
+      ],
+    });
+    const mixed = composeMeetUserAudience({
+      audienceKind: "picked",
+      picked: [
+        { id: "11", displayName: "Sean Lai" },
+        { id: "22", displayName: "Helen xu" },
+        { id: "33", displayName: "Surya" },
+      ],
+    });
+    expect(mixed.participants).toEqual([{ userId: "11", displayName: "Sean Lai" }]);
+    expect(mixed.unmapped.map((row) => row.displayName)).toEqual(["Helen xu", "Surya"]);
+    expect(meetReviewBlocker(mixed)).toBeNull();
+
+    const allUnmapped = composeMeetUserAudience({
+      audienceKind: "picked",
+      picked: [
+        { id: "22", displayName: "helenn" },
+        { id: "33", displayName: "Surya" },
+        { id: "44", displayName: "shaszis" },
+      ],
+    });
+    expect(allUnmapped.participants).toEqual([]);
+    expect(meetReviewBlocker(allUnmapped)).toBe(formatUnmappedInviteRefusal(allUnmapped.unmapped));
+    expect(meetReviewBlocker(allUnmapped)).toContain("helenn, Surya, shaszis");
+    expect(meetReviewBlocker(allUnmapped)).not.toBe(MEET_REVIEW_EMPTY);
+  });
+
+  test("Review is ready once a role is saved, even if the last people pick was unmapped", () => {
+    const blocked = meetReviewBlocker({
+      audienceKind: "picked",
+      participants: [],
+      unmapped: [{ displayName: "helenn" }],
+    });
+    expect(blocked).toContain("helenn");
+    expect(
+      meetReviewBlocker({
+        audienceKind: "f26_roster",
+        participants: [],
+        unmapped: [{ displayName: "helenn" }],
+      }),
+    ).toBeNull();
+    expect(meetReviewBlocker(null)).toBe(MEET_REVIEW_EMPTY);
   });
 
   test("picked meeting still requires an attendee", () => {
