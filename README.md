@@ -142,6 +142,7 @@ Edit `config/channels.yml` — set `guild_id` and replace placeholder IDs with r
 
 ```bash
 bun run backfill          # paginate all allowed channels back to creation
+bun run backfill -- --channel=<id>  # one allowlisted channel (new channel / re-run)
 bun run refresh-members   # populate display names for historical messages
 ```
 
@@ -149,6 +150,7 @@ bun run refresh-members   # populate display names for historical messages
 
 ```bash
 bun run backfill          # one-shot: full channel history + threads
+bun run backfill -- --channel=<id>  # one-shot: a single allowlisted channel
 bun run refresh-members   # one-shot: bulk-populate display names from guild members
 bun run dev               # long-running: live event subscriber
 bun run reconcile         # one-shot: diff last N messages per channel against SQLite

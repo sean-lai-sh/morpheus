@@ -457,10 +457,10 @@ Implementers should not blindly follow these:
 
 | Issue | Status vs current main |
 |---|---|
-| #1 `ready` → `clientReady` | Still valid. Tiny fix in `src/bot/client.ts`. |
+| #1 `ready` → `clientReady` | **Done** (`Events.ClientReady` in `src/bot/client.ts`). |
 | #2 backup after Nia sync | Backup already runs nightly in `live.ts`. Wiring to Nia sync is moot if Nia is removed; backup after successful FTS index flush is the replacement. |
 | #3 schedule reconcile | **Done** in `src/crawler/live.ts`. Owner close: #38. |
-| #4 `--channel` backfill flag | Still valid, independent. |
+| #4 `--channel` backfill flag | **Done** (`bun run backfill -- --channel=<id>`). |
 | #5 thread attribution in markdown | **Done** in PR #6. Owner close: #38. |
 | #9 Nia-index pi-mono | Closed research; used `nia` CLI. Do not revive Nia indexing. |
 | #14 resumeBackfill + Nia flush | Catch-up pagination is still useful; **drop** `flushNamespace` / Nia dirty. |

@@ -1,9 +1,9 @@
-import { loadWorkspaceTokens, reloadChannels } from "./config.ts";
+import { loadChannels, loadWorkspaceTokens, reloadChannels } from "./config.ts";
 import { logger } from "./logger.ts";
 import { closeDb, getDb } from "./storage/db.ts";
 import { loginClient, shutdownClient } from "./bot/client.ts";
 import { stopAllJobTyping } from "./bot/typing.ts";
-import { backfillAll } from "./crawler/backfill.ts";
+import { backfillAll, channelFilterForBackfill, parseBackfillChannelFlag } from "./crawler/backfill.ts";
 import { reconcileAll } from "./crawler/reconcile.ts";
 import { startLive, stopLive } from "./crawler/live.ts";
 import { startHealthServer, stopHealthServer } from "./http/health.ts";
@@ -47,7 +47,7 @@ function installShutdown(onShutdown: () => Promise<void>): void {
 }
 
 async function main(): Promise<void> {
-  const { cmd } = parseArgs(process.argv);
+  const { cmd, rest } = parseArgs(process.argv);
   // Ensure DB is initialized (runs migrations) before any handler touches it.
   getDb();
   // Validate workspace tokens at boot (collisions / bot-token reuse fail here, not on first request).
@@ -70,7 +70,9 @@ async function main(): Promise<void> {
     case "backfill": {
       const client = await loginClient();
       try {
-        await backfillAll(client);
+        const channelArg = parseBackfillChannelFlag(rest);
+        const filter = channelFilterForBackfill(channelArg, loadChannels().channels);
+        await backfillAll(client, filter);
       } finally {
         await shutdownClient();
         closeDb();
