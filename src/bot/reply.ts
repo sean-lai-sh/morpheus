@@ -343,13 +343,65 @@ export async function completeJobWithReply(
   }
 }
 
-export function failJobAsWorker(
+/**
+ * What the channel sees when a job dies. Deliberately says nothing about the
+ * cause: the error text is worker-supplied and may quote an upstream response,
+ * so it is logged and persisted on the row, never posted. The id prefix is the
+ * handle for matching a report back to `jobs.error`.
+ */
+export function jobFailureNotice(jobId: string): string {
+  return `⚠️ I couldn't finish that one (job \`${jobId.slice(0, 8)}\`). Nothing was posted — worth trying again in a moment.`;
+}
+
+/**
+ * Best-effort "it failed" post. Never throws: a job is already terminal by the
+ * time this runs, and a Discord hiccup must not turn a recorded failure into a
+ * 500 for the worker that reported it.
+ */
+async function postJobFailureNotice(
+  job: JobRow,
+  opts: { client?: DiscordReplyClient | Client; postReplies?: boolean },
+): Promise<boolean> {
+  // Checked before loadEnv so a caller with no client needs no environment.
+  if (!opts.client) return false;
+  if ((opts.postReplies ?? loadEnv().DISCORD_POST_REPLIES) === false) return false;
+  // Coordinator jobs belong to the outbox and its own retry sweeper
+  // (src/coordinator/publisher.ts). Announcing those in-channel would be noise
+  // about a handoff that is about to be retried anyway.
+  if (job.discord_message_id.startsWith("coordinator-outbox:")) return false;
+  try {
+    const sent = await postJobReply(job, jobFailureNotice(job.id), { client: opts.client });
+    if (!sent.messageId) {
+      logger.warn({ job_id: job.id, skipped: sent.skipped }, "job failure notice not delivered");
+      return false;
+    }
+    return true;
+  } catch (err) {
+    logger.error({ err, job_id: job.id }, "job failure notice failed to post");
+    return false;
+  }
+}
+
+/**
+ * Record a worker-reported failure and tell the channel.
+ *
+ * The notice is what stops a dead job from looking like a job that was simply
+ * ignored: before it, the only user-visible effect of a failure was the typing
+ * indicator going away.
+ *
+ * The Discord post is NOT recorded in `result_discord_message_id` — that column
+ * means "the reply was delivered" and gates `failJob`. Idempotency comes from
+ * `failJob` instead: it only transitions a row that is still `claimed`, so a
+ * repeated /fail returns null and posts nothing.
+ */
+export async function failJobAsWorker(
   id: string,
   claimedBy: string,
   error: string,
   now?: number,
   expectedClaimedAt?: number,
-): { ok: boolean; status: number; job?: JobRow; error?: string } {
+  opts: { client?: DiscordReplyClient | Client; postReplies?: boolean } = {},
+): Promise<{ ok: boolean; status: number; job?: JobRow; error?: string; notified?: boolean }> {
   const job = failJob(id, claimedBy, error, now, expectedClaimedAt);
   if (!job) {
     const existing = getJob(id);
@@ -367,5 +419,6 @@ export function failJobAsWorker(
     return { ok: false, status: 409, error: "claimed-by-mismatch" };
   }
   stopJobTyping(id);
-  return { ok: true, status: 200, job };
+  const notified = await postJobFailureNotice(job, opts);
+  return { ok: true, status: 200, job, notified };
 }

@@ -4,6 +4,7 @@ import {
   buildJobData,
   buildJobPrompt,
   dispatchKey,
+  isTransientFailure,
   jobAccessScope,
   parseClaimedJob,
   type JobOutcome,
@@ -162,6 +163,7 @@ function makeHarness(opts: {
   maxKeys?: number;
   redactValues?: string[];
   runtimeOpts?: FakeRuntimeOpts;
+  maxRunAttempts?: number;
 } = {}): Harness {
   const runtime = makeFakeRuntime(opts.runtimeOpts);
   const requests: RecordedRequest[] = [];
@@ -208,6 +210,10 @@ function makeHarness(opts: {
     ...(opts.maxGlobalQueued != null ? { maxGlobalQueued: opts.maxGlobalQueued } : {}),
     ...(opts.maxKeys != null ? { maxKeys: opts.maxKeys } : {}),
     ...(opts.redactValues ? { redactValues: opts.redactValues } : {}),
+    ...(opts.maxRunAttempts != null ? { maxRunAttempts: opts.maxRunAttempts } : {}),
+    // Retry backoff is not what these tests are measuring; skip the timers.
+    retryBackoffMs: [0, 0],
+    sleep: async () => {},
     onJobSettled: (info) => {
       settled.push(info);
       for (const w of [...waiters]) {
@@ -1424,5 +1430,103 @@ describe("run settlement", () => {
     expect(body.reply).not.toContain(API_KEY);
     expect(body.reply).not.toContain(EBOARD_TOKEN);
     expect(body.reply).toContain("[redacted]");
+  });
+});
+
+describe("transient failures are retried inside the claim", () => {
+  test("isTransientFailure: upstream blips retry, our own terminal strings do not", () => {
+    // The 2026-09-07 incident string, verbatim off the failed job row.
+    expect(isTransientFailure("Authentication error If you are logged in, try logging out and back in.")).toBe(true);
+    expect(isTransientFailure("429 rate limit exceeded")).toBe(true);
+    expect(isTransientFailure("upstream returned 503")).toBe(true);
+    expect(isTransientFailure("fetch failed")).toBe(true);
+    expect(isTransientFailure("socket hang up")).toBe(true);
+    expect(isTransientFailure("connect ECONNRESET 10.0.0.1:443")).toBe(true);
+
+    // Default is permanent: an unrecognised error settles on the first attempt.
+    expect(isTransientFailure("model exploded")).toBe(false);
+    expect(isTransientFailure("run cancelled without a reply")).toBe(false);
+    expect(isTransientFailure("")).toBe(false);
+  });
+
+  test("a transient run error retries on a fresh agent and completes; no /fail is ever posted", async () => {
+    const h = makeHarness();
+    h.enqueue(payloadFor("j1"));
+    await waitFor(() => h.runtime.sends.length === 1, "first send");
+    h.runtime.sends[0]!.finish({
+      status: "error",
+      error: { message: "Authentication error If you are logged in, try logging out and back in." },
+    });
+
+    await waitFor(() => h.runtime.sends.length === 2, "retry send");
+    // The retry must not resume the conversation that just broke.
+    expect(h.runtime.calls.create).toBe(2);
+    expect(h.runtime.calls.resume).toEqual([]);
+    expect(h.runtime.sends[1]!.agentId).not.toBe(h.runtime.sends[0]!.agentId);
+
+    h.runtime.sends[1]!.finish({ status: "finished", result: "the answer" });
+    await h.waitSettled(1);
+
+    expect(h.settled[0]!).toMatchObject({ jobId: "j1", outcome: "completed-fallback" });
+    expect(h.requests.some((r) => r.url.endsWith("/fail"))).toBe(false);
+    // One claim only: the retry reuses the claim generation we already hold.
+    expect(h.requests.filter((r) => r.url.endsWith("/v1/jobs/j1/claim"))).toHaveLength(1);
+    const complete = h.requests.find((r) => r.url.endsWith("/v1/jobs/j1/complete"));
+    expect(JSON.parse(complete!.body!).claimed_at).toBe(CLAIMED_AT);
+  });
+
+  test("a non-transient run error still fails on the first attempt", async () => {
+    const h = makeHarness();
+    h.enqueue(payloadFor("j1"));
+    await waitFor(() => h.runtime.sends.length === 1, "send");
+    h.runtime.sends[0]!.finish({ status: "error", error: { message: "model exploded" } });
+    await h.waitSettled(1);
+
+    expect(h.settled[0]!.outcome).toBe("failed");
+    expect(h.runtime.sends).toHaveLength(1);
+    expect(h.requests.filter((r) => r.url.endsWith("/v1/jobs/j1/fail"))).toHaveLength(1);
+  });
+
+  test("a transient error that never clears fails terminally after maxRunAttempts", async () => {
+    const h = makeHarness({ maxRunAttempts: 3 });
+    h.enqueue(payloadFor("j1"));
+    for (const attempt of [1, 2, 3]) {
+      await waitFor(() => h.runtime.sends.length === attempt, `attempt ${attempt}`);
+      h.runtime.sends[attempt - 1]!.finish({ status: "error", error: { message: "503 service unavailable" } });
+    }
+    await h.waitSettled(1);
+
+    expect(h.settled[0]!.outcome).toBe("failed");
+    expect(h.runtime.sends).toHaveLength(3);
+    const fails = h.requests.filter((r) => r.url.endsWith("/v1/jobs/j1/fail"));
+    expect(fails).toHaveLength(1);
+    expect(JSON.parse(fails[0]!.body!)).toEqual({ error: "503 service unavailable", claimed_at: CLAIMED_AT });
+  });
+
+  test("maxRunAttempts: 1 disables retries entirely", async () => {
+    const h = makeHarness({ maxRunAttempts: 1 });
+    h.enqueue(payloadFor("j1"));
+    await waitFor(() => h.runtime.sends.length === 1, "send");
+    h.runtime.sends[0]!.finish({ status: "error", error: { message: "503 service unavailable" } });
+    await h.waitSettled(1);
+
+    expect(h.settled[0]!.outcome).toBe("failed");
+    expect(h.runtime.sends).toHaveLength(1);
+  });
+
+  test("a /complete delivery failure is never retried, even though its text carries a 5xx", async () => {
+    const h = makeHarness({
+      route: (url) => (url.endsWith("/complete") ? { status: 503, body: "{}" } : undefined),
+    });
+    h.enqueue(payloadFor("j1"));
+    await waitFor(() => h.runtime.sends.length === 1, "send");
+    h.runtime.sends[0]!.finish({ status: "finished", result: "an answer worth not regenerating" });
+    await h.waitSettled(1);
+
+    // Re-running would spend a second inference to rebuild a reply we already had.
+    expect(h.runtime.sends).toHaveLength(1);
+    expect(h.settled[0]!.outcome).toBe("failed");
+    const fail = h.requests.find((r) => r.url.endsWith("/v1/jobs/j1/fail"));
+    expect(JSON.parse(fail!.body!).error).toContain("reply delivery failed");
   });
 });

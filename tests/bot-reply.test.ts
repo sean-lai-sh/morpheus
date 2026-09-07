@@ -4,7 +4,9 @@ import {
   allowlistedGithubIssueUrl,
   completeJobWithReply,
   ephemeralSlashAckMessageId,
+  failJobAsWorker,
   isUnknownDiscordMessageError,
+  jobFailureNotice,
   postJobReply,
   shouldAnnounceInChannel,
   splitDiscordContent,
@@ -442,5 +444,142 @@ describe("completeJobWithReply github gate", () => {
       { postReplies: false, githubRepo: "sean-lai-sh/morpheus", githubWorkspaces: [EBOARD] },
     );
     expect(getJob(kept.id)?.github_issue_url).toBe(ISSUE);
+  });
+});
+
+describe("failJobAsWorker announces the failure", () => {
+  /** Captures every content string the bot would put in the channel. */
+  function stubClient(opts: { throws?: boolean } = {}): {
+    client: { channels: { fetch: (id: string) => Promise<unknown> } };
+    posted: string[];
+  } {
+    const posted: string[] = [];
+    const post = async (o: { content: string }) => {
+      if (opts.throws) throw new Error("discord is down");
+      posted.push(o.content);
+      return { id: `m${posted.length}` };
+    };
+    return {
+      posted,
+      client: {
+        channels: {
+          fetch: async () => ({
+            isTextBased: () => true,
+            messages: { fetch: async () => ({ reply: post }) },
+            send: post,
+          }),
+        },
+      },
+    };
+  }
+
+  function claimedJob(discordMessageId: string) {
+    const { job } = enqueueJob({
+      discordMessageId,
+      discordChannelId: SPONSORS,
+      discordThreadId: null,
+      authorId: "u1",
+      namespace: EBOARD,
+      content: "q",
+    });
+    claimJob(job.id, "w1");
+    return job;
+  }
+
+  test("a failed job says so in the channel instead of going quiet", async () => {
+    const job = claimedJob("f-notice");
+    const { client, posted } = stubClient();
+
+    const result = await failJobAsWorker(job.id, "w1", "503 service unavailable", undefined, undefined, {
+      client,
+      postReplies: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.notified).toBe(true);
+    expect(posted).toEqual([jobFailureNotice(job.id)]);
+    const row = getJob(job.id)!;
+    expect(row.status).toBe("failed");
+    expect(row.error).toBe("503 service unavailable");
+    // The notice is not a delivered reply, so the column that means that stays null.
+    expect(row.result_discord_message_id).toBeNull();
+  });
+
+  test("the notice never repeats the worker's error text", async () => {
+    const job = claimedJob("f-quiet");
+    const { client, posted } = stubClient();
+    const leaky = "Authentication error for bearer sk-live-should-never-surface";
+
+    await failJobAsWorker(job.id, "w1", leaky, undefined, undefined, { client, postReplies: true });
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).not.toContain("sk-live-should-never-surface");
+    expect(posted[0]).not.toContain("Authentication");
+    // It is still on the row for whoever is debugging.
+    expect(getJob(job.id)!.error).toBe(leaky);
+  });
+
+  test("a second /fail on the same job posts nothing more", async () => {
+    const job = claimedJob("f-twice");
+    const { client, posted } = stubClient();
+
+    const first = await failJobAsWorker(job.id, "w1", "boom", undefined, undefined, { client, postReplies: true });
+    const second = await failJobAsWorker(job.id, "w1", "boom", undefined, undefined, { client, postReplies: true });
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(false);
+    expect(posted).toHaveLength(1);
+  });
+
+  test("postReplies false posts nothing (the unit-test default)", async () => {
+    const job = claimedJob("f-silent");
+    const { client, posted } = stubClient();
+
+    const result = await failJobAsWorker(job.id, "w1", "boom", undefined, undefined, {
+      client,
+      postReplies: false,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.notified).toBe(false);
+    expect(posted).toEqual([]);
+  });
+
+  test("no Discord client: the job still fails, nothing is posted", async () => {
+    const job = claimedJob("f-noclient");
+
+    const result = await failJobAsWorker(job.id, "w1", "boom");
+
+    expect(result.ok).toBe(true);
+    expect(result.notified).toBe(false);
+    expect(getJob(job.id)!.status).toBe("failed");
+  });
+
+  test("coordinator outbox jobs stay quiet — the outbox sweeper retries those", async () => {
+    const job = claimedJob("coordinator-outbox:evt-1");
+    const { client, posted } = stubClient();
+
+    const result = await failJobAsWorker(job.id, "w1", "boom", undefined, undefined, {
+      client,
+      postReplies: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.notified).toBe(false);
+    expect(posted).toEqual([]);
+  });
+
+  test("a Discord outage does not turn a recorded failure into an error", async () => {
+    const job = claimedJob("f-discord-down");
+    const { client } = stubClient({ throws: true });
+
+    const result = await failJobAsWorker(job.id, "w1", "boom", undefined, undefined, {
+      client,
+      postReplies: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.notified).toBe(false);
+    expect(getJob(job.id)!.status).toBe("failed");
   });
 });
