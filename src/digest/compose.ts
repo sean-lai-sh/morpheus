@@ -8,9 +8,6 @@ import type { FeedPostInput } from "../notify/webhooks.ts";
  * self-bot. Callers (Mini runner) pass the result to postFeed / formatFeedContent.
  *
  * Unknown routing stays in #inbox — never #sponsors / #opportunities / #speakers.
- *
- * Copied from PR #77 (`cursor/digest-compose-tests-4a34`) so this runner does
- * not ship a parallel format path. Keep in sync if #77 lands first.
  */
 
 export interface DigestHit {
