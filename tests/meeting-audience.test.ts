@@ -7,15 +7,23 @@ import {
   extractRoleSnowflakes,
   formatUnmappedInviteRefusal,
   MEET_REVIEW_EMPTY,
+  MEET_ROSTER_UNSEEDED,
   meetingAudienceFromSelections,
   meetReviewBlocker,
   pickedUsersFromSelect,
+  unmappedPickRefusal,
   resolveMeetingInvitees,
 } from "../src/coordinator/audience.ts";
 import { EBOARD_ROLE_ID } from "../src/coordinator/roster-map.ts";
 import { buildCalendarJobPack, serializeCalendarJobPack } from "../src/coordinator/calendar-job.ts";
 import { createScheduledMeeting, getMeeting, getMeetingParticipants } from "../src/storage/coordinator-meetings.ts";
-import { applyRosterSeedResult, getRosterBinding } from "../src/storage/roster-map.ts";
+import {
+  applyRosterSeedResult,
+  countSeededRosterBindings,
+  getRosterBinding,
+  listAllRosterBindings,
+  upsertManualRosterBindings,
+} from "../src/storage/roster-map.ts";
 import { getDb } from "../src/storage/db.ts";
 import { withTempDb } from "./helpers.ts";
 
@@ -273,6 +281,51 @@ describe("meeting audience", () => {
       }),
     ).toBeNull();
     expect(meetReviewBlocker(null)).toBe(MEET_REVIEW_EMPTY);
+  });
+
+  test("an unseeded roster map is reported as such, not blamed on the picks", () => {
+    const unmapped = [{ displayName: "helenn" }, { displayName: "shaszis" }];
+    // Every pick is unmapped when the map is empty, so naming the people tells
+    // the organizer to fix something that is not theirs to fix.
+    expect(unmappedPickRefusal(unmapped, 0)).toBe(MEET_ROSTER_UNSEEDED);
+    expect(unmappedPickRefusal(unmapped, 0)).toContain("/meet seed");
+    expect(unmappedPickRefusal(unmapped, 0)).not.toContain("helenn");
+    expect(unmappedPickRefusal(unmapped, 4)).toContain("helenn, shaszis");
+    expect(unmappedPickRefusal(unmapped)).toContain("helenn, shaszis");
+
+    const audience = { audienceKind: "picked" as const, participants: [], unmapped };
+    expect(meetReviewBlocker(audience, 0)).toBe(MEET_ROSTER_UNSEEDED);
+    expect(meetReviewBlocker(audience, 4)).toContain("helenn, shaszis");
+    // Nothing picked at all is still "pick someone", seeded or not.
+    expect(meetReviewBlocker({ audienceKind: "picked", participants: [] }, 0)).toBe(
+      MEET_REVIEW_EMPTY,
+    );
+  });
+
+  test("@Eboard cannot stand in for an unseeded map", () => {
+    const roster = { audienceKind: "f26_roster" as const, participants: [] };
+    // Otherwise Confirm books a real event with an empty guest list and still
+    // says "the Calendar invite is on its way".
+    expect(meetReviewBlocker(roster, 0)).toBe(MEET_ROSTER_UNSEEDED);
+    expect(meetReviewBlocker(roster, 12)).toBeNull();
+    expect(meetReviewBlocker(roster)).toBeNull();
+  });
+
+  test("countSeededRosterBindings ignores the manual bindings migrate always inserts", () => {
+    getDb().exec("DELETE FROM roster_bindings");
+    upsertManualRosterBindings(getDb());
+    // A raw COUNT(*) is 4 here, which is why it can never answer "has a seed
+    // ever run" -- every migrate re-inserts MANUAL_ROSTER_BINDINGS.
+    expect(listAllRosterBindings().length).toBeGreaterThan(0);
+    expect(countSeededRosterBindings()).toBe(0);
+
+    applyRosterSeedResult({
+      mappings: [
+        { discord_id: "11", email: "sean@nyu.edu", name: "Sean", disc: "sean", confidence: "disc" },
+      ],
+      prune: false,
+    });
+    expect(countSeededRosterBindings()).toBe(1);
   });
 
   test("picked meeting still requires an attendee", () => {

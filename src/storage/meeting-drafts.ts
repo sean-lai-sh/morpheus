@@ -66,13 +66,7 @@ interface MeetingDraftDbRow {
   expires_at: number;
 }
 
-/**
- * Defensive parse, in the spirit of `outbox.ts` `parsePayload`: a draft whose
- * `audience_json` is malformed, hand-edited, or written by an older shape must
- * read back as `audience: null` rather than throwing in the middle of an
- * interaction handler. A half-valid object yields null too -- a partially
- * understood audience is worse than none, because the caller would book it.
- */
+/** One `{ userId, displayName }` array, or null if any entry is not that shape. */
 function parseParticipantList(raw: unknown): MeetingDraftParticipant[] | null {
   if (!Array.isArray(raw)) return null;
   const out: MeetingDraftParticipant[] = [];
@@ -85,6 +79,18 @@ function parseParticipantList(raw: unknown): MeetingDraftParticipant[] | null {
   return out;
 }
 
+/**
+ * Defensive parse, in the spirit of `outbox.ts` `parsePayload`: a draft whose
+ * `audience_json` is malformed, hand-edited, or written by an older shape must
+ * read back as `audience: null` rather than throwing in the middle of an
+ * interaction handler. A half-valid object yields null too -- a partially
+ * understood audience is worse than none, because the caller would book it.
+ *
+ * `unmapped` is optional (drafts written before it existed have no key), but a
+ * key that is *present* and malformed still fails the whole audience: it is the
+ * record of who was refused, and silently dropping it lets Confirm claim a
+ * clean guest list.
+ */
 function parseAudience(raw: string | null): MeetingDraftAudience | null {
   if (raw === null) return null;
   try {
@@ -95,8 +101,10 @@ function parseAudience(raw: string | null): MeetingDraftAudience | null {
     if (kind !== "picked" && kind !== "f26_roster") return null;
     const participants = parseParticipantList(obj.participants);
     if (!participants) return null;
+    if (obj.unmapped === undefined) return { audienceKind: kind, participants };
     const unmapped = parseParticipantList(obj.unmapped);
-    return { audienceKind: kind, participants, ...(unmapped && unmapped.length > 0 ? { unmapped } : {}) };
+    if (!unmapped) return null;
+    return { audienceKind: kind, participants, ...(unmapped.length > 0 ? { unmapped } : {}) };
   } catch {
     return null;
   }
